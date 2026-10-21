@@ -25,8 +25,11 @@ public final class BenchConfig {
     public double recentFraction = 0.01;
     /** {@code read_old} reads the table as it was this many batches earlier. */
     public int travelBack = 10;
-    /** The reader models every probe runs under (see {@link org.rmow.bench.arms.Reader}). */
-    public List<ReaderSpec> readers = List.of(ReaderSpec.stock(), ReaderSpec.cached());
+    /**
+     * The reader models every probe runs under (see {@link org.rmow.bench.arms.Reader}); the
+     * first is the primary one.
+     */
+    public List<ReaderSpec> readers = List.of(ReaderSpec.oneFooter(), ReaderSpec.stock());
   }
 
   /** A reader model, by name. */
@@ -41,15 +44,22 @@ public final class BenchConfig {
     /** Run a read's scan tasks on this many threads. */
     public int parallelism = 1;
 
-    /** Stock Iceberg: a footer read (two requests) for every split, one split per row group. */
+    /**
+     * Stock Iceberg readers today: one split per row group, each re-reading the file's footer
+     * (two requests, as parquet-java reads it).
+     */
     public static ReaderSpec stock() {
       return new ReaderSpec();
     }
 
-    /** One footer read per file per read, prefetching 64 KiB, as Arrow and DuckDB read footers. */
-    public static ReaderSpec cached() {
+    /**
+     * The primary model: a read opens each file at one version and reads that version's one
+     * footer once, in one request (a 64 KiB tail prefetch, as Arrow and DuckDB read footers),
+     * then only the row groups it needs.
+     */
+    public static ReaderSpec oneFooter() {
       ReaderSpec r = new ReaderSpec();
-      r.name = "cached";
+      r.name = "one-footer";
       r.footerCache = true;
       r.footerPrefetchBytes = 64 << 10;
       return r;

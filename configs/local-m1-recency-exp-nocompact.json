@@ -38,10 +38,7 @@
     "tailcow-c",
     "rmow-a",
     "rmow-b",
-    "rmow-c",
-    "rmow-a-dv",
-    "rmow-b-dv",
-    "rmow-c-dv"
+    "rmow-c"
   ],
   "reads": {
     "every": 10,

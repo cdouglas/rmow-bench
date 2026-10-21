@@ -69,8 +69,8 @@ class RunnerSmokeTest {
   @Test
   void memStoreRecencySkew(@TempDir Path dir) throws IOException {
     BenchConfig cfg = config("mem", dir);
-    // a parallel reader of small split tasks, with the footer cache, beside the stock reader
-    BenchConfig.ReaderSpec parallel = BenchConfig.ReaderSpec.cached();
+    // a parallel one-footer reader of small split tasks, beside the stock reader
+    BenchConfig.ReaderSpec parallel = BenchConfig.ReaderSpec.oneFooter();
     parallel.name = "parallel";
     parallel.parallelism = 4;
     parallel.splitTargetBytes = 256 << 10;

@@ -2,14 +2,14 @@
 """Plots one run's steps.jsonl and writes a table twin of every figure.
 
 Figures (PNG, light surface) and summary.md go to <run dir>/plots/:
-  write.png, space.png              one representative arm per family (MoR-v3, TailCoW-C,
-                                    RMoW-C, RMoW-C-dv)
-  reads-<reader>.png                the same arms' reads, per reader model (stock, cached)
+  write.png, space.png              the headline arms (MoR-v3, TailCoW-C, RMoW-B, RMoW-C)
+  reads-<reader>.png                the same arms' reads, per reader model (one-footer, the
+                                    primary one, and stock)
   detail-write.png, detail-reads-<reader>.png  every arm
   summary.md the same numbers as tables, every arm (the accessible twin of the figures)
 
-Encoding: hue is the arm's family (MoR, Iceberg copy-on-write, RMoW, RMoW with DVs on sealed
-row groups), marker shape the variant within it; every line is direct-labeled at its end and
+Encoding: hue is the arm's family (MoR, Iceberg copy-on-write, RMoW, and the RMoW-dv ablation
+when it ran), marker shape the variant within it; every line is direct-labeled at its end and
 listed in the legend. Local and in-memory runs: requests and bytes are exact and reproducible;
 wall time is not reported.
 
@@ -23,6 +23,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
+import matplotlib.ticker  # noqa: E402
 import pandas as pd  # noqa: E402
 
 # Reference palette: the first four categorical slots, in order (validated adjacent pairs,
@@ -42,7 +43,7 @@ ARMS = {  # arm -> (family, marker, label)
     "rmow-b-dv": ("rmowdv", "s", "RMoW-B-dv"),
     "rmow-c-dv": ("rmowdv", "^", "RMoW-C-dv"),
 }
-HEADLINE = ["mor-v3", "tailcow-c", "rmow-c", "rmow-c-dv"]
+HEADLINE = ["mor-v3", "tailcow-c", "rmow-b", "rmow-c"]
 INK, INK2, MUTED = "#0b0b0b", "#52514e", "#898781"
 SURFACE, GRID, AXIS = "#fcfcfb", "#e1e0d9", "#c3c2b7"
 
@@ -75,23 +76,46 @@ def arms_in(df, only=None):
 
 
 def line_panel(ax, df, metric, title, ylabel, log=False, only=None):
-    """One metric against step, one line per arm, labeled at its end."""
+    """One metric against step, one line per arm, labeled at its end (labels kept apart)."""
+    ends = []
     for arm in arms_in(df, only):
         fam, marker, label = ARMS[arm]
         d = df[df.arm == arm].sort_values("step")
         if d.empty:
             continue
-        every = max(1, len(d) // 6)
+        every = max(1, len(d) // 12)
         ax.plot(d.step, d[metric], color=FAMILY[fam], lw=2, marker=marker, ms=5,
                 markevery=every, markeredgecolor=SURFACE, markeredgewidth=1, label=label)
-        ax.annotate(label, (d.step.iloc[-1], d[metric].iloc[-1]), xytext=(4, 0),
-                    textcoords="offset points", va="center", fontsize=7, color=INK2)
+        ends.append((d.step.iloc[-1], d[metric].iloc[-1], label))
     ax.set_title(title, loc="left")
     ax.set_xlabel("batch")
     ax.set_ylabel(ylabel)
     if log:
         ax.set_yscale("log")
+        ax.yaxis.set_major_locator(matplotlib.ticker.LogLocator(subs=(1, 2, 5)))
+        ax.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:g}"))
+        ax.yaxis.set_minor_formatter(matplotlib.ticker.NullFormatter())
     ax.margins(x=0.12)
+    label_ends(ax, ends)
+
+
+def label_ends(ax, ends, gap_pt=9):
+    """Direct labels at line ends, nudged vertically so that no two overlap."""
+    if not ends:
+        return
+    ax.figure.canvas.draw()  # fix the axis limits and transforms
+    to_px = ax.transData.transform
+    pts = sorted(((to_px((x, y))[1], x, y, label) for x, y, label in ends), key=lambda e: e[0])
+    gap = gap_pt * ax.figure.dpi / 72
+    placed = []
+    for py, x, y, label in pts:
+        if placed and py - placed[-1][0] < gap:
+            py = placed[-1][0] + gap
+        placed.append((py, x, y, label))
+    for py, x, y, label in placed:
+        dy = (py - to_px((x, y))[1]) * 72 / ax.figure.dpi
+        ax.annotate(label, (x, y), xytext=(4, dy), textcoords="offset points", va="center",
+                    fontsize=7, color=INK2)
 
 
 def markdown(table):
@@ -148,7 +172,7 @@ def main(argv):
             fig, axes = plt.subplots(1, 3, figsize=(15, 4))
             line_panel(axes[0], f, "gets", "read_full: GET requests", "GETs", True, only)
             line_panel(axes[1], f, "mb_read", "read_full: bytes read", "MB", False, only)
-            line_panel(axes[2], r, "gets", "read_recent: GET requests", "GETs", True, only)
+            line_panel(axes[2], r, "gets", "read_recent: GET requests", "GETs", False, only)
             axes[2].legend(loc="upper left", bbox_to_anchor=(1.18, 1), fontsize=8)
             fig.suptitle(
                 f"{label}: reads of the current table, {reader} reader",

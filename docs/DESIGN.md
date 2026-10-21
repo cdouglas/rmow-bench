@@ -72,7 +72,10 @@ Four further points hold for these readers:
    - A file should therefore roll over at around 100 row groups, or merge its small row groups
      (tiered tails).
 
-## Deletion vectors on an appendable file
+## Deletion vectors on an appendable file (an ablation)
+
+This section is outside the design's goal, under which readers apply no deletes. The `-dv` arms
+exist only to measure what region rewrites cost against deleting by DV.
 
 A DV names positions in a data file. Positions here are the running row count in footer order,
 so a DV stays valid across versions only while every row group before the deleted rows keeps its
@@ -103,8 +106,12 @@ disjoint, and the footers' statistics place each row exactly.
     them by their statistics.
   - Readers that read each footer once per query avoid both costs. That covers engines with a
     footer cache, or that read footers while planning, such as DuckDB.
-  - The benchmark probes every table state with both reader models (`reads.readers`: `stock` and
-    `cached`), so this effect is measured rather than assumed.
+  - This is a property of today's readers, not of the format: a version is summarized in exactly
+    one footer.
+  - The benchmark's primary reader model (`one-footer`) reads that footer once per file per read,
+    then only the row groups it needs. With 15 live row groups in 2 objects, it takes 19 GETs
+    against stock Iceberg's 45 (`ReaderModelTest` pins the counts).
+  - Stock Iceberg is still measured, as the `stock` reader.
 
 - **Footer reads.** Stock parquet-java reads a footer with two requests: the 8-byte tail, then the
   footer. Files up to 1 MiB are fetched whole in one request.

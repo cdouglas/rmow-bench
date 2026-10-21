@@ -133,9 +133,10 @@ final class Scans {
 
   /**
    * Reads the files as an engine would: each is planned into split tasks as Iceberg plans them
-   * ({@code FileScanTask.split} on the file's split offsets, at the configured target size),
-   * and the tasks run on the read pool, or one after another without one. Every task opens its
-   * file and reads its footer, as Iceberg's readers do.
+   * ({@code FileScanTask.split}: one per row group, on the file's split offsets), and the tasks
+   * run on the read pool, or one after another without one. A {@code footerCache} reader reads
+   * each file version's one footer once and shares it with the file's splits; a stock reader's
+   * splits each open the file and read the footer, as Iceberg's readers do today.
    */
   static TableHash readAll(ArmContext ctx, Reader reader, List<ReadFile> files, Expression filter)
       throws IOException {
@@ -145,20 +146,26 @@ final class Scans {
           new BaseFileScanTask(
               f.file(), f.deletes(), SCHEMA_JSON, SPEC_JSON, ResidualEvaluator.unpartitioned(filter));
       List<FileScanTask> splits = new ArrayList<>();
-      task.split(reader.splitTargetBytes()).forEach(splits::add);
-      // with a footer cache, the file's footer is fetched once for all its splits; files up to
-      // 1 MiB are fetched whole by each split anyway (Iceberg's eager read), so they skip it
-      byte[] tail =
-          reader.footerCache() && splits.size() > 1 && f.file().fileSizeInBytes() > EAGER_BYTES
-              ? readTail(ctx, reader, f.file().location(), f.file().fileSizeInBytes())
-              : null;
+      byte[] tail = null;
+      if (reader.footerCache() && f.file().fileSizeInBytes() <= EAGER_BYTES) {
+        // one fetch of the whole version (Iceberg reads files up to 1 MiB whole), not one per
+        // split
+        splits.add(task);
+      } else {
+        task.split(reader.splitTargetBytes()).forEach(splits::add);
+        if (reader.footerCache() && splits.size() > 1) {
+          // the version's one footer, read once and shared by every split of the file
+          tail = readTail(ctx, reader, f.file().location(), f.file().fileSizeInBytes());
+        }
+      }
+      byte[] footer = tail;
       for (FileScanTask split : splits) {
         long start = split.start();
         long length = split.length();
         tasks.add(
             () -> {
               TableHash h = new TableHash();
-              scan(ctx, reader, f.file(), f.deletes(), Rows.SCHEMA, filter, tail, start, length,
+              scan(ctx, reader, f.file(), f.deletes(), Rows.SCHEMA, filter, footer, start, length,
                   r -> h.add(r, ctx.verifyRows()));
               return h;
             });

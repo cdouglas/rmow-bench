@@ -11,6 +11,10 @@ the object's prefix up to that version's footer, so old versions stay readable. 
 already read every version (see [Compatibility](#compatibility)): they find the footer from the
 length they are given, and every Parquet offset is absolute.
 
+RMoW is a partial merge-on-write, applied only to the regions a batch affects. The writer pays
+more. In return, a reader reads one version of each file, summarized in exactly one footer, and
+applies no deletes and merges nothing.
+
 MoR writes a new data file per batch for inserts and the new versions of updated rows. It marks
 the replaced and deleted rows with position-delete files (Iceberg v2) or deletion vectors in Puffin
 files (v3).
@@ -104,7 +108,7 @@ Each rule guards against a bias found in Iceberg's code:
 | `cow` | a new data file per batch | every touched data file is rewritten whole |
 | `tailcow-b`, `tailcow-c` | merged into open tail *data files* by policy B or C | DVs, except in tail files being merged |
 | `rmow-a`, `rmow-b`, `rmow-c` | appended to the tail object as a row group, merged with open tail *row groups* by policy A, B or C | every touched row group is rewritten as a region of its own object (row-group copy-on-write) |
-| `rmow-a-dv`, `rmow-b-dv`, `rmow-c-dv` | the same | DVs on each object's stable prefix (the row groups no tail merge will touch), with updated versions in the tail; open tail row groups are rewritten as above |
+| `rmow-a-dv`, `rmow-b-dv`, `rmow-c-dv` (an ablation, not in the default matrix) | the same | DVs on each object's stable prefix (the row groups no tail merge will touch), with updated versions in the tail; open tail row groups are rewritten as above |
 
 The tail policies (`TailPolicy`) are:
 - **A:** never merge.
@@ -114,6 +118,8 @@ The tail policies (`TailPolicy`) are:
 RMoW against TailCoW therefore isolates the layout, a single appendable object against separate
 data files. TailCoW against MoR-v3 isolates the tail-merge policy.
 
+The `-dv` arms are outside the goal, because their readers apply deletion vectors. They are kept
+only as an ablation: they measure what RMoW's region rewrites cost compared with deleting by DV.
 `rmow-a-dv` is MoR-v3's update handling inside one appendable object. See
 [docs/DESIGN.md](docs/DESIGN.md) for why a DV stays valid on the stable prefix.
 
@@ -131,7 +137,7 @@ data files. TailCoW against MoR-v3 isolates the tail-merge policy.
 | `writerCachesFooters` | Writers keep the footers they wrote. This affects RMoW's reads of touched row groups and its footer statistics. |
 | `footerPrefetchBytes` | Every reader prefetches this tail on its first footer probe, so a footer costs 1 request instead of 2. 0 means stock parquet-java. |
 | `locate` | `oracle` (the default) takes row positions from an in-memory index, at no cost. `scan` finds them the way a MERGE would, in a timed `locate` phase checked against the index. MoR scans `id` and `_pos` of every file whose `id` bounds may hold a target; RMoW looks the ids up in its footers' row-group statistics. |
-| `reads.readers` | The reader models every probe runs under, on the same table state. `stock` is stock Iceberg: one split per row group (`FileScanTask.split`), each split opening its file and reading the footer with two requests. `cached` reads each file's footer once per read, prefetching 64 KiB. Each model also sets `splitTargetBytes` and `parallelism`, the threads a read's split tasks run on. |
+| `reads.readers` | The reader models every probe runs under, on the same table state. The first is primary. `one-footer` (the default) opens each file at one version and reads that version's one footer once, in one request (a 64 KiB prefetch), then only the row groups it needs. `stock` is stock Iceberg today: one split per row group (`FileScanTask.split`), each split re-reading the footer with two requests. Each model also sets `splitTargetBytes` and `parallelism`, the threads a read's split tasks run on. |
 | `compactEvery` | Compact every this many batches (0 means never). MoR-family arms bin-pack small files and files whose delete ratio is at least `compactDeleteRatio`. RMoW rewrites objects whose dead-byte ratio is at least `compactGarbageRatio`, or that hold `compactSmallRowGroups` small row groups. |
 
 ## Layout of the code
