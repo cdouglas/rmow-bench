@@ -177,7 +177,7 @@ only as an ablation: they measure what RMoW's region rewrites cost compared with
 | Knob | Meaning |
 |---|---|
 | `codec` | The Parquet codec. The default is zstd. |
-| `rowGroupBytes` | The row-group target of data files and the initial load, as Parquet counts it (buffered bytes), so row groups are smaller on disk: about a third of a 1 MiB target for this schema. RMoW compaction packs to this many compressed bytes. |
+| `rowGroupBytes` | The row-group target of data files and the initial load, as Parquet counts it (buffered bytes), so row groups are smaller on disk: about a third of a 1 MiB target for this schema, three quarters of a 4 MiB one. RMoW compaction packs row groups up to the size the writer's come out at on disk. |
 | `targetFileBytes` | The size at which data files, and an appendable file's live bytes, roll over. |
 | `sortWrites` | Sort every write by `ts`. |
 | `tailSealBytes` | The compressed size at which an open tail unit is sealed (policies B and C). An RMoW unit is a row group of inserts; a TailCoW unit is a batch's data file, updated versions included. |
@@ -188,7 +188,7 @@ only as an ablation: they measure what RMoW's region rewrites cost compared with
 | `footerPrefetchBytes` | Every reader prefetches this tail on its first footer probe, so a footer costs 1 request instead of 2. 0 means stock parquet-java. |
 | `locate` | `oracle` (the default) takes row positions from an in-memory index, at no cost. `scan` finds them the way a MERGE would, in a timed `locate` phase checked against the index. MoR scans `id` and `_pos` of every file whose `id` bounds may hold a target; RMoW looks the ids up in its footers' row-group statistics. |
 | `reads.readers` | The reader models every probe runs under, on the same table state. The first is primary. `one-footer` (the default) opens each file at one version and reads that version's one footer once, in one request (a 64 KiB prefetch), then only the row groups it needs. `stock` is stock Iceberg today: one split per row group (`FileScanTask.split`), each split re-reading the footer with two requests. Each model also sets `splitTargetBytes` and `parallelism`, the threads a read's split tasks run on. |
-| `compactEvery` | Compact every this many batches (0 means never). MoR-family arms bin-pack small files and files whose delete ratio is at least `compactDeleteRatio`. RMoW rewrites objects whose dead-byte ratio is at least `compactGarbageRatio`, or that hold `compactSmallRowGroups` small row groups. |
+| `compactEvery` | Check the compaction triggers every this many batches (0 means never). MoR-family arms bin-pack files smaller than `compactSmallFileFraction` of the target and files whose delete ratio is at least `compactDeleteRatio`, as Iceberg's `RewriteDataFiles` does. RMoW triggers on space and on reads separately: it rewrites an appendable file, or moves the live row groups out of a split file's objects, whose dead bytes are at least `compactGarbageRatio` of their length; and it packs small sealed row groups once a file holds `compactSmallRowGroups` of them ([docs/DESIGN.md](docs/DESIGN.md#compaction)). When to compact is an outcome: see `analysis/compaction.py`. |
 
 ## Layout of the code
 
@@ -201,7 +201,7 @@ only as an ablation: they measure what RMoW's region rewrites cost compared with
 | `append` | `RegionAppender`, and `S3Appenders` (S3 Express at a write offset; emulated). |
 | `bench` | `Runner`, `Phases`, `Store` (mem, local or S3) and `Main`; `arms.VersionDump` and `rmow.VersionDigest` dump every version for the interop check. |
 | `micro` | JMH micro-benchmarks (`FooterBench`). |
-| `analysis/` | `interop_check.py` (pyarrow and DuckDB), `summary.py`, `plots.py` (figures and a table twin of each), `sweep.py` (runs that differ in row-group size), and `compare_runs.py` (exact repeatability). |
+| `analysis/` | `interop_check.py` (pyarrow and DuckDB), `summary.py`, `plots.py` (figures and a table twin of each), `sweep.py` (runs that differ in row-group size), `layouts.py` (appendable against split files), `compaction.py` (runs that differ in compaction policy: each arm's cheapest policy per read rate and price model), and `compare_runs.py` (exact repeatability). |
 
 ## Compatibility
 
@@ -243,5 +243,8 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
 - **Done locally:** RMoW on split files, an object per version instead of appends, against
   appendable files
   ([docs/measurements/split-vs-append-2026-10-21.md](docs/measurements/split-vs-append-2026-10-21.md)).
+- **Done locally:** when to compact, as an outcome. Eleven compaction policies were run, and each
+  arm's cheapest one was found per store, read rate and storage weight
+  ([docs/measurements/compaction-sweep-2026-10-21.md](docs/measurements/compaction-sweep-2026-10-21.md)).
 - **Next:** S3 Express (M3), starting with `configs/s3x-calibration.json`, which needs credentials,
   a directory bucket and an instance in its zone. Split files can also run on standard S3.

@@ -299,6 +299,20 @@ public final class SplitFile implements LogicalFile {
     return objectLengths.values().stream().mapToLong(Long::longValue).sum();
   }
 
+  /** The object the current version's row group {@code rgId} lives in. */
+  public String objectOf(long rgId) {
+    String object = objectOfRg.get(rgId);
+    if (object == null) {
+      throw new IllegalArgumentException("Row group " + rgId + " is not live in " + location());
+    }
+    return object;
+  }
+
+  /** The length of an object this file wrote or adopted. */
+  public long objectLength(String object) {
+    return objectLengths.get(object);
+  }
+
   @Override
   public int usedObjects() {
     Set<String> used = new HashSet<>(objectOfRg.values());

@@ -203,7 +203,8 @@ The state records split stored bytes three ways:
 - **garbage:** replaced row groups inside objects still in use. Only a rewrite frees them, as in an
   appendable object.
 
-Compaction triggers on garbage alone.
+Compaction moves the live row groups out of objects whose own garbage passes a threshold, so
+they become reclaimable too ([Compaction](#compaction)).
 
 Iceberg cannot run this GC as it stands. A manifest entry names the footer object only, and the
 region objects are referenced from inside the footer, where Iceberg does not look:
@@ -213,6 +214,37 @@ region objects are referenced from inside the footer, where Iceberg does not loo
 An Iceberg-like implementation must list a data file's region objects in its metadata, as Iceberg
 lists delete files. Likewise a split file has no byte split offsets, because its row groups are in
 other objects, so planning is per object.
+
+## Compaction
+
+Compaction is maintenance, so when to run it is a result, not an input: the benchmark runs each
+arm under a range of policies, and `analysis/compaction.py` picks each arm's cheapest one for a
+read rate and a price model (H6 in [HYPOTHESES.md](HYPOTHESES.md)). A policy is a check period
+(`compactEvery`) and thresholds. RMoW compaction has one trigger and one action per goal:
+
+- **Space.**
+  - An appendable file whose garbage reaches `compactGarbageRatio` of its length is rewritten into
+    a new object, which holds its live row groups.
+  - A split file is handled per object instead. Each object whose dead bytes reach
+    `compactGarbageRatio` of its length has its live row groups moved, unchanged, into the next
+    version's region object. Once the versions that used the object expire, it is deleted. Moving
+    costs the object's live bytes, not the whole file's.
+  - Objects holding a row group the tail policy keeps open are left alone, as its merges rewrite
+    them soon.
+- **Reads.** A file holding `compactSmallRowGroups` sealed row groups under half the writer's
+  row-group size has each run of them that is adjacent in id order packed into row groups of up
+  to that size. The packing is an ordinary version: an append, or a new region object. In an
+  appendable file the packed row groups become garbage, which the space trigger then counts.
+- **Row-group size.** Rewrites and packing stop at the size of the writer's own row groups on disk:
+  the largest row group of the initial load, 3.1 MB for a 4 MiB target with this schema (Parquet's
+  target counts buffered bytes). Until 2026-10-21 a rewrite packed row groups until one passed
+  `rowGroupBytes` compressed. That made them about twice the writer's size, and it, not the
+  layout, gave compacted appendable files their read advantage in
+  [split-vs-append-2026-10-21.md](measurements/split-vs-append-2026-10-21.md).
+
+A file's moves and packing make one new version. In the `-dv` arms either trigger rewrites the
+file, because moving rows would move the positions its DV deletes. The MoR family keeps Iceberg's
+`RewriteDataFiles` bin-packing, with its thresholds.
 
 ## Deletion vectors on an appendable file (an ablation)
 

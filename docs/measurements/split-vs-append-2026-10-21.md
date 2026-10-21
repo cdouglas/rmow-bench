@@ -13,6 +13,11 @@ per-batch means over the 60 batches, and reads at the last probe under the one-f
 **Kept** is what remains once every older version expires (stored minus reclaimable bytes).
 Tables from `analysis/layouts.py`, which decides H5 (docs/HYPOTHESES.md).
 
+Compaction here is the code at commit aac3bdf. Since then compaction moves row groups out of a
+split file's mostly dead objects, and packs row groups no further than the writer's size
+([DESIGN.md](../DESIGN.md#compaction)). The [compaction sweep](compaction-sweep-2026-10-21.md)
+supersedes the compaction numbers below.
+
 ## Recency-skewed updates, no compaction
 
 | arm | write MB/batch | requests/batch | full read GETs | full read MB | old read GETs | stored/live | kept/live | objects | live objects | footer KB |
@@ -68,11 +73,19 @@ batch); the split arms needed no rewrite.
   replaced region: 7.8–8.3× the live bytes at batch 60, growing linearly. Once older versions
   expire, a split file keeps 1.4–1.5×, flat from the first batches. What remains is replaced row
   groups inside objects still in use, chiefly the large initial file.
-- **Compaction becomes optional.** With compaction every 10 batches, the appendable arms
-  compacted 6 times each (95 MB, 1.6 MB per batch) to reach 1.69× kept. The split arms never
-  reached the garbage trigger: they kept 1.41–1.52× with no rewrite, and wrote 30–32% fewer bytes
-  per batch, compaction included (5.55 against 7.98 MB for B, 5.17 against 7.60 for C). Appendable files read with fewer GETs after compaction (10–11 against 17–19), because
-  compaction packs their row groups, not because of the layout.
+- **Split files never reached this compaction trigger.** With compaction every 10 batches, the
+  appendable arms compacted 6 times each (95 MB, 1.6 MB per batch) to reach 1.69× kept. The split
+  arms never reached the trigger, which was then a file's garbage at half its retained bytes. They
+  kept 1.41–1.52× with no rewrite, and wrote 30–32% fewer bytes per batch, compaction included
+  (5.55 against 7.98 MB for B, 5.17 against 7.60 for C).
+  - This holds for one threshold only. It does not show that split files need no compaction:
+    1.41× kept is 29% garbage, which a threshold of 0.25 would compact.
+  - Some region objects were over half dead (one at 63%) while their file as a whole was not.
+  - Whether compacting pays is a question of cost, which the
+    [compaction sweep](compaction-sweep-2026-10-21.md) answers (H6).
+  - Appendable files read with fewer GETs after compaction (10–11 against 17–19). The cause was
+    the rewrite packing row groups to about twice the writer's size, which compaction no longer
+    does ([DESIGN.md](../DESIGN.md#compaction)), not the layout.
 - **Objects.** A split file adds one or two objects per version, so 156 objects were stored by
   batch 60, against 2 appendable objects (MoR-v3: 121). The current version reads from 8–11 of
   them, against 2.

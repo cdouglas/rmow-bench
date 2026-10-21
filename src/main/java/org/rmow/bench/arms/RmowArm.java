@@ -96,6 +96,7 @@ public final class RmowArm implements Arm {
   private final long[] rgOfId; // -1: absent or deleted
   private final int[] posInRg; // a row's position within its row group
   private double bytesPerRow = 40; // running estimate, for planning merges
+  private long packBytes; // compaction's row-group target: a full row group of the initial load
 
   public RmowArm(ArmContext ctx, TailPolicy.Kind kind, boolean dvSealed) {
     this(ctx, kind, dvSealed, false);
@@ -117,6 +118,7 @@ public final class RmowArm implements Arm {
           default ->
               throw new IllegalArgumentException("Unknown footer order: " + ctx.layout().footerOrder);
         };
+    this.packBytes = ctx.layout().rowGroupBytes;
     this.rgOfId = new long[(int) ctx.log().totalIds()];
     this.posInRg = new int[(int) ctx.log().totalIds()];
     Arrays.fill(rgOfId, -1);
@@ -127,8 +129,14 @@ public final class RmowArm implements Arm {
     return ctx.name();
   }
 
+  /**
+   * Adopts the initial files. Compaction packs row groups up to the on-disk size of the writer's
+   * own: the largest row group of an initial file that has several (the writer's target counts
+   * buffered bytes, so it is not the size on disk).
+   */
   @Override
   public void load(List<InitialLoad.InitialFile> initial) throws IOException {
+    long largest = 0;
     for (InitialLoad.InitialFile f : initial) {
       LogicalFile file =
           split
@@ -140,6 +148,9 @@ public final class RmowArm implements Arm {
       List<RowGroup> rgs = file.footer().getRow_groups();
       List<Long> rgIds = file.rgIds();
       for (int i = 0; i < rgs.size(); i++) {
+        if (rgs.size() > 1) {
+          largest = Math.max(largest, FooterCodec.compressedSize(rgs.get(i)));
+        }
         fileOfRg.put(rgIds.get(i), k);
         for (int j = 0; j < rgs.get(i).getNum_rows(); j++, id++) {
           rgOfId[(int) id] = rgIds.get(i);
@@ -147,6 +158,9 @@ public final class RmowArm implements Arm {
         }
       }
       tail = file.liveBytes() < ctx.layout().targetFileBytes ? k : -1;
+    }
+    if (largest > 0) {
+      packBytes = largest;
     }
     history.add(versions());
   }
@@ -294,29 +308,32 @@ public final class RmowArm implements Arm {
 
   private void readTouched(Map<Long, Touched> touched) throws IOException {
     for (Map.Entry<Long, Touched> e : touched.entrySet()) {
-      LogicalFile f = files.get(fileOfRg.get(e.getKey()));
-      RowGroup rg = f.rowGroup(e.getKey());
-      List<Record> rows = new ArrayList<>((int) rg.getNum_rows());
-      LogicalFile.RowGroupSource src = f.source(e.getKey());
       // open row groups hold no DV'd rows, so the row group is read without its file's DV
-      Scans.scan(
-          ctx,
-          Reader.writer(ctx.layout()),
-          Scans.version(src.location(), src.length(), f.liveRows()),
-          new DeleteFile[0],
-          Rows.SCHEMA,
-          Expressions.alwaysTrue(),
-          footerFor(f, src),
-          src.start(),
-          src.size(),
-          rows::add);
-      if (rows.size() != rg.getNum_rows()) {
-        throw new IllegalStateException(
-            "Read " + rows.size() + " rows of row group " + e.getKey() + ", expected "
-                + rg.getNum_rows());
-      }
-      e.getValue().rows = rows;
+      e.getValue().rows = readRowGroup(files.get(fileOfRg.get(e.getKey())), e.getKey());
     }
+  }
+
+  /** The rows of one row group of {@code f}'s current version, read as a writer reads. */
+  private List<Record> readRowGroup(LogicalFile f, long rgId) throws IOException {
+    RowGroup rg = f.rowGroup(rgId);
+    List<Record> rows = new ArrayList<>((int) rg.getNum_rows());
+    LogicalFile.RowGroupSource src = f.source(rgId);
+    Scans.scan(
+        ctx,
+        Reader.writer(ctx.layout()),
+        Scans.version(src.location(), src.length(), f.liveRows()),
+        new DeleteFile[0],
+        Rows.SCHEMA,
+        Expressions.alwaysTrue(),
+        footerFor(f, src),
+        src.start(),
+        src.size(),
+        rows::add);
+    if (rows.size() != rg.getNum_rows()) {
+      throw new IllegalStateException(
+          "Read " + rows.size() + " rows of row group " + rgId + ", expected " + rg.getNum_rows());
+    }
+    return rows;
   }
 
   /**
@@ -389,29 +406,7 @@ public final class RmowArm implements Arm {
     }
 
     for (Map.Entry<Integer, Pending> e : pending.entrySet()) {
-      Pending p = e.getValue();
-      if (p.file == null) {
-        files.add(create(p));
-        tail = e.getKey();
-      } else {
-        p.file.commit(
-            ctx.io(), ctx.io(), p.regions, p.drop, p.newRgIds, inPlace ? p.inPlaceOf : null);
-      }
-      if (inPlace && !dvSealed && outOfOrder(files.get(e.getKey())) > 0) {
-        throw new IllegalStateException(
-            "Footer of " + files.get(e.getKey()).location() + " lists row groups out of id order");
-      }
-      for (long rg : p.drop) {
-        fileOfRg.remove(rg);
-      }
-      for (long rg : p.newRgIds) {
-        fileOfRg.put(rg, e.getKey());
-        List<Long> ids = idsOfNewRg.get(rg);
-        for (int pos = 0; pos < ids.size(); pos++) {
-          rgOfId[ids.get(pos).intValue()] = rg;
-          posInRg[ids.get(pos).intValue()] = pos;
-        }
-      }
+      commit(e.getKey(), e.getValue(), idsOfNewRg);
     }
     // the new versions' manifest entries: column metrics from the merged footers
     for (int k : pending.keySet()) {
@@ -422,6 +417,32 @@ public final class RmowArm implements Arm {
             || files.get(tail).footer().getRow_groupsSize() >= ctx.layout().maxRowGroupsPerFile)) {
       tail = -1;
       policy.sealAll();
+    }
+  }
+
+  /** Writes {@code p} as file {@code k}'s next version (or as new file {@code k}); indexes it. */
+  private void commit(int k, Pending p, Map<Long, List<Long>> idsOfNewRg) throws IOException {
+    if (p.file == null) {
+      files.add(create(p));
+      tail = k;
+    } else {
+      p.file.commit(
+          ctx.io(), ctx.io(), p.regions, p.drop, p.newRgIds, inPlace ? p.inPlaceOf : null);
+    }
+    if (inPlace && !dvSealed && outOfOrder(files.get(k)) > 0) {
+      throw new IllegalStateException(
+          "Footer of " + files.get(k).location() + " lists row groups out of id order");
+    }
+    for (long rg : p.drop) {
+      fileOfRg.remove(rg);
+    }
+    for (long rg : p.newRgIds) {
+      fileOfRg.put(rg, k);
+      List<Long> ids = idsOfNewRg.get(rg);
+      for (int pos = 0; pos < ids.size(); pos++) {
+        rgOfId[ids.get(pos).intValue()] = rg;
+        posInRg[ids.get(pos).intValue()] = pos;
+      }
     }
   }
 
@@ -658,11 +679,24 @@ public final class RmowArm implements Arm {
   // --- compaction -------------------------------------------------------------------------------
 
   /**
-   * Rewrites each file whose dead bytes reach {@code compactGarbageRatio} of its length, whose DV
-   * deletes {@code compactDeleteRatio} of its rows, or that holds {@code compactSmallRowGroups}
-   * row groups under half the row-group target, into a new object: its live rows (DV applied),
-   * grouped by row group and packed in id order into row groups of about the target size. The
-   * old object stays stored, for time travel, and becomes reclaimable.
+   * Compaction, with one trigger and one action per goal (docs/DESIGN.md#compaction):
+   *
+   * <ul>
+   *   <li><b>Space.</b> An appendable file whose garbage (bytes its current version does not use)
+   *       reaches {@code compactGarbageRatio} of its length, or whose DV deletes {@code
+   *       compactDeleteRatio} of its rows, is {@linkplain #rewrite rewritten} into a new object.
+   *       A split file instead has each object whose dead bytes reach {@code compactGarbageRatio}
+   *       of its length {@linkplain #evacuees evacuated}: the object's live row groups are
+   *       rewritten as they are into the next version's region object, so it can be deleted once
+   *       older versions expire.
+   *   <li><b>Reads.</b> A file holding {@code compactSmallRowGroups} sealed row groups under half
+   *       the writer's row-group size (see {@link #load}) has each run of them that is adjacent in
+   *       id order {@linkplain #packs packed} into row groups of up to that size. In an
+   *       appendable file the packed row groups become garbage.
+   * </ul>
+   *
+   * A file's evacuations and packing are one new version. In the {@code -dv} arms either trigger
+   * rewrites the file, as moving rows would move the positions its DV deletes.
    */
   @Override
   public void compact() throws IOException {
@@ -672,22 +706,133 @@ public final class RmowArm implements Arm {
       if (f.liveRows() == 0) {
         continue;
       }
-      long small = 0;
-      for (RowGroup rg : f.footer().getRow_groups()) {
-        if (FooterCodec.compressedSize(rg) < layout.rowGroupBytes / 2) {
-          small++;
+      List<List<Long>> packs = packs(f);
+      if (split) {
+        Set<Long> evacuate = evacuees((SplitFile) f);
+        if (!evacuate.isEmpty() || !packs.isEmpty()) {
+          move(i, evacuate, packs);
         }
+        continue;
       }
       DeleteFile dv = dvs.get(f);
       double deleted = dv == null ? 0 : dv.recordCount() / (double) f.liveRows();
-      // dead bytes in objects the version still uses; wholly unused ones go as versions expire
       double garbage = f.garbageBytes() / (double) (f.storedBytes() - f.reclaimableBytes());
       if (garbage >= layout.compactGarbageRatio
           || deleted >= layout.compactDeleteRatio
-          || small >= layout.compactSmallRowGroups) {
+          || dvSealed && !packs.isEmpty()) {
         rewrite(i);
+      } else if (!packs.isEmpty()) {
+        move(i, Set.of(), packs);
       }
     }
+  }
+
+  /**
+   * The groups of row groups packing merges, each in id order: runs of small sealed row groups
+   * (under half the writer's row-group size, and not open to the tail policy) adjacent in id
+   * order, cut greedily into groups of up to that size; groups of one are left alone. None unless
+   * the file holds {@code compactSmallRowGroups} small sealed row groups (0: never). In the {@code
+   * -dv} arms, which move updated rows to the tail, id ranges overlap, so a group there only
+   * signals the trigger.
+   */
+  private List<List<Long>> packs(LogicalFile f) {
+    long target = packBytes;
+    int threshold = ctx.layout().compactSmallRowGroups;
+    List<Long> ids = new ArrayList<>(f.rgIds());
+    long small =
+        ids.stream()
+            .filter(rg -> !policy.isOpen(rg))
+            .filter(rg -> FooterCodec.compressedSize(f.rowGroup(rg)) < target / 2)
+            .count();
+    if (threshold <= 0 || small < threshold) {
+      return List.of();
+    }
+    ids.sort(Comparator.comparingLong(rg -> minId(f.rowGroup(rg))));
+    List<List<Long>> packs = new ArrayList<>();
+    List<Long> group = new ArrayList<>();
+    long bytes = 0;
+    for (long rg : ids) {
+      long size = FooterCodec.compressedSize(f.rowGroup(rg));
+      boolean packable = !policy.isOpen(rg) && size < target / 2;
+      if (!packable || bytes + size > target) {
+        if (group.size() > 1) {
+          packs.add(group);
+        }
+        group = new ArrayList<>();
+        bytes = 0;
+      }
+      if (packable) {
+        group.add(rg);
+        bytes += size;
+      }
+    }
+    if (group.size() > 1) {
+      packs.add(group);
+    }
+    return packs;
+  }
+
+  /**
+   * The live row groups of each object of a split file whose dead bytes (replaced row groups, and
+   * the footer of an object adopted as version 0) reach {@code compactGarbageRatio} of its length.
+   * Objects holding a row group open to the tail policy are left alone: its merges rewrite them
+   * soon.
+   */
+  private Set<Long> evacuees(SplitFile f) {
+    Map<String, List<Long>> rgsOf = new LinkedHashMap<>();
+    Map<String, Long> live = new HashMap<>();
+    Set<String> open = new HashSet<>();
+    for (long rg : f.rgIds()) {
+      String object = f.objectOf(rg);
+      rgsOf.computeIfAbsent(object, k -> new ArrayList<>()).add(rg);
+      live.merge(object, FooterCodec.liveBytes(f.rowGroup(rg)), Long::sum);
+      if (policy.isOpen(rg)) {
+        open.add(object);
+      }
+    }
+    Set<Long> evacuate = new LinkedHashSet<>();
+    for (Map.Entry<String, List<Long>> e : rgsOf.entrySet()) {
+      long length = f.objectLength(e.getKey());
+      long dead = length - live.get(e.getKey());
+      if (!open.contains(e.getKey()) && dead >= ctx.layout().compactGarbageRatio * length) {
+        evacuate.addAll(e.getValue());
+      }
+    }
+    return evacuate;
+  }
+
+  /**
+   * Writes file {@code i}'s next version: each pack group's rows as one row group, and each other
+   * row group in {@code evacuate} as it is, each taking the place of the (first) row group it
+   * replaces.
+   */
+  private void move(int i, Set<Long> evacuate, List<List<Long>> packs) throws IOException {
+    LogicalFile f = files.get(i);
+    List<List<Long>> groups = new ArrayList<>(packs);
+    Set<Long> packed = new HashSet<>();
+    packs.forEach(packed::addAll);
+    for (long rg : evacuate) {
+      if (!packed.contains(rg)) {
+        groups.add(List.of(rg));
+      }
+    }
+    Pending p = new Pending(f, f.regionLocation());
+    Map<Long, List<Long>> idsOfNewRg = new HashMap<>();
+    for (List<Long> g : groups) {
+      List<Record> rows = new ArrayList<>();
+      for (long rg : g) {
+        rows.addAll(readRowGroup(f, rg));
+      }
+      p.drop.addAll(g);
+      addRegion(p, rows, idsOfNewRg, inPlace ? g.get(0) : null);
+    }
+    commit(i, p, idsOfNewRg);
+    f.dataFile();
+  }
+
+  /** The smallest id in a row group, from its statistics. */
+  private static long minId(RowGroup rg) {
+    return le64(rg.getColumns().get(0).getMeta_data().getStatistics().getMin_value());
   }
 
   private void rewrite(int i) throws IOException {
@@ -717,8 +862,9 @@ public final class RmowArm implements Arm {
           group);
     }
 
-    // pack the row groups in id order (footer order puts rewritten row groups last) up to the
-    // row-group target, so the packed row groups keep disjoint id ranges
+    // pack the row groups in id order (footer order puts rewritten row groups last) into row
+    // groups of up to the writer's size, as bin-packing does (MorArm.compact), so a full row
+    // group stays as it is and the packed ones keep disjoint id ranges
     List<Long> order = new ArrayList<>(byRg.keySet());
     order.sort(Comparator.comparingLong(rg -> minId(byRg.get(rg))));
     String location =
@@ -727,16 +873,17 @@ public final class RmowArm implements Arm {
     Map<Long, List<Long>> idsOfNewRg = new HashMap<>();
     List<Record> packed = new ArrayList<>();
     long bytes = 0;
-    for (int n = 0; n < order.size(); n++) {
-      long rg = order.get(n);
-      packed.addAll(byRg.get(rg));
-      bytes += FooterCodec.compressedSize(f.rowGroup(rg));
-      if (bytes >= ctx.layout().rowGroupBytes || n == order.size() - 1) {
+    for (long rg : order) {
+      long size = FooterCodec.compressedSize(f.rowGroup(rg));
+      if (!packed.isEmpty() && bytes + size > packBytes) {
         addRegion(p, packed, idsOfNewRg, null);
         packed = new ArrayList<>();
         bytes = 0;
       }
+      packed.addAll(byRg.get(rg));
+      bytes += size;
     }
+    addRegion(p, packed, idsOfNewRg, null);
     LogicalFile compacted = create(p);
     compacted.dataFile();
     for (long rg : f.rgIds()) {
@@ -824,7 +971,7 @@ public final class RmowArm implements Arm {
     return count;
   }
 
-  // --- for VersionDump ---------------------------------------------------------------------------
+  // --- for VersionDump and tests -----------------------------------------------------------
 
   ArmContext ctx() {
     return ctx;
@@ -832,6 +979,20 @@ public final class RmowArm implements Arm {
 
   boolean dvSealed() {
     return dvSealed;
+  }
+
+  /** The table's files at their current versions. */
+  List<LogicalFile> files() {
+    return List.copyOf(files);
+  }
+
+  /** Compaction's row-group target (see {@link #load}). */
+  long packBytes() {
+    return packBytes;
+  }
+
+  boolean isOpen(long rgId) {
+    return policy.isOpen(rgId);
   }
 
   /** Every appendable object this arm adopted or wrote, those compaction replaced included. */

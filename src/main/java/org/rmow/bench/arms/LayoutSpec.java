@@ -15,8 +15,8 @@ public final class LayoutSpec {
   /**
    * Row-group target of data files and of the initial load: Parquet's, which counts buffered
    * bytes (compressed pages plus the open, uncompressed ones), so row groups come out smaller on
-   * disk (about a third of a 1 MiB target for the bench schema at zstd). RMoW compaction packs
-   * row groups to this many compressed bytes.
+   * disk (about a third of a 1 MiB target for the bench schema at zstd, three quarters of a 4 MiB
+   * one). RMoW compaction packs row groups up to the size the writer's come out at on disk.
    */
   public long rowGroupBytes = 16L << 20;
   /** Data files (and appendable files' live bytes) roll over at this size. */
@@ -68,15 +68,26 @@ public final class LayoutSpec {
    */
   public String locate = "oracle";
 
-  /** Compact every this many batches (0: never), with the trigger families below. */
+  /** Compact every this many batches (0: never), with the triggers below. */
   public int compactEvery = 0;
-  /** MoR family: rewrite files with at least this fraction of their rows deleted. */
+  /**
+   * MoR family: rewrite files with at least this fraction of their rows deleted (RMoW {@code -dv}
+   * arms: by their DV).
+   */
   public double compactDeleteRatio = 0.3;
   /** MoR family: bin-pack files smaller than this fraction of the target file size. */
   public double compactSmallFileFraction = 0.75;
-  /** RMoW: rewrite a file whose dead bytes are at least this fraction of its length. */
+  /**
+   * RMoW, for space: rewrite an appendable file whose dead bytes are at least this fraction of its
+   * length; in a split file, move the live row groups out of each object whose dead bytes are at
+   * least this fraction of its length. Above 1: never.
+   */
   public double compactGarbageRatio = 0.5;
-  /** RMoW: rewrite a file holding at least this many row groups under half the target size. */
+  /**
+   * RMoW, for reads: once a file holds this many sealed row groups under half the size of the
+   * writer's row groups on disk, pack runs of them adjacent in id order into row groups of up to
+   * that size (0: never).
+   */
   public int compactSmallRowGroups = 8;
 
   /** The Parquet writer properties for data files. */

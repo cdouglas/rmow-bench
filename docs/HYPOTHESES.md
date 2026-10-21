@@ -85,3 +85,40 @@ Against RMoW on appendable objects, with the same policy:
 *Decided by:* `batch` requests and bytes, `read_full`/`read_old` GETs and bytes, and the `state`
 records' `stored_bytes - reclaimable_bytes` against `live_bytes`, on the local recency and
 uniform runs (requests and bytes are what S3 would see, `S3StoreTest`).
+
+## Added 2026-10-21, before the compaction sweep
+
+Until now compaction was an input: every 10 batches, at thresholds modeled on Iceberg's
+`RewriteDataFiles` defaults. The sweep makes it an outcome. Each policy is a check period `P`
+(`compactEvery`: 1, 5 or 20 batches, and 10 at the default level) and a threshold level, from
+aggressive to lazy:
+garbage ratio 0.25, 0.5 or 0.75 (RMoW), delete ratio 0.1, 0.3 or 0.5 (MoR) and 4, 8 or 16 small
+row groups (RMoW). Each arm is measured under every policy and under none, and the analysis picks
+each arm's cheapest policy for a read rate and a price model. RMoW compaction now has one trigger
+and one action per goal: space (rewrite an appendable file; move the live row groups out of a
+split file's mostly dead objects) and reads (pack small sealed row groups). It packs only up to
+the size of the writer's own row groups (docs/DESIGN.md#compaction).
+
+### H6 — when to compact
+
+- **RMoW reads barely depend on compaction.** At every policy, RMoW's full-read GETs (mean over
+  probes) are within 2 of its uncompacted run, in either layout. The read gain reported for
+  compacted appendable files (split-vs-append-2026-10-21.md: 10–11 GETs against 17–19) came
+  from packing row groups to about twice the writer's size.
+- **Appendable RMoW needs compaction for space.** Uncompacted, kept/live grows linearly (about
+  8× at batch 60). At `P` = 1 the mean kept/live stays under 1/(1 − g) for garbage ratio g
+  (1.33, 2, 4), and compaction writes fall as g rises.
+- **Split RMoW needs little.** At g = 0.25 moving row groups out of mostly dead objects brings
+  the mean kept/live to 1.3 or less, for under 0.5 MB of compaction writes per batch; at
+  g = 0.75 it moves nothing.
+- **MoR-v3 and TailCoW trade writes for reads.** Their full-read GETs grow between compactions.
+  As `P` falls, their writes per batch (compaction included) rise and their mean full-read GETs
+  fall; `P` = 1 writes the most.
+- **Costs.** On S3 Express prices with a batch every 5 minutes and compute at $0.04 per
+  vCPU-hour, at one full read per batch: split RMoW's cheapest policy costs within 5% of no
+  compaction, and MoR-v3's cheapest policy has `P` ≤ 5.
+
+*Decided by:* `analysis/compaction.py` over the `configs/local-compact-*.json` runs: per arm and
+policy, bytes, requests and CPU per batch (batch and compaction phases), full-read GETs and bytes
+averaged over probes every 3 batches (which sample every phase of each compaction cycle), and
+kept/live averaged over steps.
