@@ -1,0 +1,785 @@
+# JMH version: 1.37
+# VM version: JDK 17.0.20.1, OpenJDK 64-Bit Server VM, 17.0.20.1+1-1-24.04-Ubuntu
+# VM invoker: /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: org.rmow.bench.micro.FooterBench.convert
+# Parameters: (columns = 11, rowGroups = 10)
+
+# Run progress: 0.00% complete, ETA 00:03:12
+# Fork: 1 of 1
+# Warmup Iteration   1: 187.115 us/op
+# Warmup Iteration   2: 180.624 us/op
+# Warmup Iteration   3: 87.275 us/op
+Iteration   1: 116.892 us/op
+Iteration   2: 79.312 us/op
+Iteration   3: 77.525 us/op
+Iteration   4: 77.515 us/op
+Iteration   5: 83.816 us/op
+
+
+Result "org.rmow.bench.micro.FooterBench.convert":
+  87.012 ±(99.9%) 65.078 us/op [Average]
+  (min, avg, max) = (77.515, 87.012, 116.892), stdev = 16.901
+  CI (99.9%): [21.934, 152.090] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 17.0.20.1, OpenJDK 64-Bit Server VM, 17.0.20.1+1-1-24.04-Ubuntu
+# VM invoker: /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: org.rmow.bench.micro.FooterBench.convert
+# Parameters: (columns = 11, rowGroups = 100)
+
+# Run progress: 4.17% complete, ETA 00:03:54
+# Fork: 1 of 1
+# Warmup Iteration   1: 3369.717 us/op
+# Warmup Iteration   2: 1976.402 us/op
+# Warmup Iteration   3: 914.468 us/op
+Iteration   1: 1331.276 us/op
+Iteration   2: 850.264 us/op
+Iteration   3: 923.698 us/op
+Iteration   4: 910.565 us/op
+Iteration   5: 953.820 us/op
+
+
+Result "org.rmow.bench.micro.FooterBench.convert":
+  993.925 ±(99.9%) 740.518 us/op [Average]
+  (min, avg, max) = (850.264, 993.925, 1331.276), stdev = 192.310
+  CI (99.9%): [253.407, 1734.443] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 17.0.20.1, OpenJDK 64-Bit Server VM, 17.0.20.1+1-1-24.04-Ubuntu
+# VM invoker: /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: org.rmow.bench.micro.FooterBench.convert
+# Parameters: (columns = 11, rowGroups = 1000)
+
+# Run progress: 8.33% complete, ETA 00:03:45
+# Fork: 1 of 1
+# Warmup Iteration   1: 24753.504 us/op
+# Warmup Iteration   2: 21099.281 us/op
+# Warmup Iteration   3: 15265.436 us/op
+Iteration   1: 13174.279 us/op
+Iteration   2: 13122.453 us/op
+Iteration   3: 13109.487 us/op
+Iteration   4: 13072.016 us/op
+Iteration   5: 12564.854 us/op
+
+
+Result "org.rmow.bench.micro.FooterBench.convert":
+  13008.618 ±(99.9%) 965.588 us/op [Average]
+  (min, avg, max) = (12564.854, 13008.618, 13174.279), stdev = 250.760
+  CI (99.9%): [12043.030, 13974.205] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 17.0.20.1, OpenJDK 64-Bit Server VM, 17.0.20.1+1-1-24.04-Ubuntu
+# VM invoker: /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: org.rmow.bench.micro.FooterBench.convert
+# Parameters: (columns = 11, rowGroups = 10000)
+
+# Run progress: 12.50% complete, ETA 00:03:35
+# Fork: 1 of 1
+# Warmup Iteration   1: 289542.784 us/op
+# Warmup Iteration   2: 188448.718 us/op
+# Warmup Iteration   3: 570328.224 us/op
+Iteration   1: 390801.488 us/op
+Iteration   2: 136411.232 us/op
+Iteration   3: 213633.601 us/op
+Iteration   4: 123416.883 us/op
+Iteration   5: 113614.962 us/op
+
+
+Result "org.rmow.bench.micro.FooterBench.convert":
+  195575.633 ±(99.9%) 446841.006 us/op [Average]
+  (min, avg, max) = (113614.962, 195575.633, 390801.488), stdev = 116043.190
+  CI (99.9%): [≈ 0, 642416.639] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 17.0.20.1, OpenJDK 64-Bit Server VM, 17.0.20.1+1-1-24.04-Ubuntu
+# VM invoker: /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: org.rmow.bench.micro.FooterBench.convert
+# Parameters: (columns = 50, rowGroups = 10)
+
+# Run progress: 16.67% complete, ETA 00:03:33
+# Fork: 1 of 1
+# Warmup Iteration   1: 1100.164 us/op
+# Warmup Iteration   2: 487.188 us/op
+# Warmup Iteration   3: 443.424 us/op
+Iteration   1: 427.872 us/op
+Iteration   2: 416.120 us/op
+Iteration   3: 414.816 us/op
+Iteration   4: 387.228 us/op
+Iteration   5: 364.948 us/op
+
+
+Result "org.rmow.bench.micro.FooterBench.convert":
+  402.197 ±(99.9%) 98.621 us/op [Average]
+  (min, avg, max) = (364.948, 402.197, 427.872), stdev = 25.612
+  CI (99.9%): [303.576, 500.818] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 17.0.20.1, OpenJDK 64-Bit Server VM, 17.0.20.1+1-1-24.04-Ubuntu
+# VM invoker: /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: org.rmow.bench.micro.FooterBench.convert
+# Parameters: (columns = 50, rowGroups = 100)
+
+# Run progress: 20.83% complete, ETA 00:03:24
+# Fork: 1 of 1
+# Warmup Iteration   1: 10068.794 us/op
+# Warmup Iteration   2: 6200.972 us/op
+# Warmup Iteration   3: 5915.528 us/op
+Iteration   1: 5787.894 us/op
+Iteration   2: 5797.781 us/op
+Iteration   3: 5923.459 us/op
+Iteration   4: 5497.637 us/op
+Iteration   5: 5411.375 us/op
+
+
+Result "org.rmow.bench.micro.FooterBench.convert":
+  5683.629 ±(99.9%) 839.528 us/op [Average]
+  (min, avg, max) = (5411.375, 5683.629, 5923.459), stdev = 218.023
+  CI (99.9%): [4844.102, 6523.157] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 17.0.20.1, OpenJDK 64-Bit Server VM, 17.0.20.1+1-1-24.04-Ubuntu
+# VM invoker: /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: org.rmow.bench.micro.FooterBench.convert
+# Parameters: (columns = 50, rowGroups = 1000)
+
+# Run progress: 25.00% complete, ETA 00:03:13
+# Fork: 1 of 1
+# Warmup Iteration   1: 150219.949 us/op
+# Warmup Iteration   2: 100268.472 us/op
+# Warmup Iteration   3: 101778.884 us/op
+Iteration   1: 47725.493 us/op
+Iteration   2: 47139.208 us/op
+Iteration   3: 46923.620 us/op
+Iteration   4: 56276.117 us/op
+Iteration   5: 46865.483 us/op
+
+
+Result "org.rmow.bench.micro.FooterBench.convert":
+  48985.984 ±(99.9%) 15747.124 us/op [Average]
+  (min, avg, max) = (46865.483, 48985.984, 56276.117), stdev = 4089.478
+  CI (99.9%): [33238.860, 64733.108] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 17.0.20.1, OpenJDK 64-Bit Server VM, 17.0.20.1+1-1-24.04-Ubuntu
+# VM invoker: /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: org.rmow.bench.micro.FooterBench.convert
+# Parameters: (columns = 50, rowGroups = 10000)
+
+# Run progress: 29.17% complete, ETA 00:03:03
+# Fork: 1 of 1
+# Warmup Iteration   1: 1120845.208 us/op
+# Warmup Iteration   2: 1286870.049 us/op
+# Warmup Iteration   3: 1253637.157 us/op
+Iteration   1: 1339983.081 us/op
+Iteration   2: 856294.030 us/op
+Iteration   3: 2446278.976 us/op
+Iteration   4: 754589.221 us/op
+Iteration   5: 1470434.006 us/op
+
+
+Result "org.rmow.bench.micro.FooterBench.convert":
+  1373515.863 ±(99.9%) 2591634.184 us/op [Average]
+  (min, avg, max) = (754589.221, 1373515.863, 2446278.976), stdev = 673039.167
+  CI (99.9%): [≈ 0, 3965150.046] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 17.0.20.1, OpenJDK 64-Bit Server VM, 17.0.20.1+1-1-24.04-Ubuntu
+# VM invoker: /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: org.rmow.bench.micro.FooterBench.mergeAndSerialize
+# Parameters: (columns = 11, rowGroups = 10)
+
+# Run progress: 33.33% complete, ETA 00:03:08
+# Fork: 1 of 1
+# Warmup Iteration   1: 281.608 us/op
+# Warmup Iteration   2: 255.228 us/op
+# Warmup Iteration   3: 171.085 us/op
+Iteration   1: 188.919 us/op
+Iteration   2: 170.501 us/op
+Iteration   3: 161.099 us/op
+Iteration   4: 167.047 us/op
+Iteration   5: 164.943 us/op
+
+
+Result "org.rmow.bench.micro.FooterBench.mergeAndSerialize":
+  170.502 ±(99.9%) 41.759 us/op [Average]
+  (min, avg, max) = (161.099, 170.502, 188.919), stdev = 10.845
+  CI (99.9%): [128.743, 212.261] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 17.0.20.1, OpenJDK 64-Bit Server VM, 17.0.20.1+1-1-24.04-Ubuntu
+# VM invoker: /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: org.rmow.bench.micro.FooterBench.mergeAndSerialize
+# Parameters: (columns = 11, rowGroups = 100)
+
+# Run progress: 37.50% complete, ETA 00:02:53
+# Fork: 1 of 1
+# Warmup Iteration   1: 3893.648 us/op
+# Warmup Iteration   2: 2358.707 us/op
+# Warmup Iteration   3: 1966.274 us/op
+Iteration   1: 2007.137 us/op
+Iteration   2: 2233.880 us/op
+Iteration   3: 2030.557 us/op
+Iteration   4: 2022.856 us/op
+Iteration   5: 1844.805 us/op
+
+
+Result "org.rmow.bench.micro.FooterBench.mergeAndSerialize":
+  2027.847 ±(99.9%) 532.222 us/op [Average]
+  (min, avg, max) = (1844.805, 2027.847, 2233.880), stdev = 138.216
+  CI (99.9%): [1495.625, 2560.070] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 17.0.20.1, OpenJDK 64-Bit Server VM, 17.0.20.1+1-1-24.04-Ubuntu
+# VM invoker: /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: org.rmow.bench.micro.FooterBench.mergeAndSerialize
+# Parameters: (columns = 11, rowGroups = 1000)
+
+# Run progress: 41.67% complete, ETA 00:02:41
+# Fork: 1 of 1
+# Warmup Iteration   1: 34822.630 us/op
+# Warmup Iteration   2: 28974.757 us/op
+# Warmup Iteration   3: 28062.258 us/op
+Iteration   1: 25786.348 us/op
+Iteration   2: 28469.278 us/op
+Iteration   3: 26402.247 us/op
+Iteration   4: 38698.889 us/op
+Iteration   5: 26270.166 us/op
+
+
+Result "org.rmow.bench.micro.FooterBench.mergeAndSerialize":
+  29125.386 ±(99.9%) 20985.072 us/op [Average]
+  (min, avg, max) = (25786.348, 29125.386, 38698.889), stdev = 5449.756
+  CI (99.9%): [8140.314, 50110.457] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 17.0.20.1, OpenJDK 64-Bit Server VM, 17.0.20.1+1-1-24.04-Ubuntu
+# VM invoker: /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: org.rmow.bench.micro.FooterBench.mergeAndSerialize
+# Parameters: (columns = 11, rowGroups = 10000)
+
+# Run progress: 45.83% complete, ETA 00:02:28
+# Fork: 1 of 1
+# Warmup Iteration   1: 381470.203 us/op
+# Warmup Iteration   2: 330778.311 us/op
+# Warmup Iteration   3: 528906.070 us/op
+Iteration   1: 511242.437 us/op
+Iteration   2: 357701.917 us/op
+Iteration   3: 230764.038 us/op
+Iteration   4: 337808.938 us/op
+Iteration   5: 251219.123 us/op
+
+
+Result "org.rmow.bench.micro.FooterBench.mergeAndSerialize":
+  337747.291 ±(99.9%) 428059.724 us/op [Average]
+  (min, avg, max) = (230764.038, 337747.291, 511242.437), stdev = 111165.751
+  CI (99.9%): [≈ 0, 765807.014] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 17.0.20.1, OpenJDK 64-Bit Server VM, 17.0.20.1+1-1-24.04-Ubuntu
+# VM invoker: /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: org.rmow.bench.micro.FooterBench.mergeAndSerialize
+# Parameters: (columns = 50, rowGroups = 10)
+
+# Run progress: 50.00% complete, ETA 00:02:17
+# Fork: 1 of 1
+# Warmup Iteration   1: 1468.938 us/op
+# Warmup Iteration   2: 1106.879 us/op
+# Warmup Iteration   3: 1056.063 us/op
+Iteration   1: 1045.634 us/op
+Iteration   2: 1027.403 us/op
+Iteration   3: 1121.508 us/op
+Iteration   4: 1021.988 us/op
+Iteration   5: 1002.326 us/op
+
+
+Result "org.rmow.bench.micro.FooterBench.mergeAndSerialize":
+  1043.772 ±(99.9%) 177.575 us/op [Average]
+  (min, avg, max) = (1002.326, 1043.772, 1121.508), stdev = 46.116
+  CI (99.9%): [866.197, 1221.346] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 17.0.20.1, OpenJDK 64-Bit Server VM, 17.0.20.1+1-1-24.04-Ubuntu
+# VM invoker: /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: org.rmow.bench.micro.FooterBench.mergeAndSerialize
+# Parameters: (columns = 50, rowGroups = 100)
+
+# Run progress: 54.17% complete, ETA 00:02:04
+# Fork: 1 of 1
+# Warmup Iteration   1: 14164.740 us/op
+# Warmup Iteration   2: 10156.636 us/op
+# Warmup Iteration   3: 10767.865 us/op
+Iteration   1: 11533.149 us/op
+Iteration   2: 11297.386 us/op
+Iteration   3: 11300.379 us/op
+Iteration   4: 11085.865 us/op
+Iteration   5: 10885.971 us/op
+
+
+Result "org.rmow.bench.micro.FooterBench.mergeAndSerialize":
+  11220.550 ±(99.9%) 943.365 us/op [Average]
+  (min, avg, max) = (10885.971, 11220.550, 11533.149), stdev = 244.989
+  CI (99.9%): [10277.185, 12163.915] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 17.0.20.1, OpenJDK 64-Bit Server VM, 17.0.20.1+1-1-24.04-Ubuntu
+# VM invoker: /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: org.rmow.bench.micro.FooterBench.mergeAndSerialize
+# Parameters: (columns = 50, rowGroups = 1000)
+
+# Run progress: 58.33% complete, ETA 00:01:52
+# Fork: 1 of 1
+# Warmup Iteration   1: 187792.922 us/op
+# Warmup Iteration   2: 252639.306 us/op
+# Warmup Iteration   3: 174962.844 us/op
+Iteration   1: 120871.511 us/op
+Iteration   2: 131266.262 us/op
+Iteration   3: 125314.515 us/op
+Iteration   4: 116845.133 us/op
+Iteration   5: 117311.023 us/op
+
+
+Result "org.rmow.bench.micro.FooterBench.mergeAndSerialize":
+  122321.689 ±(99.9%) 23276.884 us/op [Average]
+  (min, avg, max) = (116845.133, 122321.689, 131266.262), stdev = 6044.933
+  CI (99.9%): [99044.805, 145598.573] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 17.0.20.1, OpenJDK 64-Bit Server VM, 17.0.20.1+1-1-24.04-Ubuntu
+# VM invoker: /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: org.rmow.bench.micro.FooterBench.mergeAndSerialize
+# Parameters: (columns = 50, rowGroups = 10000)
+
+# Run progress: 62.50% complete, ETA 00:01:41
+# Fork: 1 of 1
+# Warmup Iteration   1: 2228508.970 us/op
+# Warmup Iteration   2: 3067826.305 us/op
+# Warmup Iteration   3: 4059319.394 us/op
+Iteration   1: 1996406.294 us/op
+Iteration   2: 3404196.800 us/op
+Iteration   3: 1656590.576 us/op
+Iteration   4: 2132361.096 us/op
+Iteration   5: 1773900.602 us/op
+
+
+Result "org.rmow.bench.micro.FooterBench.mergeAndSerialize":
+  2192691.074 ±(99.9%) 2704171.244 us/op [Average]
+  (min, avg, max) = (1656590.576, 2192691.074, 3404196.800), stdev = 702264.685
+  CI (99.9%): [≈ 0, 4896862.317] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 17.0.20.1, OpenJDK 64-Bit Server VM, 17.0.20.1+1-1-24.04-Ubuntu
+# VM invoker: /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: org.rmow.bench.micro.FooterBench.parse
+# Parameters: (columns = 11, rowGroups = 10)
+
+# Run progress: 66.67% complete, ETA 00:01:37
+# Fork: 1 of 1
+# Warmup Iteration   1: 487.840 us/op
+# Warmup Iteration   2: 248.051 us/op
+# Warmup Iteration   3: 236.088 us/op
+Iteration   1: 176.411 us/op
+Iteration   2: 205.177 us/op
+Iteration   3: 190.953 us/op
+Iteration   4: 184.773 us/op
+Iteration   5: 183.537 us/op
+
+
+Result "org.rmow.bench.micro.FooterBench.parse":
+  188.170 ±(99.9%) 41.663 us/op [Average]
+  (min, avg, max) = (176.411, 188.170, 205.177), stdev = 10.820
+  CI (99.9%): [146.507, 229.834] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 17.0.20.1, OpenJDK 64-Bit Server VM, 17.0.20.1+1-1-24.04-Ubuntu
+# VM invoker: /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: org.rmow.bench.micro.FooterBench.parse
+# Parameters: (columns = 11, rowGroups = 100)
+
+# Run progress: 70.83% complete, ETA 00:01:24
+# Fork: 1 of 1
+# Warmup Iteration   1: 3124.049 us/op
+# Warmup Iteration   2: 2006.653 us/op
+# Warmup Iteration   3: 1815.519 us/op
+Iteration   1: 1818.792 us/op
+Iteration   2: 1763.468 us/op
+Iteration   3: 1929.040 us/op
+Iteration   4: 2071.387 us/op
+Iteration   5: 1816.102 us/op
+
+
+Result "org.rmow.bench.micro.FooterBench.parse":
+  1879.758 ±(99.9%) 473.343 us/op [Average]
+  (min, avg, max) = (1763.468, 1879.758, 2071.387), stdev = 122.926
+  CI (99.9%): [1406.415, 2353.101] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 17.0.20.1, OpenJDK 64-Bit Server VM, 17.0.20.1+1-1-24.04-Ubuntu
+# VM invoker: /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: org.rmow.bench.micro.FooterBench.parse
+# Parameters: (columns = 11, rowGroups = 1000)
+
+# Run progress: 75.00% complete, ETA 00:01:11
+# Fork: 1 of 1
+# Warmup Iteration   1: 29382.475 us/op
+# Warmup Iteration   2: 31555.099 us/op
+# Warmup Iteration   3: 18160.970 us/op
+Iteration   1: 18334.766 us/op
+Iteration   2: 18436.649 us/op
+Iteration   3: 18715.301 us/op
+Iteration   4: 18567.743 us/op
+Iteration   5: 18270.264 us/op
+
+
+Result "org.rmow.bench.micro.FooterBench.parse":
+  18464.945 ±(99.9%) 691.224 us/op [Average]
+  (min, avg, max) = (18270.264, 18464.945, 18715.301), stdev = 179.509
+  CI (99.9%): [17773.721, 19156.168] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 17.0.20.1, OpenJDK 64-Bit Server VM, 17.0.20.1+1-1-24.04-Ubuntu
+# VM invoker: /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: org.rmow.bench.micro.FooterBench.parse
+# Parameters: (columns = 11, rowGroups = 10000)
+
+# Run progress: 79.17% complete, ETA 00:00:59
+# Fork: 1 of 1
+# Warmup Iteration   1: 297726.816 us/op
+# Warmup Iteration   2: 278952.542 us/op
+# Warmup Iteration   3: 177120.196 us/op
+Iteration   1: 284637.575 us/op
+Iteration   2: 215856.139 us/op
+Iteration   3: 180312.317 us/op
+Iteration   4: 194207.172 us/op
+Iteration   5: 173259.094 us/op
+
+
+Result "org.rmow.bench.micro.FooterBench.parse":
+  209654.459 ±(99.9%) 173119.861 us/op [Average]
+  (min, avg, max) = (173259.094, 209654.459, 284637.575), stdev = 44958.678
+  CI (99.9%): [36534.598, 382774.321] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 17.0.20.1, OpenJDK 64-Bit Server VM, 17.0.20.1+1-1-24.04-Ubuntu
+# VM invoker: /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: org.rmow.bench.micro.FooterBench.parse
+# Parameters: (columns = 50, rowGroups = 10)
+
+# Run progress: 83.33% complete, ETA 00:00:47
+# Fork: 1 of 1
+# Warmup Iteration   1: 1349.042 us/op
+# Warmup Iteration   2: 898.054 us/op
+# Warmup Iteration   3: 931.492 us/op
+Iteration   1: 874.270 us/op
+Iteration   2: 852.308 us/op
+Iteration   3: 843.957 us/op
+Iteration   4: 763.057 us/op
+Iteration   5: 821.433 us/op
+
+
+Result "org.rmow.bench.micro.FooterBench.parse":
+  831.005 ±(99.9%) 163.391 us/op [Average]
+  (min, avg, max) = (763.057, 831.005, 874.270), stdev = 42.432
+  CI (99.9%): [667.614, 994.396] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 17.0.20.1, OpenJDK 64-Bit Server VM, 17.0.20.1+1-1-24.04-Ubuntu
+# VM invoker: /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: org.rmow.bench.micro.FooterBench.parse
+# Parameters: (columns = 50, rowGroups = 100)
+
+# Run progress: 87.50% complete, ETA 00:00:35
+# Fork: 1 of 1
+# Warmup Iteration   1: 11943.932 us/op
+# Warmup Iteration   2: 8692.308 us/op
+# Warmup Iteration   3: 8779.428 us/op
+Iteration   1: 8251.085 us/op
+Iteration   2: 7884.293 us/op
+Iteration   3: 8170.528 us/op
+Iteration   4: 8394.510 us/op
+Iteration   5: 13988.973 us/op
+
+
+Result "org.rmow.bench.micro.FooterBench.parse":
+  9337.878 ±(99.9%) 10037.440 us/op [Average]
+  (min, avg, max) = (7884.293, 9337.878, 13988.973), stdev = 2606.691
+  CI (99.9%): [≈ 0, 19375.318] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 17.0.20.1, OpenJDK 64-Bit Server VM, 17.0.20.1+1-1-24.04-Ubuntu
+# VM invoker: /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: org.rmow.bench.micro.FooterBench.parse
+# Parameters: (columns = 50, rowGroups = 1000)
+
+# Run progress: 91.67% complete, ETA 00:00:23
+# Fork: 1 of 1
+# Warmup Iteration   1: 156428.803 us/op
+# Warmup Iteration   2: 111926.079 us/op
+# Warmup Iteration   3: 105147.110 us/op
+Iteration   1: 78760.754 us/op
+Iteration   2: 83323.863 us/op
+Iteration   3: 82089.488 us/op
+Iteration   4: 77266.616 us/op
+Iteration   5: 81243.843 us/op
+
+
+Result "org.rmow.bench.micro.FooterBench.parse":
+  80536.913 ±(99.9%) 9535.090 us/op [Average]
+  (min, avg, max) = (77266.616, 80536.913, 83323.863), stdev = 2476.233
+  CI (99.9%): [71001.823, 90072.002] (assumes normal distribution)
+
+
+# JMH version: 1.37
+# VM version: JDK 17.0.20.1, OpenJDK 64-Bit Server VM, 17.0.20.1+1-1-24.04-Ubuntu
+# VM invoker: /usr/lib/jvm/java-17-openjdk-amd64/bin/java
+# VM options: <none>
+# Blackhole mode: compiler (auto-detected, use -Djmh.blackhole.autoDetect=false to disable)
+# Warmup: 3 iterations, 1 s each
+# Measurement: 5 iterations, 1 s each
+# Timeout: 10 min per iteration
+# Threads: 1 thread, will synchronize iterations
+# Benchmark mode: Average time, time/op
+# Benchmark: org.rmow.bench.micro.FooterBench.parse
+# Parameters: (columns = 50, rowGroups = 10000)
+
+# Run progress: 95.83% complete, ETA 00:00:11
+# Fork: 1 of 1
+# Warmup Iteration   1: 1998230.650 us/op
+# Warmup Iteration   2: 1145304.944 us/op
+# Warmup Iteration   3: 2346748.543 us/op
+Iteration   1: 1098007.399 us/op
+Iteration   2: 1645853.506 us/op
+Iteration   3: 1077899.532 us/op
+Iteration   4: 1041730.598 us/op
+Iteration   5: 940678.075 us/op
+
+
+Result "org.rmow.bench.micro.FooterBench.parse":
+  1160833.822 ±(99.9%) 1069764.536 us/op [Average]
+  (min, avg, max) = (940678.075, 1160833.822, 1645853.506), stdev = 277814.453
+  CI (99.9%): [91069.286, 2230598.358] (assumes normal distribution)
+
+
+# Run complete. Total time: 00:04:47
+
+REMEMBER: The numbers below are just data. To gain reusable insights, you need to follow up on
+why the numbers are the way they are. Use profilers (see -prof, -lprof), design factorial
+experiments, perform baseline and negative tests that provide experimental control, make sure
+the benchmarking environment is safe on JVM/OS/HW level, ask for reviews from the domain experts.
+Do not assume the numbers tell you what you want them to tell.
+
+NOTE: Current JVM experimentally supports Compiler Blackholes, and they are in use. Please exercise
+extra caution when trusting the results, look into the generated code to check the benchmark still
+works, and factor in a small probability of new VM bugs. Additionally, while comparisons between
+different JVMs are already problematic, the performance difference caused by different Blackhole
+modes can be very significant. Please make sure you use the consistent Blackhole mode for comparisons.
+
+Benchmark                      (columns)  (rowGroups)  Mode  Cnt        Score         Error  Units
+FooterBench.convert                   11           10  avgt    5       87.012 ±      65.078  us/op
+FooterBench.convert                   11          100  avgt    5      993.925 ±     740.518  us/op
+FooterBench.convert                   11         1000  avgt    5    13008.618 ±     965.588  us/op
+FooterBench.convert                   11        10000  avgt    5   195575.633 ±  446841.006  us/op
+FooterBench.convert                   50           10  avgt    5      402.197 ±      98.621  us/op
+FooterBench.convert                   50          100  avgt    5     5683.629 ±     839.528  us/op
+FooterBench.convert                   50         1000  avgt    5    48985.984 ±   15747.124  us/op
+FooterBench.convert                   50        10000  avgt    5  1373515.863 ± 2591634.184  us/op
+FooterBench.mergeAndSerialize         11           10  avgt    5      170.502 ±      41.759  us/op
+FooterBench.mergeAndSerialize         11          100  avgt    5     2027.847 ±     532.222  us/op
+FooterBench.mergeAndSerialize         11         1000  avgt    5    29125.386 ±   20985.072  us/op
+FooterBench.mergeAndSerialize         11        10000  avgt    5   337747.291 ±  428059.724  us/op
+FooterBench.mergeAndSerialize         50           10  avgt    5     1043.772 ±     177.575  us/op
+FooterBench.mergeAndSerialize         50          100  avgt    5    11220.550 ±     943.365  us/op
+FooterBench.mergeAndSerialize         50         1000  avgt    5   122321.689 ±   23276.884  us/op
+FooterBench.mergeAndSerialize         50        10000  avgt    5  2192691.074 ± 2704171.244  us/op
+FooterBench.parse                     11           10  avgt    5      188.170 ±      41.663  us/op
+FooterBench.parse                     11          100  avgt    5     1879.758 ±     473.343  us/op
+FooterBench.parse                     11         1000  avgt    5    18464.945 ±     691.224  us/op
+FooterBench.parse                     11        10000  avgt    5   209654.459 ±  173119.861  us/op
+FooterBench.parse                     50           10  avgt    5      831.005 ±     163.391  us/op
+FooterBench.parse                     50          100  avgt    5     9337.878 ±   10037.440  us/op
+FooterBench.parse                     50         1000  avgt    5    80536.913 ±    9535.090  us/op
+FooterBench.parse                     50        10000  avgt    5  1160833.822 ± 1069764.536  us/op
+
+Benchmark result is saved to results/micro/footer-bench.json
