@@ -165,6 +165,24 @@ class S3StoreTest {
     }
   }
 
+  /** Split files need no append: they run on standard S3 (and GCS), one object per write. */
+  @Test
+  void splitFilesOnStandardS3(@TempDir Path dir) throws IOException {
+    BenchConfig cfg = config("none");
+    cfg.arms = List.of("mor-v3", "rmow-b-split", "rmow-c-split");
+    new Runner(cfg, dir, "t").run();
+    List<JsonNode> phases = records(dir).stream().filter(r -> r.has("sdk_requests")).toList();
+    assertThat(phases).filteredOn(r -> r.get("arm").asText().endsWith("-split"))
+        .allMatch(r -> r.get("sdk_appends").asLong() == 0 && r.get("appends").asLong() == 0)
+        .anyMatch(r -> r.get("sdk_puts").asLong() >= 2);
+    for (JsonNode r : phases) {
+      String at = r.get("arm").asText() + " step " + r.get("step") + " " + r.get("phase").asText();
+      assertThat(r.get("sdk_gets").asLong()).as(at + " GETs").isEqualTo(r.get("gets").asLong());
+      assertThat(r.get("sdk_puts").asLong()).as(at + " PUTs").isEqualTo(r.get("puts").asLong());
+      assertThat(r.get("sdk_heads").asLong()).as(at + " HEADs").isEqualTo(r.get("heads").asLong());
+    }
+  }
+
   @Test
   void rmowNeedsAppend(@TempDir Path dir) {
     BenchConfig cfg = config("none");

@@ -53,3 +53,35 @@ abort counts.
   it, so files must bound their row-group count.
 - Stock parquet-java reads a footer with two requests (the 8-byte tail, then the footer) on files
   over 1 MiB; Iceberg fetches files up to 1 MiB whole in one request.
+
+## Added 2026-10-21, before the split-file runs
+
+**RMoW-*-split** = the same region merge on write, with each version's regions written as a new
+object (a standalone Parquet file) and its footer as a footer-only object naming the objects its
+row groups live in (`ColumnChunk.file_path`), instead of appending both to one object.
+
+### H2 result (local, recorded before H5)
+
+H2 held, as a validating case: under uniform updates every batch touches every row group, and
+RMoW writes what copy-on-write writes, 37.5 MB per batch against CoW's 37.6 and MoR-v3's 0.46
+(`local-m1-uniform-nocompact`, batch 60). `RunnerSmokeTest` now asserts it, for both layouts.
+
+### H5 — regions in separate objects
+
+Against RMoW on appendable objects, with the same policy:
+
+- **Writes** cost one more request per file a batch changes (a region object and a footer object
+  instead of one append), and about the same bytes (each region object adds its own small
+  footer).
+- **Reads** cost the same GETs within one per file read (a footer object up to 1 MiB is fetched
+  whole), and the same bytes.
+- **Space**: once versions older than the retained window expire, what remains is within 1.5× of
+  the live bytes without compaction, where the appendable object keeps every dead region until a
+  rewrite; with compaction, the split files need fewer rewrites for the same bound.
+- **Objects**: each version adds one or two objects per file changed, so the stored object count
+  grows with batches until expiry; the live object count stays within a small multiple of the
+  appendable layout's.
+
+*Decided by:* `batch` requests and bytes, `read_full`/`read_old` GETs and bytes, and the `state`
+records' `stored_bytes - reclaimable_bytes` against `live_bytes`, on the local recency and
+uniform runs (requests and bytes are what S3 would see, `S3StoreTest`).

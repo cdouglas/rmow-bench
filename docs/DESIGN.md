@@ -132,6 +132,88 @@ Logical order keeps every footer in id order, which `RmowArm` checks after each 
 `row_groups_out_of_order` state metric counts the row groups listed after a larger id. The I/O is
 the same either way: the same regions, footers of the same size, and the same requests.
 
+## Regions in separate objects (split files)
+
+Appending keeps a file's history in one object: replaced regions and old footers stay inside it,
+and only a rewrite reclaims them. A split file writes each version's regions to a new object
+instead, and its footer to a footer-only object that names the objects its row groups live in. A
+reader still reads one footer per version, then only the row groups it needs. An object no current
+row group lives in can be deleted once the versions that used it expire, as Iceberg deletes data
+files. The `rmow-*-split` arms run the same policies as `rmow-*` on this layout.
+
+### What Parquet offers
+
+- **`ColumnChunk.file_path`** names the file a column chunk is in, relative to the footer's file.
+  It has been in `parquet.thrift` from the start, but since GH-541 (February 2026) the spec says
+  its only known use is `_metadata` summary files, that no reference implementation reads column
+  data from another file through it, and that using it so "is not considered part of the Parquet
+  specification".
+- **The `FILE` logical type** (#585, July 2026) annotates a column whose values reference bytes,
+  inline or in an external file (`uri`, `offset`, `size`): images, manifests. It works at the value
+  level and cannot place a row group in another object.
+
+So a footer can describe a file assembled from several objects, but nothing in the format makes a
+reader assemble it. What readers do with such footers (`analysis/interop_check.py`; the mixed case
+by hand):
+
+| Reader | Footer-only (every row group elsewhere) | Mixed (own row groups and others') |
+|---|---|---|
+| parquet-java 1.17.1 (and so Iceberg) | fails (`EOFException`) | **reads wrong rows silently**: resolves every offset in its own file |
+| pyarrow 26 `read_table` | fails ("Invalid column metadata") | **reads wrong rows silently** |
+| pyarrow 26 `dataset.parquet_dataset` | **reassembles it correctly** (the `_metadata` path) | refuses ("file paths should be set") |
+| DuckDB 1.5.6 | refuses ("Only inlined data files are supported (no references)") | refuses |
+
+parquet-java parses `file_path` into each row group's metadata and requires all of a row group's
+chunks to name one file, but only its deprecated summary-file helpers act on it, splitting a
+merged footer into one per data file. Hence the layout's one rule: **no footer mixes its own row
+groups with other objects'**. A footer-only version is reassembled by a reader that understands
+it and refused by the rest.
+
+### The layout
+
+All of a file's objects share a directory and a stem:
+
+- `<stem>.rNNN.parquet`: version NNN's regions, followed by a footer listing just them, so each is
+  also a standalone Parquet file;
+- `<stem>.vNNN.parquet`: version NNN's footer, footer-only, every row group named by `file_path`;
+- version 0 is an ordinary Parquet file (an initial file, or `<stem>.r000.parquet`).
+
+Writing a version takes two PUTs (one when it only drops row groups) and no append, so split
+files also run on standard S3 and GCS (`S3StoreTest.splitFilesOnStandardS3`). Footer order follows
+the same rule as an appendable file's: `RK'` takes `RK`'s place.
+
+### Reading one
+
+The reader (`Scans.readSplit`) reads the version's footer object, whole (it is small). It then
+opens every object the footer names as a **virtual Parquet file**: the object's bytes up to the
+end of its last row group in the version, followed by the footer it would have if it held just
+those row groups, built in memory (`SplitFile.views`). The stock Iceberg reader then reads only the
+row groups, by ranged reads. Reading an object costs no request for its footer, and none for its
+length (no HEAD), so a version costs what an appendable version costs: one footer read, then the
+row groups.
+
+No stock engine reads this layout. It needs a reader like this one, or pyarrow's dataset API.
+
+### Garbage collection, and what Iceberg would need
+
+The state records split stored bytes three ways:
+- **live:** what the current version references;
+- **reclaimable:** objects the current version does not use at all, such as old footers and region
+  objects whose row groups were all replaced, deletable as old versions expire;
+- **garbage:** replaced row groups inside objects still in use. Only a rewrite frees them, as in an
+  appendable object.
+
+Compaction triggers on garbage alone.
+
+Iceberg cannot run this GC as it stands. A manifest entry names the footer object only, and the
+region objects are referenced from inside the footer, where Iceberg does not look:
+- `remove_orphan_files` would delete live region objects;
+- `expire_snapshots` would never delete reclaimable ones.
+
+An Iceberg-like implementation must list a data file's region objects in its metadata, as Iceberg
+lists delete files. Likewise a split file has no byte split offsets, because its row groups are in
+other objects, so planning is per object.
+
 ## Deletion vectors on an appendable file (an ablation)
 
 This section is outside the design's goal, under which readers apply no deletes. The `-dv` arms

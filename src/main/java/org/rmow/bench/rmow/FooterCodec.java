@@ -32,15 +32,19 @@ import org.apache.parquet.format.Util;
  *
  * <ul>
  *   <li>the schema matches the previous version's (no schema evolution in this PoC);
- *   <li>no two row groups start at one offset; without in-place row groups, they are listed in
- *       ascending offset order, which the new ones satisfy since they sit after every earlier
- *       byte;
+ *   <li>no two row groups start at one offset of one file; without in-place row groups, a file's
+ *       row groups are listed in ascending offset order, which new ones satisfy since they sit
+ *       after every earlier byte;
  *   <li>{@code ordinal} is the list position and there are at most 32767 row groups (an i16; it
  *       is also part of the encryption AAD, so encrypted files are out of scope);
  *   <li>{@code num_rows} is the sum over the listed row groups;
  *   <li>the previous version's key-value metadata ({@code iceberg.schema}) and {@code created_by}
  *       are kept, and {@code rmow.prev-length} points back to the previous version's length.
  * </ul>
+ *
+ * <p>A row group may also live in another object: its column chunks then name it in {@code
+ * file_path}, relative to the footer's object, as {@code _metadata} summary files do ({@link
+ * #inFile}). A footer whose row groups all live elsewhere is footer-only ({@link #footerOnly}).
  */
 public final class FooterCodec {
 
@@ -168,19 +172,20 @@ public final class FooterCodec {
     }
 
     long rows = 0;
-    long prevStart = -1;
-    Set<Long> starts = new HashSet<>();
+    Map<String, Long> prevStart = new HashMap<>(); // per file the row groups are in
+    Set<String> starts = new HashSet<>();
     for (int i = 0; i < groups.size(); i++) {
       RowGroup rg = groups.get(i);
       long start = startOffset(rg);
-      if (!starts.add(start)) {
-        throw new IllegalStateException("Two row groups start at offset " + start);
+      String file = String.valueOf(filePath(rg));
+      if (!starts.add(file + "@" + start)) {
+        throw new IllegalStateException("Two row groups start at offset " + start + " of " + file);
       }
-      if (slots == null && start <= prevStart) {
+      Long prev = prevStart.put(file, start);
+      if (slots == null && prev != null && start <= prev) {
         throw new IllegalStateException(
-            "Row groups out of file order at " + i + ": " + start + " <= " + prevStart);
+            "Row groups out of file order at " + i + ": " + start + " <= " + prev);
       }
-      prevStart = start;
       rg.setOrdinal((short) i);
       rows += rg.getNum_rows();
     }
@@ -236,6 +241,126 @@ public final class FooterCodec {
       c.setOrdinal(rg.getOrdinal());
     }
     return c;
+  }
+
+  /**
+   * The file a row group's column chunks are in, relative to the footer's file (all of a row
+   * group's chunks are in one file); null for the footer's own file.
+   */
+  public static String filePath(RowGroup rg) {
+    ColumnChunk first = rg.getColumns().get(0);
+    return first.isSetFile_path() ? first.getFile_path() : null;
+  }
+
+  /**
+   * A copy of {@code rg} whose column chunks are in {@code path}, relative to the footer's file
+   * (null: the footer's own file). Shares the column metadata.
+   */
+  public static RowGroup inFile(RowGroup rg, String path) {
+    RowGroup c = shallowCopy(rg);
+    List<ColumnChunk> columns = new ArrayList<>(rg.getColumnsSize());
+    for (ColumnChunk cc : rg.getColumns()) {
+      ColumnChunk x = new ColumnChunk(cc.getFile_offset());
+      if (path != null) {
+        x.setFile_path(path);
+      }
+      if (cc.isSetMeta_data()) {
+        x.setMeta_data(cc.getMeta_data());
+      }
+      if (cc.isSetOffset_index_offset()) {
+        x.setOffset_index_offset(cc.getOffset_index_offset());
+      }
+      if (cc.isSetOffset_index_length()) {
+        x.setOffset_index_length(cc.getOffset_index_length());
+      }
+      if (cc.isSetColumn_index_offset()) {
+        x.setColumn_index_offset(cc.getColumn_index_offset());
+      }
+      if (cc.isSetColumn_index_length()) {
+        x.setColumn_index_length(cc.getColumn_index_length());
+      }
+      if (cc.isSetCrypto_metadata()) {
+        x.setCrypto_metadata(cc.getCrypto_metadata());
+      }
+      if (cc.isSetEncrypted_column_metadata()) {
+        x.setEncrypted_column_metadata(cc.getEncrypted_column_metadata());
+      }
+      columns.add(x);
+    }
+    c.setColumns(columns);
+    return c;
+  }
+
+  /**
+   * The footer one object would have if it held just the row groups of {@code footer} that live
+   * in it ({@code path}, as the footer names it), in footer order: what a reader of a footer-only
+   * version hands the stock reader for that object. Not thread-safe on {@code footer}.
+   */
+  public static FileMetaData localFooter(FileMetaData footer, String path) {
+    FileMetaData local = copyWithoutRowGroups(footer);
+    List<RowGroup> groups = new ArrayList<>();
+    long rows = 0;
+    for (RowGroup rg : footer.getRow_groups()) {
+      if (java.util.Objects.equals(filePath(rg), path)) {
+        RowGroup c = inFile(rg, null);
+        c.setOrdinal((short) groups.size());
+        groups.add(c);
+        rows += rg.getNum_rows();
+      }
+    }
+    local.setRow_groups(groups);
+    local.setNum_rows(rows);
+    return local;
+  }
+
+  /** A copy of {@code footer} listing just {@code groups}, renumbered. */
+  public static FileMetaData withRowGroups(FileMetaData footer, List<RowGroup> groups) {
+    FileMetaData c = copyWithoutRowGroups(footer);
+    List<RowGroup> copies = new ArrayList<>(groups.size());
+    long rows = 0;
+    for (RowGroup rg : groups) {
+      RowGroup x = shallowCopy(rg);
+      x.setOrdinal((short) copies.size());
+      copies.add(x);
+      rows += rg.getNum_rows();
+    }
+    c.setRow_groups(copies);
+    c.setNum_rows(rows);
+    return c;
+  }
+
+  /** A footer-only object: the leading magic, then the footer, its length and the magic. */
+  public static byte[] footerOnly(FileMetaData footer) {
+    byte[] tail = serialize(footer);
+    byte[] out = new byte[MAGIC.length + tail.length];
+    System.arraycopy(MAGIC, 0, out, 0, MAGIC.length);
+    System.arraycopy(tail, 0, out, MAGIC.length, tail.length);
+    return out;
+  }
+
+  /**
+   * The end of a row group's bytes in its file: column chunks, page indexes and bloom filters.
+   */
+  public static long end(RowGroup rg) {
+    long end = 0;
+    for (ColumnChunk c : rg.getColumns()) {
+      ColumnMetaData md = c.getMeta_data();
+      long start = md.getData_page_offset();
+      if (md.isSetDictionary_page_offset() && md.getDictionary_page_offset() > 0) {
+        start = Math.min(start, md.getDictionary_page_offset());
+      }
+      end = Math.max(end, start + md.getTotal_compressed_size());
+      if (c.isSetColumn_index_offset()) {
+        end = Math.max(end, c.getColumn_index_offset() + c.getColumn_index_length());
+      }
+      if (c.isSetOffset_index_offset()) {
+        end = Math.max(end, c.getOffset_index_offset() + c.getOffset_index_length());
+      }
+      if (md.isSetBloom_filter_offset() && md.isSetBloom_filter_length()) {
+        end = Math.max(end, md.getBloom_filter_offset() + md.getBloom_filter_length());
+      }
+    }
+    return end;
   }
 
   /** The first byte of a row group: its first column chunk's dictionary or first data page. */

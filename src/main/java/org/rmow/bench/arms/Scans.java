@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
@@ -26,9 +27,13 @@ import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.ResidualEvaluator;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.IOUtil;
+import org.apache.iceberg.io.RangeReadable;
 import org.apache.iceberg.io.SeekableInputStream;
+import org.apache.parquet.format.FileMetaData;
 import org.rmow.bench.oracle.TableHash;
+import org.rmow.bench.rmow.FooterCodec;
 import org.rmow.bench.rmow.ParquetReads;
+import org.rmow.bench.rmow.SplitFile;
 import org.rmow.bench.rmow.VersionedInputFile;
 import org.rmow.bench.workload.Rows;
 
@@ -84,9 +89,12 @@ final class Scans {
     Evaluator residual =
         filter == Expressions.alwaysTrue() ? null : new Evaluator(required.asStruct(), filter);
     InternalRecordWrapper wrapper = new InternalRecordWrapper(required.asStruct());
+    // storage holds what is below a cached tail (for a split file's object, the tail is not in
+    // storage at all, and the virtual file may be longer than the object)
+    long stored = df.fileSizeInBytes() - (tail == null ? 0 : tail.length);
     VersionedInputFile in =
         new VersionedInputFile(
-            ctx.io().newInputFile(df.location(), df.fileSizeInBytes()),
+            ctx.io().newInputFile(df.location(), stored),
             df.fileSizeInBytes(),
             tail,
             reader.footerPrefetchBytes());
@@ -171,6 +179,61 @@ final class Scans {
             });
       }
     }
+    return run(reader, tasks);
+  }
+
+  /**
+   * Reads footer-only versions ({@link SplitFile}): each version's one footer, then every object
+   * it names as a virtual Parquet file whose footer comes from memory ({@link SplitFile#views}),
+   * so an object costs only its row groups' reads. A footer-cache reader reads the version's
+   * footer once; a stock one reads it again for every object it opens, as stock readers re-read a
+   * file's footer for every split. No stock reader reads these files at all: this is the reader
+   * an engine would need.
+   */
+  static TableHash readSplit(
+      ArmContext ctx, Reader reader, List<ReadFile> versions, Expression filter)
+      throws IOException {
+    List<Callable<TableHash>> tasks = new ArrayList<>();
+    for (ReadFile f : versions) {
+      String location = f.file().location();
+      long length = f.file().fileSizeInBytes();
+      byte[] tail = readFooterObject(ctx, reader, location, length);
+      FileMetaData footer = FooterCodec.read(tail, 0, tail.length - 8);
+      for (SplitFile.ObjectView v : SplitFile.views(location, footer)) {
+        tasks.add(
+            () -> {
+              if (!reader.footerCache()) {
+                readFooterObject(ctx, reader, location, length);
+              }
+              TableHash h = new TableHash();
+              scan(ctx, reader, version(v.location(), v.length(), v.rows()), f.deletes(),
+                  Rows.SCHEMA, filter, v.tail(), -1, -1, r -> h.add(r, ctx.verifyRows()));
+              return h;
+            });
+      }
+    }
+    return run(reader, tasks);
+  }
+
+  /**
+   * A footer object's footer, length and magic: fetched whole when it is at most 1 MiB, as
+   * Iceberg fetches small files (one request); otherwise read as a footer.
+   */
+  static byte[] readFooterObject(ArmContext ctx, Reader reader, String location, long length)
+      throws IOException {
+    if (length > EAGER_BYTES) {
+      return readTail(ctx, reader, location, length);
+    }
+    byte[] all = new byte[(int) length];
+    try (SeekableInputStream in =
+        new VersionedInputFile(ctx.io().newInputFile(location, length), length).newStream()) {
+      ((RangeReadable) in).readFully(0, all, 0, all.length);
+    }
+    return Arrays.copyOfRange(all, FooterCodec.MAGIC.length, all.length);
+  }
+
+  /** Runs a read's tasks on the reader's pool, or one after another without one. */
+  private static TableHash run(Reader reader, List<Callable<TableHash>> tasks) throws IOException {
     TableHash hash = new TableHash();
     try {
       if (reader.pool() == null) {

@@ -16,6 +16,11 @@ Each reader, on each version, must
   - skip row groups by their statistics without losing rows: an id-range filter returns exactly
     the rows in that range.
 
+A footer-only version (a split file's: every row group lives in another object, named by
+file_path) is read as a _metadata summary file: pyarrow's dataset API must reassemble it, its
+plain reader must refuse it, and row positions come from reading each row group, in footer order,
+from its object. DuckDB does not read such files; it must refuse them, not read wrong rows.
+
 Usage: analysis/interop_check.py <dump dir> [-j N] [--every K] [--tmp DIR] [-v]
   -j N       check N versions at a time (default: the CPU count, at most 8)
   --every K  check every K-th version of each object, and its last (default: every version)
@@ -25,6 +30,7 @@ Usage: analysis/interop_check.py <dump dir> [-j N] [--every K] [--tmp DIR] [-v]
 import argparse
 import csv
 import os
+import re
 import sys
 import tempfile
 from collections import defaultdict
@@ -34,6 +40,7 @@ from pathlib import Path
 import duckdb
 import numpy as np
 import pyarrow as pa
+import pyarrow.dataset as ds
 import pyarrow.parquet as pq
 
 U = np.uint64
@@ -127,12 +134,58 @@ def id_range(t):
     return lo, hi, (len(inside), int(inside.sum()))
 
 
+def footer_only(md):
+    return md.num_row_groups > 0 and md.row_group(0).column(0).file_path != ""
+
+
+def check_pyarrow_split(path, md, want):
+    """A footer-only version: the dataset API reassembles it from the objects it names."""
+    problems = []
+    try:
+        pq.read_table(path)
+        problems.append("the plain reader read a footer-only file instead of refusing it")
+    except Exception:
+        pass  # refusing is right: its row groups are not in this file
+    dataset = ds.parquet_dataset(path)
+    t = dataset.to_table()
+    if t.num_rows != want["rows"]:
+        return problems + [f"{t.num_rows} rows reassembled, Iceberg read {want['rows']}"]
+    # positions: every row group, in footer order, read from its object by its own footer
+    base = os.path.dirname(path)
+    parts, own = [], {}
+    for i in range(md.num_row_groups):
+        c = md.row_group(i).column(0)
+        f = own.setdefault(c.file_path, pq.ParquetFile(os.path.join(base, c.file_path)))
+        local = [j for j in range(f.metadata.num_row_groups)
+                 if f.metadata.row_group(j).column(0).data_page_offset == c.data_page_offset]
+        if len(local) != 1:
+            return problems + [f"row group {i} not found in {c.file_path}"]
+        parts.append(f.read_row_group(local[0]))
+    ordered = pa.concat_tables(parts)
+    problems += check_table(ordered, np.arange(ordered.num_rows), want)
+    s, c, _ = digests(t.column("id").to_numpy(), t.column("ts").to_numpy(),
+                      t.column("version").to_numpy(), np.zeros(t.num_rows, dtype=np.int64))
+    if (s, c) != (want["sum"], want["content_sum"]):
+        problems.append("the dataset API reassembled different rows")
+    bad = payload_errors(t)
+    if bad:
+        problems.append("reassembled payload differs in " + ", ".join(bad))
+    lo, hi, expected = id_range(t)
+    f = dataset.to_table(columns=["id"], filter=(ds.field("id") >= lo) & (ds.field("id") <= hi))
+    ids = f.column("id").to_numpy()
+    if (len(ids), int(ids.sum())) != expected:
+        problems.append(f"id filter [{lo}, {hi}] read {len(ids)} rows, want {expected[0]}")
+    return problems
+
+
 def check_pyarrow(path, want, rg_rows):
     pf = pq.ParquetFile(path)
     md = pf.metadata
     got_rgs = [md.row_group(i).num_rows for i in range(md.num_row_groups)]
     if got_rgs != rg_rows:
         return [f"row groups {got_rgs}, footer lists {rg_rows}"]
+    if footer_only(md):
+        return check_pyarrow_split(path, md, want)
     t = pf.read()  # row groups in footer order: row i is at position i
     problems = check_table(t, np.arange(t.num_rows), want)
     lo, hi, expected = id_range(t)
@@ -151,6 +204,16 @@ def check_duckdb(path, want, rg_rows):
         "GROUP BY ALL ORDER BY row_group_id").fetchall()]
     if got_rgs != rg_rows:
         return [f"row groups {got_rgs}, footer lists {rg_rows}"]
+    if footer_only(pq.ParquetFile(path).metadata):
+        try:
+            t = con.execute(f"SELECT * FROM read_parquet('{p}')").to_arrow_table()
+        except duckdb.Error:
+            return []  # refused: it reads no references, and must not read them wrongly
+        s, c, _ = digests(t.column("id").to_numpy(), t.column("ts").to_numpy(),
+                          t.column("version").to_numpy(), np.zeros(t.num_rows, dtype=np.int64))
+        if (t.num_rows, s, c) != (want["rows"], want["sum"], want["content_sum"]):
+            return ["read a footer-only file and returned wrong rows"]
+        return []
     t = con.execute(
         f"SELECT * FROM read_parquet('{p}', file_row_number = true)").to_arrow_table()
     problems = check_table(t, t.column("file_row_number").to_numpy(), want)
@@ -197,6 +260,11 @@ def check_version(job):
     return row, results
 
 
+def file_of(obj):
+    """The file a version belongs to: an appendable object, or a split file's stem."""
+    return re.sub(r"(\.[rv]\d{3})?\.parquet$", "", obj)
+
+
 def init_worker():
     pa.set_cpu_count(1)
     pa.set_io_thread_count(1)
@@ -213,9 +281,9 @@ def main(argv):
 
     with open(Path(a.dump) / "versions.csv") as f:
         rows = list(csv.DictReader(f))
-    by_object = defaultdict(list)
+    by_object = defaultdict(list)  # a split file's versions are objects of their own: by stem
     for r in rows:
-        by_object[r["object"]].append(r)
+        by_object[file_of(r["object"])].append(r)
     todo = []
     for versions in by_object.values():
         for i, r in enumerate(versions):
@@ -226,7 +294,7 @@ def main(argv):
     per_object = defaultdict(lambda: {"versions": 0, "unordered": 0, "failed": 0, "rgs": []})
     with ProcessPoolExecutor(max_workers=a.j, initializer=init_worker) as pool:
         for row, results in pool.map(check_version, todo):
-            o = per_object[row["object"]]
+            o = per_object[file_of(row["object"])]
             o["versions"] += 1
             o["unordered"] += row["offset_order"] != "true"
             o["rgs"].append(int(row["row_groups"]))
@@ -249,7 +317,7 @@ def main(argv):
         print(f"{status} {name}: {o['versions']} versions, {min(o['rgs'])}-{max(o['rgs'])} row "
               f"groups, {o['unordered']} out of offset order"
               + (f", {o['failed']} failed" if o["failed"] else ""))
-    print(f"{len(todo)} versions of {len(per_object)} objects read by pyarrow {pa.__version__} and "
+    print(f"{len(todo)} versions of {len(per_object)} files read by pyarrow {pa.__version__} and "
           f"DuckDB {duckdb.__version__}; {unordered} list row groups out of offset order; "
           f"{failures} failed")
     return 1 if failures else 0

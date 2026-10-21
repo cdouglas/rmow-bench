@@ -16,6 +16,8 @@ package org.rmow.bench.arms;
  * @param rowGroupsOutOfOrder RMoW: row groups listed after a row group holding larger ids, so
  *     footer order (row order) is not the order rows were inserted in; -1 for other arms, whose
  *     data files are each written once, in one sort
+ * @param liveObjects objects the current version reads from: data and delete files, appendable
+ *     objects, or a split file's footer and the region objects its row groups live in
  */
 public record ArmStats(
     long objects,
@@ -26,4 +28,5 @@ public record ArmStats(
     long dataFiles,
     long deleteFiles,
     long footerBytes,
-    long rowGroupsOutOfOrder) {}
+    long rowGroupsOutOfOrder,
+    long liveObjects) {}

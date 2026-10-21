@@ -16,7 +16,9 @@ import org.junit.jupiter.params.provider.ValueSource;
 /**
  * Every footer the RMoW arms write, under both footer orders: the runner dumps each version and
  * checks the versions each step held against the reference model, then pyarrow and DuckDB read
- * every version ({@code analysis/interop_check.py}; skipped without the {@code .venv}).
+ * every version ({@code analysis/interop_check.py}; skipped without the {@code .venv}). Split
+ * files' footer-only versions are reassembled by pyarrow's dataset API and refused by its plain
+ * reader and by DuckDB.
  */
 class VersionDumpTest {
 
@@ -37,7 +39,8 @@ class VersionDumpTest {
     cfg.layout.compactEvery = 4;
     cfg.layout.compactSmallRowGroups = 4;
     cfg.layout.footerOrder = order;
-    cfg.arms = List.of("rmow-a", "rmow-b", "rmow-c", "rmow-c-dv", "mor-v3");
+    cfg.arms =
+        List.of("rmow-a", "rmow-b", "rmow-c", "rmow-c-dv", "rmow-b-split", "rmow-c-split", "mor-v3");
     cfg.reads.every = 5;
     new Runner(cfg, dir, "t", new Runner.Options(null, false, true)).run();
 
@@ -47,7 +50,7 @@ class VersionDumpTest {
     // every RMoW arm, no other: each adopts the initial files and writes at least one version
     assertThat(rows.subList(1, rows.size()))
         .extracting(r -> r.split(",")[0])
-        .containsOnly("rmow-a", "rmow-b", "rmow-c", "rmow-c-dv");
+        .containsOnly("rmow-a", "rmow-b", "rmow-c", "rmow-c-dv", "rmow-b-split", "rmow-c-split");
     // updates rewrite sealed row groups in place only under logical order
     boolean anyUnordered = rows.stream().skip(1).anyMatch(r -> r.split(",")[10].equals("false"));
     assertThat(anyUnordered).isEqualTo(order.equals("logical"));

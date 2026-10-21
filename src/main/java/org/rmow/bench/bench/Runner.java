@@ -103,7 +103,7 @@ public final class Runner {
   private String run(Store store) throws IOException {
     if (store.appender() == null) {
       for (String arm : cfg.arms) {
-        if (arm.startsWith("rmow-")) {
+        if (arm.startsWith("rmow-") && !arm.endsWith("-split")) {
           throw new IllegalArgumentException(
               arm + " appends, and this store cannot (on S3 it needs S3 Express: append express)");
         }
@@ -202,6 +202,9 @@ public final class Runner {
       case "rmow-a-dv" -> new RmowArm(ctx, TailPolicy.Kind.A, true);
       case "rmow-b-dv" -> new RmowArm(ctx, TailPolicy.Kind.B, true);
       case "rmow-c-dv" -> new RmowArm(ctx, TailPolicy.Kind.C, true);
+      case "rmow-a-split" -> new RmowArm(ctx, TailPolicy.Kind.A, false, true);
+      case "rmow-b-split" -> new RmowArm(ctx, TailPolicy.Kind.B, false, true);
+      case "rmow-c-split" -> new RmowArm(ctx, TailPolicy.Kind.C, false, true);
       case "tailcow-b" -> new TailCowArm(ctx, TailPolicy.Kind.B);
       case "tailcow-c" -> new TailCowArm(ctx, TailPolicy.Kind.C);
       case "cow" -> new CowArm(ctx);
@@ -318,6 +321,7 @@ public final class Runner {
     m.put("delete_files", s.deleteFiles());
     m.put("footer_bytes", s.footerBytes());
     m.put("row_groups_out_of_order", s.rowGroupsOutOfOrder());
+    m.put("live_objects", s.liveObjects());
     out.write(json.writeValueAsString(m));
     out.newLine();
   }

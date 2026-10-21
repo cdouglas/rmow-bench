@@ -2,14 +2,16 @@
 """Plots one run's steps.jsonl and writes a table twin of every figure.
 
 Figures (PNG, light surface) and summary.md go to <run dir>/plots/:
-  write.png, space.png              the headline arms (MoR-v3, TailCoW-C, RMoW-B, RMoW-C)
+  write.png, space.png              the headline arms that ran (MoR-v3, TailCoW-C, RMoW-B and
+                                    RMoW-C, appendable and split); space shows stored bytes and
+                                    the bytes kept once older versions expire
   reads-<reader>.png                the same arms' reads, per reader model (one-footer, the
                                     primary one, and stock)
   detail-write.png, detail-reads-<reader>.png  every arm
   summary.md the same numbers as tables, every arm (the accessible twin of the figures)
 
-Encoding: hue is the arm's family (MoR, Iceberg copy-on-write, RMoW, and the RMoW-dv ablation
-when it ran), marker shape the variant within it; every line is direct-labeled at its end and
+Encoding: hue is the arm's family (MoR, Iceberg copy-on-write, RMoW, the RMoW-dv ablation, and
+RMoW on split files, those that ran), marker shape the variant within it; every line is direct-labeled at its end and
 listed in the legend. Local and in-memory runs: requests and bytes are exact and reproducible;
 wall time is not reported.
 
@@ -26,9 +28,10 @@ import matplotlib.pyplot as plt  # noqa: E402
 import matplotlib.ticker  # noqa: E402
 import pandas as pd  # noqa: E402
 
-# Reference palette: the first four categorical slots, in order (validated adjacent pairs,
-# light surface; aqua and yellow are under 3:1, so lines are direct-labeled and tabled)
-FAMILY = {"mor": "#2a78d6", "cow": "#eb6834", "rmow": "#1baf7a", "rmowdv": "#eda100"}
+# Reference palette: the first five categorical slots, in order (validated adjacent pairs,
+# light surface; aqua, yellow and magenta are under 3:1, so lines are direct-labeled and tabled)
+FAMILY = {"mor": "#2a78d6", "cow": "#eb6834", "rmow": "#1baf7a", "rmowdv": "#eda100",
+          "rmowsplit": "#e87ba4"}
 ARMS = {  # arm -> (family, marker, label)
     "mor-v2-file": ("mor", "o", "MoR v2 file"),
     "mor-v2-partition": ("mor", "s", "MoR v2 partition"),
@@ -42,8 +45,11 @@ ARMS = {  # arm -> (family, marker, label)
     "rmow-a-dv": ("rmowdv", "o", "RMoW-A-dv"),
     "rmow-b-dv": ("rmowdv", "s", "RMoW-B-dv"),
     "rmow-c-dv": ("rmowdv", "^", "RMoW-C-dv"),
+    "rmow-a-split": ("rmowsplit", "o", "RMoW-A-split"),
+    "rmow-b-split": ("rmowsplit", "s", "RMoW-B-split"),
+    "rmow-c-split": ("rmowsplit", "^", "RMoW-C-split"),
 }
-HEADLINE = ["mor-v3", "tailcow-c", "rmow-b", "rmow-c"]
+HEADLINE = ["mor-v3", "tailcow-c", "rmow-b", "rmow-c", "rmow-b-split", "rmow-c-split"]
 INK, INK2, MUTED = "#0b0b0b", "#52514e", "#898781"
 SURFACE, GRID, AXIS = "#fcfcfb", "#e1e0d9", "#c3c2b7"
 
@@ -157,6 +163,8 @@ def main(argv):
     recent = df[df.phase == "read_recent"]
     state = df[df.phase == "state"].copy()
     state["space_amp"] = state.stored_bytes / state.live_bytes
+    # what remains once every older version expires: reclaimable bytes are deletable then
+    state["kept_amp"] = (state.stored_bytes - state.reclaimable_bytes) / state.live_bytes
 
     for prefix, only in (("", HEADLINE), ("detail-", None)):
         fig, axes = plt.subplots(1, 2, figsize=(11, 4))
@@ -179,9 +187,12 @@ def main(argv):
                 x=0.01, ha="left", color=INK, fontsize=11)
             save(fig, out / f"{prefix}reads-{reader}.png")
 
-    fig, ax = plt.subplots(figsize=(7, 4))
-    line_panel(ax, state, "space_amp", "Stored bytes / live bytes", "ratio", False, HEADLINE)
-    ax.legend(loc="upper left", bbox_to_anchor=(1.2, 1), fontsize=8)
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+    line_panel(axes[0], state, "space_amp", "Stored bytes / live bytes (every version kept)",
+               "ratio", False, HEADLINE)
+    line_panel(axes[1], state, "kept_amp", "Kept bytes / live bytes (older versions expired)",
+               "ratio", False, HEADLINE)
+    axes[1].legend(loc="upper left", bbox_to_anchor=(1.2, 1), fontsize=8)
     save(fig, out / "space.png")
 
     # the table twin
@@ -215,6 +226,9 @@ def main(argv):
         row[f"{readers[0]}: full MB @{last_probe}"] = first.bytes_read.iloc[0] / 1e6
         row[f"objects @{last}"] = s.objects
         row[f"stored/live @{last}"] = s.stored_bytes / s.live_bytes
+        row[f"kept/live @{last}"] = (s.stored_bytes - s.reclaimable_bytes) / s.live_bytes
+        if "live_objects" in s and not pd.isna(s.live_objects):
+            row[f"live objects @{last}"] = s.live_objects
         rows.append(row)
     table = pd.DataFrame(rows)
     with open(out / "summary.md", "w") as fh:

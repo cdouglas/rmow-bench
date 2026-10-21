@@ -155,6 +155,7 @@ workload, every default arm, from an EC2 instance in the bucket's zone.
 | `tailcow-b`, `tailcow-c` | merged into open tail *data files* by policy B or C | DVs, except in tail files being merged |
 | `rmow-a`, `rmow-b`, `rmow-c` | appended to the tail object as a row group, merged with open tail *row groups* by policy A, B or C | every touched row group is rewritten as a region of its own object (row-group copy-on-write) |
 | `rmow-a-dv`, `rmow-b-dv`, `rmow-c-dv` (an ablation, not in the default matrix) | the same | DVs on each object's stable prefix (the row groups no tail merge will touch), with updated versions in the tail; open tail row groups are rewritten as above |
+| `rmow-a-split`, `rmow-b-split`, `rmow-c-split` | as `rmow-*`, but each version's regions go to a new object, and its footer to a footer-only object naming the objects its row groups live in (`file_path`) | the same row-group copy-on-write; no append, so standard S3 and GCS can run them, and whole objects become deletable as versions expire ([docs/DESIGN.md](docs/DESIGN.md#regions-in-separate-objects-split-files)) |
 
 The tail policies (`TailPolicy`) are:
 - **A:** never merge.
@@ -162,7 +163,9 @@ The tail policies (`TailPolicy`) are:
 - **C:** tiered: `tierFanout` open units of one level merge into one unit a level up.
 
 RMoW against TailCoW therefore isolates the layout, a single appendable object against separate
-data files. TailCoW against MoR-v3 isolates the tail-merge policy.
+data files. TailCoW against MoR-v3 isolates the tail-merge policy. RMoW against RMoW-split
+isolates append: the same policy, footer and reads, with history kept inside one object or spread
+over objects that can be deleted.
 
 The `-dv` arms are outside the goal, because their readers apply deletion vectors. They are kept
 only as an ablation: they measure what RMoW's region rewrites cost compared with deleting by DV.
@@ -191,7 +194,7 @@ only as an ablation: they measure what RMoW's region rewrites cost compared with
 
 | Package | Contents |
 |---|---|
-| `rmow` | The append layer: `OffsetOutputFile` (the stock writer, with positions starting at the object's length), `RegionWriter`, `FooterCodec` (merging Thrift footers), `VersionedInputFile` (one version's view, with the optional footer prefetch), `RmowFile`, and `ParquetReads` (the one read path every arm uses). |
+| `rmow` | The append layer: `OffsetOutputFile` (the stock writer, with positions starting at the object's length), `RegionWriter`, `FooterCodec` (merging Thrift footers), `VersionedInputFile` (one version's view, with the optional footer prefetch), `LogicalFile` with its two layouts `RmowFile` (appendable) and `SplitFile` (an object per version), and `ParquetReads` (the one read path every arm uses). |
 | `arms` | `MorArm` (with the subclasses `MorV2Arm`, `MorV3Arm`, `CowArm` and `TailCowArm`), `RmowArm`, `TailPolicy`, `DataFileWriter` and `InitialLoad`. |
 | `workload`, `oracle` | The seeded op log and the reference model. |
 | `io` | `MemFileIO`, `PreadFileIO`, `TracingFileIO`, `IoTrace`, `RelocatedFileIO` (a run's logical paths on its own prefix), and `S3Recorder` (the SDK's requests). |
@@ -215,11 +218,13 @@ parquet-java 1.17.1:
 - a split selects exactly one region, and planned splits read every row once in either order;
 - row-group statistics skip the other regions.
 
-`VersionDumpTest` runs the RMoW arms (and `rmow-c-dv`) with compaction, under both footer orders,
-and dumps every version they write. `analysis/interop_check.py` then reads every version with
+`VersionDumpTest` runs the RMoW arms (with `rmow-c-dv` and the split arms) with compaction, under
+both footer orders, and dumps every version they write. `analysis/interop_check.py` then reads every version with
 pyarrow 26.0.0 and DuckDB 1.5.6. For each, both readers must list the same row groups, decode the
 same rows (with every payload column checked), number them as Iceberg's `_pos` does, and filter
-by id range without losing rows.
+by id range without losing rows. A split file's footer-only versions must be reassembled by
+pyarrow's dataset API and refused by its plain reader and by DuckDB, which read no references.
+`SplitFileTest` checks that stock Iceberg refuses them too.
 
 ## Status
 
@@ -235,5 +240,8 @@ by id range without losing rows.
 - **Done locally:** a row-group size sweep under recency-skewed updates
   ([docs/measurements/rg-sweep-recency-2026-10-21.md](docs/measurements/rg-sweep-recency-2026-10-21.md)),
   and the S3 store against an emulator.
+- **Done locally:** RMoW on split files, an object per version instead of appends, against
+  appendable files
+  ([docs/measurements/split-vs-append-2026-10-21.md](docs/measurements/split-vs-append-2026-10-21.md)).
 - **Next:** S3 Express (M3), starting with `configs/s3x-calibration.json`, which needs credentials,
-  a directory bucket and an instance in its zone.
+  a directory bucket and an instance in its zone. Split files can also run on standard S3.

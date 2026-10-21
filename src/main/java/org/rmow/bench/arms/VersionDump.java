@@ -13,7 +13,7 @@ import org.apache.iceberg.io.IOUtil;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.rmow.bench.io.RelocatedFileIO;
 import org.rmow.bench.oracle.TableHash;
-import org.rmow.bench.rmow.RmowFile;
+import org.rmow.bench.rmow.LogicalFile;
 import org.rmow.bench.rmow.VersionDigest;
 
 /**
@@ -21,8 +21,9 @@ import org.rmow.bench.rmow.VersionDigest;
  * read each footer the arms actually wrote ({@code analysis/interop_check.py}).
  *
  * <ul>
- *   <li>{@code <dir>/<arm>/<object>}: the object, a hard link into the local store (its bytes no
- *       longer change once the run ends) or a copy of an in-memory one. A version is its prefix.
+ *   <li>{@code <dir>/<arm>/<object>}: every object, a hard link into the local store (its bytes
+ *       no longer change once the run ends) or a copy of an in-memory one. A version of an
+ *       appendable object is its prefix; a split file's versions are objects of their own.
  *   <li>{@code <dir>/versions.csv}: one row per version, with what Iceberg's reader decodes from
  *       that prefix ({@link VersionDigest}).
  * </ul>
@@ -68,19 +69,18 @@ public final class VersionDump {
     String root = arm.ctx().root() + "/";
     Map<String, VersionDigest> digests = new HashMap<>(); // by location@length
     int count = 0;
-    for (RmowFile f : arm.objects()) {
-      if (!f.location().startsWith(root)) {
-        throw new IllegalStateException(f.location() + " is outside the arm's root " + root);
+    for (LogicalFile f : arm.objects()) {
+      for (String object : f.objects()) {
+        Path target = dir.resolve(arm.name()).resolve(relative(root, object));
+        Files.createDirectories(target.getParent());
+        link(storeType, io, object, target);
       }
-      String name = f.location().substring(root.length());
-      Path target = dir.resolve(arm.name()).resolve(name);
-      Files.createDirectories(target.getParent());
-      link(storeType, io, f, target);
-      List<Long> lengths = f.versionLengths();
-      for (int v = 0; v < lengths.size(); v++) {
-        VersionDigest d = VersionDigest.read(io, f.location(), lengths.get(v));
-        digests.put(f.location() + "@" + lengths.get(v), d);
-        csv.write(d.csv(arm.name(), arm.name() + "/" + name, v, lengths.get(v)));
+      List<LogicalFile.Version> versions = f.versions();
+      for (int v = 0; v < versions.size(); v++) {
+        LogicalFile.Version at = versions.get(v);
+        VersionDigest d = VersionDigest.read(io, at.location(), at.length());
+        digests.put(at.location() + "@" + at.length(), d);
+        csv.write(d.csv(arm.name(), arm.name() + "/" + relative(root, at.location()), v, at.length()));
         csv.newLine();
         count++;
       }
@@ -104,16 +104,24 @@ public final class VersionDump {
     return count;
   }
 
-  private static void link(String storeType, RelocatedFileIO io, RmowFile f, Path target)
+  private static String relative(String root, String location) {
+    if (!location.startsWith(root)) {
+      throw new IllegalStateException(location + " is outside the arm's root " + root);
+    }
+    return location.substring(root.length());
+  }
+
+  private static void link(String storeType, RelocatedFileIO io, String object, Path target)
       throws IOException {
     Files.deleteIfExists(target);
     if (storeType.equals("local")) {
-      String loc = io.physical(f.location());
+      String loc = io.physical(object);
       Files.createLink(target, Path.of(loc.startsWith("file:") ? loc.substring(5) : loc));
       return;
     }
-    byte[] bytes = new byte[(int) f.length()];
-    try (SeekableInputStream in = io.newInputFile(f.location(), f.length()).newStream()) {
+    long length = io.newInputFile(object).getLength();
+    byte[] bytes = new byte[(int) length];
+    try (SeekableInputStream in = io.newInputFile(object, length).newStream()) {
       IOUtil.readFully(in, bytes, 0, bytes.length);
     }
     try (OutputStream out = Files.newOutputStream(target)) {

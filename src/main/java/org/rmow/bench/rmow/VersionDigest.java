@@ -4,7 +4,9 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 import org.apache.iceberg.MetadataColumns;
 import org.apache.iceberg.Schema;
@@ -34,10 +36,12 @@ import org.rmow.bench.workload.Rows;
  *       which follows the footer's row-group order.
  * </ul>
  *
- * Every decoded row's payload is checked against {@link Rows#record} as it is read.
+ * Every decoded row's payload is checked against {@link Rows#record} as it is read. A footer-only
+ * version ({@link SplitFile}) is read row group by row group from the objects it names, and a
+ * row's position counts the rows of the row groups the footer lists before its own.
  *
  * @param rowGroupRows each listed row group's row count, in footer order
- * @param offsetOrder whether the footer lists its row groups in ascending file-offset order
+ * @param offsetOrder whether the footer lists each file's row groups in ascending offset order
  * @param footerBytes the serialized footer's length
  */
 public record VersionDigest(
@@ -95,19 +99,48 @@ public record VersionDigest(
     FileMetaData footer = FooterCodec.read(footerBytes, 0, footerBytes.length);
     List<Long> rgRows = new ArrayList<>(footer.getRow_groupsSize());
     boolean ascending = true;
-    long prev = -1;
+    Map<String, Long> prev = new HashMap<>(); // per file
+    boolean footerOnly = false;
     for (RowGroup rg : footer.getRow_groups()) {
       rgRows.add(rg.getNum_rows());
       long start = FooterCodec.startOffset(rg);
-      ascending &= start > prev;
-      prev = start;
+      String file = FooterCodec.filePath(rg);
+      footerOnly |= file != null;
+      Long p = prev.put(String.valueOf(file), start);
+      ascending &= p == null || start > p;
     }
 
-    long rows = 0;
-    long sum = 0;
-    long content = 0;
-    long pos = 0;
-    VersionedInputFile in = new VersionedInputFile(io.newInputFile(location, length), length);
+    long[] acc = new long[4]; // rows, sum, content, pos
+    if (!footerOnly) {
+      VersionedInputFile in = new VersionedInputFile(io.newInputFile(location, length), length);
+      add(in, 0, acc);
+    } else {
+      long before = 0;
+      for (RowGroup rg : footer.getRow_groups()) {
+        FileMetaData one = FooterCodec.withRowGroups(footer, List.of(rg));
+        SplitFile.ObjectView v = SplitFile.views(location, one).get(0);
+        add(
+            new VersionedInputFile(
+                io.newInputFile(v.location(), v.length() - v.tail().length), v.length(), v.tail()),
+            before,
+            acc);
+        before += rg.getNum_rows();
+      }
+    }
+    long rows = acc[0];
+    long sum = acc[1];
+    long content = acc[2];
+    long pos = acc[3];
+    if (rows != footer.getNum_rows()) {
+      throw new IllegalStateException(
+          "Read " + rows + " rows of " + location + "@" + length + ", its footer lists "
+              + footer.getNum_rows());
+    }
+    return new VersionDigest(rows, sum, content, pos, rgRows, ascending, footerBytes.length);
+  }
+
+  /** Adds the rows of {@code in}, whose first row is at position {@code base}. */
+  private static void add(VersionedInputFile in, long base, long[] acc) throws IOException {
     try (CloseableIterable<Record> rs =
         ParquetReads.open(in, PROJECTION, Expressions.alwaysTrue())) {
       for (Record r : rs) {
@@ -115,18 +148,12 @@ public record VersionDigest(
         long id = (Long) r.get(Rows.ID);
         long ts = (Long) r.get(Rows.TS);
         int version = (Integer) r.get(Rows.VERSION);
-        rows++;
-        sum += Rows.rowHash(id, version);
-        content += contentHash(id, ts, version);
-        pos += posHash(id, (Long) r.get(Rows.SCHEMA.columns().size()));
+        acc[0]++;
+        acc[1] += Rows.rowHash(id, version);
+        acc[2] += contentHash(id, ts, version);
+        acc[3] += posHash(id, base + (Long) r.get(Rows.SCHEMA.columns().size()));
       }
     }
-    if (rows != footer.getNum_rows()) {
-      throw new IllegalStateException(
-          "Read " + rows + " rows of " + location + "@" + length + ", its footer lists "
-              + footer.getNum_rows());
-    }
-    return new VersionDigest(rows, sum, content, pos, rgRows, ascending, footerBytes.length);
   }
 
   /** The serialized footer of the version ending at {@code length}. */

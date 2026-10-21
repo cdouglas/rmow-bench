@@ -27,7 +27,7 @@ import pyarrow.parquet as pq
 sys.path.insert(0, str(Path(__file__).parent))
 import plots  # noqa: E402  (palette, arm encoding, direct labels)
 
-ARMS = ["mor-v3", "tailcow-c", "rmow-a", "rmow-b", "rmow-c"]
+ARMS = ["mor-v3", "tailcow-c", "rmow-a", "rmow-b", "rmow-c", "rmow-b-split", "rmow-c-split"]
 READER = "one-footer"
 
 
@@ -76,6 +76,12 @@ def summarize(run):
             "row_groups": end.row_groups,
             "footer_kb": end.footer_bytes / 1e3 if end.footer_bytes >= 0 else None,
             "stored_over_live": end.stored_bytes / end.live_bytes,
+            "kept_over_live": (end.stored_bytes - end.reclaimable_bytes) / end.live_bytes,
+            "compact_mb_per_batch": d[d.phase == "compact"].bytes_written.sum() / 1e6
+            / max(1, batch.step.nunique()),
+            "objects": end.objects,
+            "live_objects": end.get("live_objects"),
+            "read_full_mb": last.loc["read_full", "bytes_read"] / 1e6,
             "rg_mb_median": rg_all,
             "new_rg_mb_median": rg_new,
         })

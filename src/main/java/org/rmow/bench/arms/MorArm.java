@@ -489,6 +489,7 @@ public abstract class MorArm implements Arm {
         live.cardinality(),
         deletes.size(),
         -1, // data-file footers are not tracked yet
-        -1);
+        -1,
+        live.cardinality() + liveObjects.size());
   }
 }

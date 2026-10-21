@@ -43,7 +43,9 @@ class RunnerSmokeTest {
             "rmow-c",
             "rmow-a-dv",
             "rmow-b-dv",
-            "rmow-c-dv");
+            "rmow-c-dv",
+            "rmow-b-split",
+            "rmow-c-split");
     cfg.layout.compactEvery = 4;
     cfg.layout.compactSmallRowGroups = 4;
     cfg.reads.every = 4;
@@ -124,5 +126,18 @@ class RunnerSmokeTest {
     Files.createDirectories(dir.resolve("out"));
     List<JsonNode> recs = run(cfg, dir.resolve("out"));
     assertThat(recs).anyMatch(r -> r.get("phase").asText().equals("state"));
+
+    // H2, a validating case: uniform updates touch every row group every batch, so region-merge-on
+    // -write rewrites every live row, whatever the layout, as copy-on-write does (batches before
+    // the first compaction, which changes each arm's layout differently)
+    java.util.Map<String, Long> written = new java.util.TreeMap<>();
+    recs.stream()
+        .filter(r -> r.get("phase").asText().equals("batch") && r.get("step").asInt() < 4)
+        .forEach(r -> written.merge(r.get("arm").asText(), r.get("bytes_written").asLong(), Long::sum));
+    double cow = written.get("cow");
+    for (String arm : List.of("rmow-a", "rmow-b", "rmow-c", "rmow-b-split", "rmow-c-split")) {
+      // footers aside (split files' region objects carry their own): measured 0.996 to 1.016
+      assertThat(written.get(arm) / cow).as(arm + " bytes written / CoW's").isBetween(0.95, 1.05);
+    }
   }
 }

@@ -39,7 +39,7 @@ import org.rmow.bench.rmow.RegionWriter.Region;
  * <p>A new version is written as one request: the new regions followed by the merged footer,
  * appended at the committed length (or, for a new object, one PUT).
  */
-public final class RmowFile {
+public final class RmowFile implements LogicalFile {
 
   private final String location;
   private long length;
@@ -120,30 +120,11 @@ public final class RmowFile {
       List<Long> newRgIds,
       List<Long> inPlaceOf)
       throws IOException {
-    Set<Integer> drop = new HashSet<>();
-    for (Long id : dropRgIds) {
-      int i = rgIds.indexOf(id);
-      if (i < 0) {
-        throw new IllegalArgumentException("Row group " + id + " is not live in " + location);
-      }
-      drop.add(i);
-    }
+    Set<Integer> drop = positions(rgIds, dropRgIds, location);
     if (newRgIds.size() != regions.size()) {
       throw new IllegalArgumentException("One new row group id per region");
     }
-    List<Integer> slots = null;
-    Map<Integer, Long> slotted = new HashMap<>(); // position -> the new row group taking it
-    if (inPlaceOf != null) {
-      slots = new ArrayList<>(regions.size());
-      for (int j = 0; j < regions.size(); j++) {
-        Long replaced = inPlaceOf.get(j);
-        Integer slot = replaced == null ? null : rgIds.indexOf(replaced);
-        slots.add(slot);
-        if (slot != null) {
-          slotted.put(slot, newRgIds.get(j));
-        }
-      }
-    }
+    List<Integer> slots = slots(rgIds, inPlaceOf);
     checkContiguous(regions, length);
     FileMetaData merged =
         FooterCodec.merge(footer, drop, footers(regions), slots, length, versionLengths.size());
@@ -154,7 +135,55 @@ public final class RmowFile {
     }
     out.write(newTail);
     long newLength = appender.append(location, length, out.toByteArray());
+    commit(newLength, merged, newTail, nextIds(rgIds, drop, slots, newRgIds));
+  }
 
+  @Override
+  public void commit(
+      FileIO io,
+      RegionAppender appender,
+      List<Region> regions,
+      Collection<Long> dropRgIds,
+      List<Long> newRgIds,
+      List<Long> inPlaceOf)
+      throws IOException {
+    append(appender, regions, dropRgIds, newRgIds, inPlaceOf);
+  }
+
+  /** The positions, in the current footer, of the row groups {@code ids}. */
+  static Set<Integer> positions(List<Long> rgIds, Collection<Long> ids, String location) {
+    Set<Integer> out = new HashSet<>();
+    for (Long id : ids) {
+      int i = rgIds.indexOf(id);
+      if (i < 0) {
+        throw new IllegalArgumentException("Row group " + id + " is not live in " + location);
+      }
+      out.add(i);
+    }
+    return out;
+  }
+
+  /** Per region, the position its row group takes (null: listed last); null for none in place. */
+  static List<Integer> slots(List<Long> rgIds, List<Long> inPlaceOf) {
+    if (inPlaceOf == null) {
+      return null;
+    }
+    List<Integer> slots = new ArrayList<>(inPlaceOf.size());
+    for (Long replaced : inPlaceOf) {
+      slots.add(replaced == null ? null : rgIds.indexOf(replaced));
+    }
+    return slots;
+  }
+
+  /** The row group ids of the next footer, in its order. */
+  static List<Long> nextIds(
+      List<Long> rgIds, Set<Integer> drop, List<Integer> slots, List<Long> newRgIds) {
+    Map<Integer, Long> slotted = new HashMap<>(); // position -> the new row group taking it
+    for (int j = 0; slots != null && j < slots.size(); j++) {
+      if (slots.get(j) != null) {
+        slotted.put(slots.get(j), newRgIds.get(j));
+      }
+    }
     List<Long> ids = new ArrayList<>();
     for (int i = 0; i < rgIds.size(); i++) {
       if (slotted.containsKey(i)) {
@@ -168,7 +197,7 @@ public final class RmowFile {
         ids.add(newRgIds.get(j));
       }
     }
-    commit(newLength, merged, newTail, ids);
+    return ids;
   }
 
   private void commit(long newLength, FileMetaData merged, byte[] newTail, List<Long> ids) {
@@ -184,7 +213,7 @@ public final class RmowFile {
     this.dataFile = null;
   }
 
-  private static List<FileMetaData> footers(List<Region> regions) {
+  static List<FileMetaData> footers(List<Region> regions) {
     List<FileMetaData> fs = new ArrayList<>(regions.size());
     for (Region r : regions) {
       fs.add(r.footer());
@@ -192,7 +221,7 @@ public final class RmowFile {
     return fs;
   }
 
-  private static void checkContiguous(List<Region> regions, long start) {
+  static void checkContiguous(List<Region> regions, long start) {
     long pos = start;
     for (Region r : regions) {
       if (r.base() != pos) {
@@ -207,25 +236,73 @@ public final class RmowFile {
     return pending.isEmpty() ? length : pending.get(pending.size() - 1).end();
   }
 
+  @Override
+  public Version current() {
+    return new Version(location, length, false);
+  }
+
+  @Override
+  public List<Version> versions() {
+    return versionLengths.stream().map(l -> new Version(location, l, false)).toList();
+  }
+
+  @Override
   public String location() {
     return location;
   }
 
+  @Override
   public long length() {
     return length;
   }
 
+  @Override
   public FileMetaData footer() {
     return footer;
   }
 
   /** The current version's serialized footer, length and magic (the warm-footer cache). */
+  @Override
   public byte[] tail() {
     return tail;
   }
 
+  @Override
   public List<Long> rgIds() {
     return List.copyOf(rgIds);
+  }
+
+  @Override
+  public String regionLocation() {
+    return location;
+  }
+
+  @Override
+  public long regionBase() {
+    return length;
+  }
+
+  @Override
+  public RowGroupSource source(long rgId) {
+    RowGroup rg = rowGroup(rgId);
+    return new RowGroupSource(
+        location, length, tail, FooterCodec.startOffset(rg), FooterCodec.compressedSize(rg));
+  }
+
+  @Override
+  public List<String> objects() {
+    return List.of(location);
+  }
+
+  @Override
+  public long storedBytes() {
+    return length;
+  }
+
+  /** Nothing: the object holds the current version. */
+  @Override
+  public long reclaimableBytes() {
+    return 0;
   }
 
   public int version() {
@@ -240,6 +317,7 @@ public final class RmowFile {
    * The current version described as an Iceberg data file: its length, and the column metrics
    * and split offsets Iceberg derives from its footer, as a manifest entry for it would hold.
    */
+  @Override
   public DataFile dataFile() {
     if (dataFile == null) {
       try {
@@ -260,6 +338,7 @@ public final class RmowFile {
     return dataFile;
   }
 
+  @Override
   public RowGroup rowGroup(long rgId) {
     int i = rgIds.indexOf(rgId);
     if (i < 0) {
@@ -268,11 +347,13 @@ public final class RmowFile {
     return footer.getRow_groups().get(i);
   }
 
+  @Override
   public long liveRows() {
     return footer.getNum_rows();
   }
 
   /** Bytes the current version references: magic, row groups with their indexes, and footer. */
+  @Override
   public long liveBytes() {
     long live = FooterCodec.MAGIC.length + tail.length;
     for (RowGroup rg : footer.getRow_groups()) {
