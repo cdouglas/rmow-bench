@@ -15,8 +15,6 @@ import java.util.concurrent.Executors;
 import org.apache.iceberg.deletes.DeleteGranularity;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
-import org.apache.iceberg.io.FileIO;
-import org.rmow.bench.append.RegionAppender;
 import org.rmow.bench.arms.Arm;
 import org.rmow.bench.arms.ArmContext;
 import org.rmow.bench.arms.ArmStats;
@@ -28,9 +26,9 @@ import org.rmow.bench.arms.MorV3Arm;
 import org.rmow.bench.arms.RmowArm;
 import org.rmow.bench.arms.TailCowArm;
 import org.rmow.bench.arms.TailPolicy;
+import org.rmow.bench.arms.VersionDump;
 import org.rmow.bench.io.IoTrace;
-import org.rmow.bench.io.MemFileIO;
-import org.rmow.bench.io.PreadFileIO;
+import org.rmow.bench.io.RelocatedFileIO;
 import org.rmow.bench.io.TracingFileIO;
 import org.rmow.bench.oracle.ReferenceModel;
 import org.rmow.bench.oracle.TableHash;
@@ -48,42 +46,77 @@ import org.rmow.bench.workload.OpLogGenerator;
  */
 public final class Runner {
 
+  /**
+   * How a run executes, apart from what it measures (not part of the config hash).
+   *
+   * @param storeRoot the root the run's objects go under, instead of the config's; null: the
+   *     config's
+   * @param keepStore keep the run's objects; by default they are deleted once the run ends
+   * @param dumpVersions write every version of the appendable objects to {@code versions/} in
+   *     the run directory ({@link VersionDump})
+   */
+  public record Options(String storeRoot, boolean keepStore, boolean dumpVersions) {
+    public static final Options DEFAULT = new Options(null, false, false);
+
+    String storeRoot(BenchConfig cfg) {
+      return storeRoot != null ? storeRoot : cfg.store.root;
+    }
+  }
+
   private record ArmRun(Arm arm, Phases phases, IoTrace trace) {}
+
+  /** The root every run's files are named under; the store holds them under the run's prefix. */
+  static final String LOGICAL_ROOT = "bench://run";
 
   private final BenchConfig cfg;
   private final Path runDir;
   private final String runId;
+  private final Options options;
   private final ObjectMapper json = new ObjectMapper();
   private final List<Reader> readers = new ArrayList<>();
 
   public Runner(BenchConfig cfg, Path runDir, String runId) {
+    this(cfg, runDir, runId, Options.DEFAULT);
+  }
+
+  public Runner(BenchConfig cfg, Path runDir, String runId, Options options) {
     this.cfg = cfg;
     this.runDir = runDir;
     this.runId = runId;
+    this.options = options;
   }
 
   /** Runs the benchmark; returns the op log's SHA-256 (for the run manifest). */
   public String run() throws IOException {
+    Store store = Store.open(cfg.store);
+    try {
+      return run(store);
+    } finally {
+      try {
+        store.close();
+      } catch (Exception e) {
+        throw new IOException("Cannot close the store", e);
+      }
+    }
+  }
+
+  private String run(Store store) throws IOException {
+    if (store.appender() == null) {
+      for (String arm : cfg.arms) {
+        if (arm.startsWith("rmow-")) {
+          throw new IllegalArgumentException(
+              arm + " appends, and this store cannot (on S3 it needs S3 Express: append express)");
+        }
+      }
+    }
     OpLog log = OpLogGenerator.generate(cfg.workload);
     log.write(runDir.resolve("oplog.bin"));
 
-    FileIO raw;
-    RegionAppender appender;
-    switch (cfg.store.type) {
-      case "mem" -> {
-        MemFileIO mem = new MemFileIO();
-        raw = mem;
-        appender = mem;
-      }
-      case "local" -> {
-        PreadFileIO local = new PreadFileIO(cfg.store.fsync);
-        raw = local;
-        appender = local;
-      }
-      default -> throw new IllegalArgumentException("Unknown store type: " + cfg.store.type);
-    }
-    String root = cfg.store.root + "/" + runId;
-    List<InitialLoad.InitialFile> base = InitialLoad.write(raw, root + "/base", log, cfg.layout);
+    // every run names its files alike (see RelocatedFileIO); its objects go under its own prefix
+    String root = options.storeRoot(cfg) + "/" + runId;
+    RelocatedFileIO io = new RelocatedFileIO(store.io(), store.appender(), LOGICAL_ROOT, root);
+    List<InitialLoad.InitialFile> base =
+        InitialLoad.write(io, LOGICAL_ROOT + "/base", log, cfg.layout);
 
     List<ExecutorService> pools = new ArrayList<>();
     for (BenchConfig.ReaderSpec r : cfg.reads.readers) {
@@ -96,19 +129,19 @@ public final class Runner {
     List<ArmRun> arms = new ArrayList<>();
     for (String name : cfg.arms) {
       IoTrace trace = new IoTrace();
-      Phases phases = new Phases(trace);
+      Phases phases = new Phases(trace, store.recorder());
       ArmContext ctx =
           new ArmContext(
               name,
-              root + "/" + name,
-              new TracingFileIO(raw, appender, trace),
-              raw,
+              LOGICAL_ROOT + "/" + name,
+              new TracingFileIO(io, io, trace),
+              io,
               phases,
               cfg.layout,
               log,
               cfg.verifyRows);
       Arm arm = create(name, ctx);
-      arm.load(InitialLoad.copy(raw, base, ctx.root()));
+      arm.load(InitialLoad.copy(io, base, ctx.root()));
       arms.add(new ArmRun(arm, phases, trace));
     }
 
@@ -147,6 +180,14 @@ public final class Runner {
       }
     }
     pools.forEach(ExecutorService::shutdown);
+    if (options.dumpVersions()) {
+      List<Arm> all = new ArrayList<>();
+      arms.forEach(a -> all.add(a.arm()));
+      VersionDump.write(runDir.resolve("versions"), cfg.store.type, io, all, model::expectedAfter);
+    }
+    if (!options.keepStore()) {
+      store.deleteRun(root);
+    }
     return log.sha256();
   }
 
@@ -276,6 +317,7 @@ public final class Runner {
     m.put("data_files", s.dataFiles());
     m.put("delete_files", s.deleteFiles());
     m.put("footer_bytes", s.footerBytes());
+    m.put("row_groups_out_of_order", s.rowGroupsOutOfOrder());
     out.write(json.writeValueAsString(m));
     out.newLine();
   }

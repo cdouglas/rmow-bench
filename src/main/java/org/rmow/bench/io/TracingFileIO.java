@@ -25,6 +25,8 @@ import org.rmow.bench.append.RegionAppender;
  *       at most {@link #SKIP_SIZE} reads through the gap on the same request, and any other seek
  *       abandons the request (an abort) and opens a new one on the next read;
  *   <li>{@code getLength()} on an InputFile created without a length is a HEAD (once per file);
+ *   <li>{@code OutputFile.create()} is a HEAD, the existence check Iceberg's S3 and ADLS output
+ *       files make ({@code createOrOverwrite()} makes none);
  *   <li>an output stream is one PUT on close; an append is one APPEND.
  * </ul>
  *
@@ -241,8 +243,14 @@ public final class TracingFileIO implements FileIO, RegionAppender {
       this.file = file;
     }
 
+    /**
+     * Iceberg's S3 and ADLS output files check that the object does not exist first (a HEAD);
+     * writers that may replace a file call {@link #createOrOverwrite} instead. Of stock Iceberg's
+     * writers only Puffin's ({@code PuffinWriter}, so every DV file) calls this.
+     */
     @Override
     public PositionOutputStream create() {
+      trace.record(IoTrace.Kind.HEAD, file.location(), 0, 0);
       return new TracingOutputStream(file.create(), file.location());
     }
 

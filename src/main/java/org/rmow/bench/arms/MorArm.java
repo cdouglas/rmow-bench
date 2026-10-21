@@ -488,6 +488,7 @@ public abstract class MorArm implements Arm {
         rowGroups,
         live.cardinality(),
         deletes.size(),
-        -1); // data-file footers are not tracked yet
+        -1, // data-file footers are not tracked yet
+        -1);
   }
 }

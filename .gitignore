@@ -3,3 +3,4 @@ target/
 results/
 __pycache__/
 .jqwik-database
+store/

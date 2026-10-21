@@ -7,14 +7,31 @@ import org.rmow.bench.workload.WorkloadSpec;
 /** A benchmark run's configuration, bound from JSON (public fields with defaults). */
 public final class BenchConfig {
 
-  /** Where objects live. */
+  /** Where objects live (see {@link Store}). */
   public static final class StoreSpec {
-    /** {@code mem} (in-memory) or {@code local} (positional reads on a local filesystem). */
+    /** {@code mem} (in-memory), {@code local} (a local filesystem) or {@code s3}. */
     public String type = "mem";
-    /** Location prefix; for {@code local}, an absolute directory. */
+    /**
+     * Location prefix: for {@code local}, an absolute directory; for {@code s3}, {@code
+     * s3://bucket/prefix}. Each run puts its objects under its own prefix here.
+     */
     public String root = "mem://bench";
     /** For {@code local}: fsync each written object and append. */
     public boolean fsync = false;
+    /**
+     * For {@code s3}: how RMoW appends. {@code express}: S3 Express One Zone, a PutObject at the
+     * object's length. {@code emulated}: read the object and write it back longer, for emulators
+     * only (unmeasured). {@code none}: standard S3, where RMoW arms cannot run.
+     */
+    public String append = "none";
+    /** For {@code s3}: an endpoint to use instead of AWS's (an emulator's). */
+    public String endpoint = "";
+    /** For {@code s3}: the region; empty means {@code AWS_REGION}, or else us-east-1. */
+    public String region = "";
+    /** For {@code s3}: path-style requests, as emulators need. */
+    public boolean pathStyle = false;
+    /** For {@code s3}: the HTTP client's connection pool. */
+    public int maxConnections = 64;
   }
 
   /** Which reads probe the arms, and how often. */

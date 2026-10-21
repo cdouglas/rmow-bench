@@ -12,7 +12,12 @@ public final class LayoutSpec {
 
   /** Parquet codec. Iceberg tables created since 1.4 default to zstd (gzip without a table). */
   public String codec = "zstd";
-  /** Row-group target of data files and of the initial load. */
+  /**
+   * Row-group target of data files and of the initial load: Parquet's, which counts buffered
+   * bytes (compressed pages plus the open, uncompressed ones), so row groups come out smaller on
+   * disk (about a third of a 1 MiB target for the bench schema at zstd). RMoW compaction packs
+   * row groups to this many compressed bytes.
+   */
   public long rowGroupBytes = 16L << 20;
   /** Data files (and appendable files' live bytes) roll over at this size. */
   public long targetFileBytes = 128L << 20;
@@ -25,8 +30,10 @@ public final class LayoutSpec {
    */
   public boolean writerCachesFooters = true;
   /**
-   * Tail merging (RMoW policies B and C, TailCoW): an open tail unit is sealed at this size.
-   * Defaults to the row-group target, so merged tails grow into ordinary row groups.
+   * Tail merging (RMoW policies B and C, TailCoW): an open tail unit is sealed at this many
+   * compressed bytes (under C, once {@code tierFanout} units of its size would pass it). Units
+   * are row groups (RMoW, inserts only) or whole data files (TailCoW, with the batch's updated
+   * versions), so one seal size makes TailCoW units seal sooner.
    */
   public long tailSealBytes = 16L << 20;
   /** Tiered tail merging (policy C): this many units of one level merge into one a level up. */
@@ -37,6 +44,14 @@ public final class LayoutSpec {
    * ({@code FooterBench}).
    */
   public int maxRowGroupsPerFile = 128;
+  /**
+   * RMoW: where a row group that replaces another is listed in the new footer. {@code logical}:
+   * in the replaced row group's place, so footer order, which is row order, stays the order rows
+   * were inserted in (id order) and a file written sorted stays sorted. {@code offset}: last,
+   * which keeps the list in ascending file-offset order. Readers read either (the Parquet spec
+   * requires neither; see {@code docs/DESIGN.md}), and the I/O is the same.
+   */
+  public String footerOrder = "logical";
   /**
    * Readers (every arm, data and delete files alike) prefetch this many trailing bytes on a
    * file's first footer probe, so a footer that fits costs one request. 0: stock parquet-java,

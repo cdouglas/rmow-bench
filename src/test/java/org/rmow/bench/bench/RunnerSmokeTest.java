@@ -95,8 +95,22 @@ class RunnerSmokeTest {
     assertThat(recs)
         .filteredOn(r -> r.get("arm").asText().equals("mor-v2-file") && r.get("phase").asText().equals("state"))
         .allMatch(r -> r.get("delete_files").asLong() <= r.get("data_files").asLong());
-    // no arm pays a HEAD (I/O parity rule 2)
-    assertThat(recs).filteredOn(r -> r.has("heads")).allMatch(r -> r.get("heads").asLong() == 0);
+    // no arm pays a HEAD stock Iceberg would not (I/O parity rule 2): reads none, and writes only
+    // the existence check of each Puffin file, so only arms that write DVs
+    assertThat(recs)
+        .filteredOn(r -> r.has("heads") && r.get("phase").asText().startsWith("read"))
+        .allMatch(r -> r.get("heads").asLong() == 0);
+    assertThat(recs)
+        .filteredOn(r -> r.has("heads") && r.get("heads").asLong() > 0)
+        .extracting(r -> r.get("arm").asText())
+        .allMatch(a -> a.equals("mor-v3") || a.startsWith("tailcow-") || a.endsWith("-dv"));
+    assertThat(recs)
+        .filteredOn(
+            r ->
+                r.has("heads")
+                    && r.get("phase").asText().equals("delete-write")
+                    && !r.get("arm").asText().startsWith("mor-v2-"))
+        .allMatch(r -> r.get("heads").asLong() == 1);
   }
 
   @Test

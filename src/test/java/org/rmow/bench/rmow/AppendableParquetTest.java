@@ -44,7 +44,8 @@ import org.rmow.bench.workload.Rows;
  *   <li>v0: ids [0, n0), one row group (rg 0);
  *   <li>v1: v0 plus an appended region with ids [n0, n0 + n1) (rg 1);
  *   <li>v2: rg 0 replaced by a merged region (rg 2): ids [0, 50) updated to version 1, ids [50,
- *       100) deleted.
+ *       100) deleted. The footer lists rg 2 last (offset order) or in rg 0's place (logical
+ *       order, out of offset order).
  * </ul>
  */
 class AppendableParquetTest {
@@ -77,18 +78,24 @@ class AppendableParquetTest {
   private record Versions(RmowFile file, long len0, long len1, long len2, List<Record> rows2) {}
 
   private Versions build(int n0, int n1) throws IOException {
-    Region r0 = writer.write(LOC, 0, rows(0, n0, 0));
-    RmowFile f = RmowFile.create(io, LOC, List.of(r0), List.of(0L));
+    return build(LOC, n0, n1, false);
+  }
+
+  private Versions build(String loc, int n0, int n1, boolean inPlace) throws IOException {
+    Region r0 = writer.write(loc, 0, rows(0, n0, 0));
+    RmowFile f = RmowFile.create(io, loc, List.of(r0), List.of(0L));
     long len0 = f.length();
 
-    Region r1 = writer.write(LOC, f.length(), rows(n0, n0 + n1, 0));
+    Region r1 = writer.write(loc, f.length(), rows(n0, n0 + n1, 0));
     f.append(io, List.of(r1), List.of(), List.of(1L));
     long len1 = f.length();
 
     List<Record> rows2 = new ArrayList<>(rows(0, 50, 1));
     rows2.addAll(rows(100, n0, 0));
-    Region r2 = writer.write(LOC, f.length(), rows2);
-    f.append(io, List.of(r2), List.of(0L), List.of(2L));
+    Region r2 = writer.write(loc, f.length(), rows2);
+    List<Long> inPlaceOf = new ArrayList<>();
+    inPlaceOf.add(inPlace ? 0L : null);
+    f.append(io, List.of(r2), List.of(0L), List.of(2L), inPlaceOf);
     return new Versions(f, len0, len1, f.length(), rows2);
   }
 
@@ -171,6 +178,52 @@ class AppendableParquetTest {
     // footer order: the appended rg 1 (ids 2000..) first, then the merged rg 2
     assertThat(got.get(0)[0]).isEqualTo(2000);
     assertThat(got.get(1000)[0]).isEqualTo(0);
+  }
+
+  /** RK' in RK's slot: footer order is no longer offset order, and every reader path holds. */
+  @Test
+  void inPlaceRowGroupKeepsItsSlot() throws IOException {
+    String loc = "mem://t/logical.parquet";
+    Versions v = build(loc, 2000, 1000, true);
+    RmowFile f = v.file();
+    assertThat(f.rgIds()).containsExactly(2L, 1L);
+    List<RowGroup> rgs = f.footer().getRow_groups();
+    assertThat(FooterCodec.startOffset(rgs.get(0)))
+        .isGreaterThan(FooterCodec.startOffset(rgs.get(1)));
+    assertThat(rgs.get(0).getOrdinal()).isEqualTo((short) 0);
+
+    InputFile in = new VersionedInputFile(io.newInputFile(loc, v.len2()), v.len2());
+    TableHash want = hash(v.rows2());
+    want.addAll(hash(rows(2000, 3000, 0)));
+    assertThat(readIceberg(in)).isEqualTo(want);
+    assertThat(readParquetJava(in)).isEqualTo(want);
+
+    // row positions follow footer order: the rewritten rows come first again, as in v0
+    Schema projection =
+        TypeUtil.join(Rows.SCHEMA.select("id"), new Schema(MetadataColumns.ROW_POSITION));
+    List<Long> ids = new ArrayList<>();
+    try (CloseableIterable<Record> rs = ParquetReads.open(in, projection, Expressions.alwaysTrue())) {
+      for (Record r : rs) {
+        assertThat((Long) r.get(1)).isEqualTo(ids.size());
+        ids.add((Long) r.get(0));
+      }
+    }
+    assertThat(ids).isSorted();
+
+    // Iceberg's split offsets are sorted (its spec requires it); planned splits still read every
+    // row once, each split taking the row group whose midpoint it holds
+    List<Long> offsets = f.dataFile().splitOffsets();
+    assertThat(offsets).isSorted().hasSize(2);
+    TableHash bySplit = new TableHash();
+    for (int i = 0; i < offsets.size(); i++) {
+      long start = offsets.get(i);
+      long end = i + 1 < offsets.size() ? offsets.get(i + 1) : v.len2();
+      try (CloseableIterable<Record> rs =
+          ParquetReads.open(in, Rows.SCHEMA, Expressions.alwaysTrue(), start, end - start)) {
+        rs.forEach(r -> bySplit.add(r, true));
+      }
+    }
+    assertThat(bySplit).isEqualTo(want);
   }
 
   @Test
@@ -256,36 +309,39 @@ class AppendableParquetTest {
     assertThat(p.gets()).isEqualTo(s.gets() - 1);
   }
 
-  /** Prefix copies of each version, for {@code analysis/interop_check.py} (pyarrow, DuckDB). */
+  /**
+   * Both files, offset order and logical order, in the layout {@code analysis/interop_check.py}
+   * reads (pyarrow, DuckDB): each object once, and {@code versions.csv} with what Iceberg decodes
+   * from each version, checked here against the rows written.
+   */
   @Test
   void dumpVersionsForInterop() throws IOException {
-    Versions v = build(2000, 1000);
     Path dir = Path.of("target", "interop");
     Files.createDirectories(dir);
-    long[] lens = {v.len0(), v.len1(), v.len2()};
-    TableHash[] want = {
-      hash(rows(0, 2000, 0)), hash(rows(0, 3000, 0)), hash(v.rows2()),
-    };
-    want[2].addAll(hash(rows(2000, 3000, 0)));
-    StringBuilder expected = new StringBuilder("file,rows,sum\n");
-    for (int i = 0; i < lens.length; i++) {
-      byte[] bytes = new byte[(int) lens[i]];
-      try (SeekableInputStream s = io.newInputFile(LOC, lens[i]).newStream()) {
+    StringBuilder csv = new StringBuilder(VersionDigest.CSV_HEADER).append('\n');
+    for (String order : List.of("offset", "logical")) {
+      String loc = "mem://t/" + order + ".parquet";
+      Versions v = build(loc, 2000, 1000, order.equals("logical"));
+      long[] lens = {v.len0(), v.len1(), v.len2()};
+      TableHash[] want = {
+        hash(rows(0, 2000, 0)), hash(rows(0, 3000, 0)), hash(v.rows2()),
+      };
+      want[2].addAll(hash(rows(2000, 3000, 0)));
+      byte[] bytes = new byte[(int) v.len2()];
+      try (SeekableInputStream s = io.newInputFile(loc, v.len2()).newStream()) {
         org.apache.iceberg.io.IOUtil.readFully(s, bytes, 0, bytes.length);
       }
-      String name = "v" + i + ".parquet";
-      try (OutputStream out = Files.newOutputStream(dir.resolve(name))) {
+      try (OutputStream out = Files.newOutputStream(dir.resolve(order + ".parquet"))) {
         out.write(bytes);
       }
-      expected
-          .append(name)
-          .append(',')
-          .append(want[i].count())
-          .append(',')
-          .append(Long.toUnsignedString(want[i].sum()))
-          .append('\n');
+      for (int i = 0; i < lens.length; i++) {
+        VersionDigest d = VersionDigest.read(io, loc, lens[i]);
+        assertThat(d.hash()).isEqualTo(want[i]);
+        assertThat(d.offsetOrder()).isEqualTo(i < 2 || order.equals("offset"));
+        csv.append(d.csv("test", order + ".parquet", i, lens[i])).append('\n');
+      }
     }
-    Files.writeString(dir.resolve("expected.csv"), expected.toString());
+    Files.writeString(dir.resolve("versions.csv"), csv.toString());
   }
 
   private static TableHash readParquetJava(InputFile in) throws IOException {

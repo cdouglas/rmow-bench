@@ -59,6 +59,12 @@ import org.rmow.bench.workload.Rows;
  * The tail file rolls over once its live bytes reach the target file size or its footer lists
  * {@code maxRowGroupsPerFile} row groups, sealing every open tail. Replaced regions stay in their
  * object, where time travel still reads them.
+ *
+ * <p>A rewritten row group takes the replaced one's place in the footer ({@code footerOrder}
+ * {@code logical}) or is listed last ({@code offset}). Inserts take new, larger ids and updates
+ * rewrite rows within their row group, so under {@code logical} every footer lists its row groups
+ * in id order, which is checked after each append (without DVs, which move updated rows to the
+ * tail).
  */
 public final class RmowArm implements Arm {
 
@@ -69,6 +75,7 @@ public final class RmowArm implements Arm {
   private final RegionWriter regions;
   private final TailPolicy policy;
   private final boolean dvSealed;
+  private final boolean inPlace; // footerOrder logical: rewritten row groups keep their place
   private final List<RmowFile> files = new ArrayList<>();
   private final List<RmowFile> rewritten = new ArrayList<>(); // replaced by compaction; stored
   private final List<List<Version>> history = new ArrayList<>(); // per step: each file's version
@@ -87,6 +94,13 @@ public final class RmowArm implements Arm {
     this.regions = new RegionWriter(Rows.SCHEMA, ctx.layout().writerProperties());
     this.policy = new TailPolicy(kind, ctx.layout().tailSealBytes, ctx.layout().tierFanout);
     this.dvSealed = dvSealed;
+    this.inPlace =
+        switch (ctx.layout().footerOrder) {
+          case "logical" -> true;
+          case "offset" -> false;
+          default ->
+              throw new IllegalArgumentException("Unknown footer order: " + ctx.layout().footerOrder);
+        };
     this.rgOfId = new long[(int) ctx.log().totalIds()];
     this.posInRg = new int[(int) ctx.log().totalIds()];
     Arrays.fill(rgOfId, -1);
@@ -154,6 +168,7 @@ public final class RmowArm implements Arm {
     final String location;
     final List<Region> regions = new ArrayList<>();
     final List<Long> newRgIds = new ArrayList<>();
+    final List<Long> inPlaceOf = new ArrayList<>(); // per region: the row group it replaces, or null
     final List<Long> drop = new ArrayList<>();
 
     Pending(RmowFile file, String location) {
@@ -300,7 +315,7 @@ public final class RmowArm implements Arm {
       }
       Pending p = pending(pending, fileOfRg.get(rg));
       p.drop.add(rg);
-      Region r = addRegion(p, e.getValue().merged(), idsOfNewRg);
+      Region r = addRegion(p, e.getValue().merged(), idsOfNewRg, inPlace ? rg : null);
       if (policy.isOpen(rg)) {
         policy.replace(
             rg,
@@ -321,7 +336,7 @@ public final class RmowArm implements Arm {
         rows.addAll(touched.get(rg).merged());
         p.drop.add(rg);
       }
-      Region r = addRegion(p, rows, idsOfNewRg);
+      Region r = addRegion(p, rows, idsOfNewRg, null);
       bytesPerRow = r.bytes().length / (double) r.rows();
       policy.commit(plan, p.newRgIds.get(p.newRgIds.size() - 1), r.bytes().length);
     }
@@ -332,7 +347,11 @@ public final class RmowArm implements Arm {
         files.add(RmowFile.create(ctx.io(), p.location, p.regions, p.newRgIds));
         tail = e.getKey();
       } else {
-        p.file.append(ctx.io(), p.regions, p.drop, p.newRgIds);
+        p.file.append(ctx.io(), p.regions, p.drop, p.newRgIds, inPlace ? p.inPlaceOf : null);
+      }
+      if (inPlace && !dvSealed && outOfOrder(files.get(e.getKey())) > 0) {
+        throw new IllegalStateException(
+            "Footer of " + files.get(e.getKey()).location() + " lists row groups out of id order");
       }
       for (long rg : p.drop) {
         fileOfRg.remove(rg);
@@ -358,8 +377,12 @@ public final class RmowArm implements Arm {
     }
   }
 
-  /** Adds {@code rows} as one new region of {@code p}'s file; null if there are no rows. */
-  private Region addRegion(Pending p, List<Record> rows, Map<Long, List<Long>> idsOfNewRg)
+  /**
+   * Adds {@code rows} as one new region of {@code p}'s file, to take the place of row group {@code
+   * inPlaceOf} in the footer (null: listed last); null if there are no rows.
+   */
+  private Region addRegion(
+      Pending p, List<Record> rows, Map<Long, List<Long>> idsOfNewRg, Long inPlaceOf)
       throws IOException {
     if (rows.isEmpty()) {
       return null;
@@ -377,6 +400,7 @@ public final class RmowArm implements Arm {
     Region region = regions.write(p.location, p.nextBase(), rows);
     p.regions.add(region);
     p.newRgIds.add(rg);
+    p.inPlaceOf.add(inPlaceOf);
     idsOfNewRg.put(rg, ids);
     return region;
   }
@@ -622,7 +646,7 @@ public final class RmowArm implements Arm {
       packed.addAll(byRg.get(rg));
       bytes += FooterCodec.compressedSize(f.rowGroup(rg));
       if (bytes >= ctx.layout().rowGroupBytes || n == order.size() - 1) {
-        addRegion(p, packed, idsOfNewRg);
+        addRegion(p, packed, idsOfNewRg, null);
         packed = new ArrayList<>();
         bytes = 0;
       }
@@ -662,11 +686,13 @@ public final class RmowArm implements Arm {
     long live = 0;
     long rowGroups = 0;
     long footers = 0;
+    long outOfOrder = 0;
     for (RmowFile f : files) {
       stored += f.length();
       live += f.liveBytes();
       rowGroups += f.footer().getRow_groupsSize();
       footers += f.tail().length;
+      outOfOrder += outOfOrder(f);
     }
     long reclaimable = 0;
     for (RmowFile f : rewritten) {
@@ -687,6 +713,52 @@ public final class RmowArm implements Arm {
         rowGroups,
         files.size(),
         dvs.size(),
-        footers);
+        footers,
+        outOfOrder);
+  }
+
+  /** Row groups the footer lists after one holding a larger id. */
+  private static long outOfOrder(RmowFile f) {
+    long count = 0;
+    long maxSoFar = Long.MIN_VALUE;
+    for (RowGroup rg : f.footer().getRow_groups()) {
+      Statistics st = rg.getColumns().get(0).getMeta_data().getStatistics();
+      if (le64(st.getMin_value()) < maxSoFar) {
+        count++;
+      }
+      maxSoFar = Math.max(maxSoFar, le64(st.getMax_value()));
+    }
+    return count;
+  }
+
+  // --- for VersionDump ---------------------------------------------------------------------------
+
+  ArmContext ctx() {
+    return ctx;
+  }
+
+  boolean dvSealed() {
+    return dvSealed;
+  }
+
+  /** Every appendable object this arm adopted or wrote, those compaction replaced included. */
+  List<RmowFile> objects() {
+    List<RmowFile> all = new ArrayList<>(rewritten);
+    all.addAll(files);
+    return all;
+  }
+
+  /** The number of table states recorded: the initial load and one per batch. */
+  int steps() {
+    return history.size();
+  }
+
+  /** The (location, length) of each file version the table held after {@code step} batches. */
+  List<Map.Entry<String, Long>> versionsAfter(int step) {
+    List<Map.Entry<String, Long>> out = new ArrayList<>();
+    for (Version v : history.get(step)) {
+      out.add(Map.entry(v.file().location(), v.length()));
+    }
+    return out;
   }
 }

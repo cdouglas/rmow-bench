@@ -32,6 +32,7 @@ public final class DataFileWriter {
             .schema(Rows.SCHEMA)
             .createWriterFunc(GenericParquetWriter::create)
             .setAll(writerProperties)
+            .overwrite() // as Iceberg's writer factories do: no existence check
             .build();
     try (FileAppender<Record> a = appender) {
       a.addAll(rows);

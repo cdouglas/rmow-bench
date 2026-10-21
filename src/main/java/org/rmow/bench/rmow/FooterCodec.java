@@ -8,6 +8,8 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -21,13 +23,18 @@ import org.apache.parquet.format.Util;
 /**
  * Reads, merges and writes Parquet footers at the Thrift level.
  *
- * <p>A merged footer lists the live row groups of the previous version (minus the replaced ones)
- * followed by the new region's row groups. Its invariants:
+ * <p>A merged footer lists the live row groups of the previous version, minus the replaced ones,
+ * and the new regions' row groups. A new row group is listed either last or in the place of the
+ * row group it replaces. Footer order is row order (a row's position counts the rows of the row
+ * groups listed before it), so the first keeps the list in ascending file-offset order and the
+ * second keeps the rows in the order they were written. The Parquet spec requires neither order
+ * (see {@code docs/DESIGN.md}). Its invariants:
  *
  * <ul>
  *   <li>the schema matches the previous version's (no schema evolution in this PoC);
- *   <li>row groups appear in ascending file-offset order, which the new ones satisfy since they
- *       sit after every earlier byte (parquet-java's PARQUET-2078 fallback checks this order);
+ *   <li>no two row groups start at one offset; without in-place row groups, they are listed in
+ *       ascending offset order, which the new ones satisfy since they sit after every earlier
+ *       byte;
  *   <li>{@code ordinal} is the list position and there are at most 32767 row groups (an i16; it
  *       is also part of the encryption AAD, so encrypted files are out of scope);
  *   <li>{@code num_rows} is the sum over the listed row groups;
@@ -85,7 +92,7 @@ public final class FooterCodec {
   }
 
   /**
-   * Builds the footer of the next version.
+   * Builds the footer of the next version, listing every new row group last.
    *
    * @param previous the current version's footer, or null for a new object
    * @param drop positions (in {@code previous}'s row-group list) of the row groups to omit
@@ -99,28 +106,62 @@ public final class FooterCodec {
       List<FileMetaData> regions,
       long prevLength,
       long version) {
+    return merge(previous, drop, regions, null, prevLength, version);
+  }
+
+  /**
+   * Builds the footer of the next version.
+   *
+   * @param slots null to list every new row group last, in ascending offset order; otherwise, per
+   *     region, the position (one of {@code drop}) of the row group whose place in the list the
+   *     region's row groups take, or null to list them last
+   */
+  public static FileMetaData merge(
+      FileMetaData previous,
+      Set<Integer> drop,
+      List<FileMetaData> regions,
+      List<Integer> slots,
+      long prevLength,
+      long version) {
     if (previous == null && regions.isEmpty()) {
       throw new IllegalArgumentException("A new object needs at least one region");
     }
+    if (slots != null && slots.size() != regions.size()) {
+      throw new IllegalArgumentException("One slot per region");
+    }
     FileMetaData base = previous != null ? previous : regions.get(0);
     FileMetaData merged = copyWithoutRowGroups(base);
+
+    Map<Integer, FileMetaData> inPlace = new HashMap<>();
+    List<FileMetaData> last = new ArrayList<>();
+    for (int j = 0; j < regions.size(); j++) {
+      FileMetaData region = regions.get(j);
+      if (!region.getSchema().equals(base.getSchema())) {
+        throw new IllegalArgumentException("Region schema differs from the file's schema");
+      }
+      Integer slot = slots == null ? null : slots.get(j);
+      if (slot == null) {
+        last.add(region);
+      } else if (previous == null || !drop.contains(slot) || inPlace.put(slot, region) != null) {
+        throw new IllegalArgumentException(
+            "Region " + j + " cannot take the place of row group " + slot);
+      }
+    }
 
     List<RowGroup> groups = new ArrayList<>();
     if (previous != null) {
       List<RowGroup> old = previous.getRow_groups();
       for (int i = 0; i < old.size(); i++) {
-        if (!drop.contains(i)) {
+        FileMetaData region = inPlace.get(i);
+        if (region != null) {
+          region.getRow_groups().forEach(rg -> groups.add(shallowCopy(rg)));
+        } else if (!drop.contains(i)) {
           groups.add(shallowCopy(old.get(i)));
         }
       }
     }
-    for (FileMetaData region : regions) {
-      if (!region.getSchema().equals(base.getSchema())) {
-        throw new IllegalArgumentException("Region schema differs from the file's schema");
-      }
-      for (RowGroup rg : region.getRow_groups()) {
-        groups.add(shallowCopy(rg));
-      }
+    for (FileMetaData region : last) {
+      region.getRow_groups().forEach(rg -> groups.add(shallowCopy(rg)));
     }
     if (groups.size() > Short.MAX_VALUE) {
       throw new IllegalStateException("More row groups than an i16 ordinal holds: " + groups.size());
@@ -128,10 +169,14 @@ public final class FooterCodec {
 
     long rows = 0;
     long prevStart = -1;
+    Set<Long> starts = new HashSet<>();
     for (int i = 0; i < groups.size(); i++) {
       RowGroup rg = groups.get(i);
       long start = startOffset(rg);
-      if (start <= prevStart) {
+      if (!starts.add(start)) {
+        throw new IllegalStateException("Two row groups start at offset " + start);
+      }
+      if (slots == null && start <= prevStart) {
         throw new IllegalStateException(
             "Row groups out of file order at " + i + ": " + start + " <= " + prevStart);
       }

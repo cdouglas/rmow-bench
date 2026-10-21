@@ -53,6 +53,18 @@ class TailPolicyTest {
   }
 
   @Test
+  void aSealedMergeSealsTheOlderOpenUnits() {
+    TailPolicy p = new TailPolicy(TailPolicy.Kind.C, 600, 3);
+    simulate(p, 5, 50); // a level-1 unit of 150, then two level-0 units of 50
+    assertThat(p.open()).extracting(TailPolicy.Unit::level).containsExactly(1, 0, 0);
+    TailPolicy.Plan plan = p.plan(300);
+    assertThat(plan.merge()).extracting(TailPolicy.Unit::level).containsExactly(0, 0);
+    p.commit(plan, 99, 400); // past seal / fanout: sealed
+    // the level-1 unit sits before the sealed one: merging it later would span it
+    assertThat(p.open()).isEmpty();
+  }
+
+  @Test
   void replaceKeepsPlaceAndLevel() {
     TailPolicy p = new TailPolicy(TailPolicy.Kind.C, 1 << 20, 4);
     // fanout 4: three level-0 units stay open

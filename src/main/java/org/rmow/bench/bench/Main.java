@@ -26,12 +26,24 @@ import org.apache.iceberg.IcebergBuild;
  * Runs one benchmark configuration.
  *
  * <pre>
- *   bin/run.sh &lt;config.json&gt; [--out &lt;dir&gt;]
+ *   bin/run.sh &lt;config.json&gt; [--out &lt;dir&gt;] [--store-root &lt;dir&gt;] [--keep-store] [--dump-versions]
  * </pre>
  *
  * Results go to {@code <out>/<label>-<config hash>/<UTC start time>/}: {@code manifest.json}
  * (config, versions, host, op-log hash), {@code oplog.bin} and {@code steps.jsonl}. The config
  * hash names the experiment, so repeated runs of one configuration share a directory.
+ *
+ * <ul>
+ *   <li>{@code --store-root} puts the run's objects under another root than the config's (where
+ *       a local store lives does not change what is measured, so it is not part of the hash);
+ *   <li>{@code --keep-store} keeps the run's objects, which are otherwise deleted at the end;
+ *   <li>{@code --dump-versions} writes every version of the appendable objects to {@code
+ *       versions/} in the run directory, for {@code analysis/interop_check.py}.
+ * </ul>
+ *
+ * <p>{@code bin/matrix.sh} runs from a snapshot of the build and names it, and its git state, in
+ * the system properties {@code rmow.build.git}, {@code rmow.build.dirty} and {@code
+ * rmow.build.snapshot}; without them the manifest records the working tree's git state.
  */
 public final class Main {
 
@@ -39,13 +51,24 @@ public final class Main {
 
   public static void main(String[] args) throws Exception {
     if (args.length < 1) {
-      System.err.println("usage: run.sh <config.json> [--out <dir>]");
+      System.err.println(
+          "usage: run.sh <config.json> [--out <dir>] [--store-root <dir>] [--keep-store]"
+              + " [--dump-versions]");
       System.exit(2);
     }
     Path out = Path.of("results");
+    String storeRoot = null;
+    boolean keepStore = false;
+    boolean dumpVersions = false;
     for (int i = 1; i < args.length; i++) {
       if (args[i].equals("--out") && i + 1 < args.length) {
         out = Path.of(args[++i]);
+      } else if (args[i].equals("--store-root") && i + 1 < args.length) {
+        storeRoot = args[++i];
+      } else if (args[i].equals("--keep-store")) {
+        keepStore = true;
+      } else if (args[i].equals("--dump-versions")) {
+        dumpVersions = true;
       } else {
         throw new IllegalArgumentException("Unknown argument: " + args[i]);
       }
@@ -72,11 +95,13 @@ public final class Main {
     manifest.put("started", started);
     manifest.put("versions", versions());
     manifest.put("host", host());
+    Runner.Options options = new Runner.Options(storeRoot, keepStore, dumpVersions);
+    manifest.put("store_root", options.storeRoot(cfg));
     Path manifestFile = runDir.resolve("manifest.json");
     pretty.writeValue(manifestFile.toFile(), manifest);
 
     long t0 = System.nanoTime();
-    String oplog = new Runner(cfg, runDir, started).run();
+    String oplog = new Runner(cfg, runDir, started, options).run();
     manifest.put("oplog_sha256", oplog);
     manifest.put("elapsed_s", (System.nanoTime() - t0) / 1e9);
     manifest.put("finished", Instant.now().toString());
@@ -84,10 +109,18 @@ public final class Main {
     System.out.println(runDir);
   }
 
-  private static Map<String, Object> versions() {
+  private static Map<String, Object> versions() throws IOException, NoSuchAlgorithmException {
     Map<String, Object> v = new LinkedHashMap<>();
-    v.put("rmow_bench_git", git("rev-parse", "HEAD"));
-    v.put("rmow_bench_dirty", !git("status", "--porcelain").isEmpty());
+    String snapshot = System.getProperty("rmow.build.snapshot");
+    if (snapshot != null) {
+      v.put("rmow_bench_git", System.getProperty("rmow.build.git", ""));
+      v.put("rmow_bench_dirty", Boolean.parseBoolean(System.getProperty("rmow.build.dirty")));
+      v.put("build_snapshot", snapshot);
+    } else {
+      v.put("rmow_bench_git", git("rev-parse", "HEAD"));
+      v.put("rmow_bench_dirty", !git("status", "--porcelain").isEmpty());
+    }
+    v.putAll(classpath());
     v.put("iceberg", IcebergBuild.fullVersion());
     v.put("parquet", org.apache.parquet.Version.FULL_VERSION);
     v.put("java", System.getProperty("java.version"));
@@ -108,6 +141,31 @@ public final class Main {
     h.put("cpus", Runtime.getRuntime().availableProcessors());
     h.put("max_heap_bytes", Runtime.getRuntime().maxMemory());
     return h;
+  }
+
+  /**
+   * Digests of the jars the run loaded: the project jar's, and one over every classpath entry's
+   * name and digest, so two runs can be checked to have run the same build.
+   */
+  private static Map<String, Object> classpath() throws IOException, NoSuchAlgorithmException {
+    MessageDigest all = MessageDigest.getInstance("SHA-256");
+    String own = "";
+    for (String entry : System.getProperty("java.class.path").split(java.io.File.pathSeparator)) {
+      Path p = Path.of(entry);
+      if (!Files.isRegularFile(p)) {
+        continue;
+      }
+      String digest =
+          HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(p)));
+      all.update((p.getFileName() + " " + digest + "\n").getBytes(StandardCharsets.UTF_8));
+      if (p.getFileName().toString().startsWith("rmow-bench-")) {
+        own = digest;
+      }
+    }
+    Map<String, Object> v = new LinkedHashMap<>();
+    v.put("rmow_bench_jar_sha256", own);
+    v.put("classpath_sha256", HexFormat.of().formatHex(all.digest()));
+    return v;
   }
 
   /** Best effort: the empty string when git or the repository is unavailable. */

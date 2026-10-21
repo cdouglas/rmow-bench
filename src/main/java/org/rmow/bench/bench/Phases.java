@@ -8,10 +8,14 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.rmow.bench.io.IoTrace;
+import org.rmow.bench.io.S3Recorder;
 
 /**
  * Times named phases of one arm: wall-clock and thread CPU time, and the requests the arm's
  * {@link IoTrace} saw meanwhile. Arms run one at a time, so a trace delta belongs to the phase.
+ *
+ * <p>On S3, each phase also records the requests the SDK client sent meanwhile ({@code sdk_*}
+ * fields), which check the trace's model of Iceberg's streams.
  *
  * <p>Phases nest: the runner times each whole batch as {@code batch}, and arms time their parts
  * inside it ({@code merge-read}, {@code write}, {@code delete-write}). Analysis must not add a
@@ -47,10 +51,16 @@ public final class Phases {
       (com.sun.management.OperatingSystemMXBean) ManagementFactory.getOperatingSystemMXBean();
 
   private final IoTrace trace;
+  private final S3Recorder recorder; // null unless the store is S3
   private final List<Measured> measured = new ArrayList<>();
 
   public Phases(IoTrace trace) {
+    this(trace, null);
+  }
+
+  public Phases(IoTrace trace, S3Recorder recorder) {
     this.trace = trace;
+    this.recorder = recorder;
   }
 
   public <T> T run(String phase, IoSupplier<T> body) throws IOException {
@@ -61,6 +71,7 @@ public final class Phases {
   public <T> T run(String phase, IoSupplier<T> body, Map<String, Object> extra)
       throws IOException {
     IoTrace.Counters before = trace.snapshot();
+    S3Recorder.Counts sdk0 = recorder == null ? null : recorder.snapshot();
     long proc0 = OS.getProcessCpuTime();
     long cpu0 = MX.getCurrentThreadCpuTime();
     long t0 = System.nanoTime();
@@ -68,6 +79,9 @@ public final class Phases {
     long wall = System.nanoTime() - t0;
     long cpu = MX.getCurrentThreadCpuTime() - cpu0;
     long proc = OS.getProcessCpuTime() - proc0;
+    if (recorder != null) {
+      extra.putAll(recorder.snapshot().minus(sdk0).fields());
+    }
     measured.add(new Measured(phase, wall, cpu, proc, trace.snapshot().minus(before), extra));
     return result;
   }

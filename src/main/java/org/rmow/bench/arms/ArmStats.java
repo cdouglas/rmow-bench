@@ -13,6 +13,9 @@ package org.rmow.bench.arms;
  * @param dataFiles live data files (or appendable objects)
  * @param deleteFiles live delete files (DVs count once each)
  * @param footerBytes bytes of the current version's footers, read on every open
+ * @param rowGroupsOutOfOrder RMoW: row groups listed after a row group holding larger ids, so
+ *     footer order (row order) is not the order rows were inserted in; -1 for other arms, whose
+ *     data files are each written once, in one sort
  */
 public record ArmStats(
     long objects,
@@ -22,4 +25,5 @@ public record ArmStats(
     long rowGroups,
     long dataFiles,
     long deleteFiles,
-    long footerBytes) {}
+    long footerBytes,
+    long rowGroupsOutOfOrder) {}

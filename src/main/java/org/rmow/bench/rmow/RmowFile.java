@@ -7,8 +7,10 @@ import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.LongSupplier;
 import java.util.stream.Stream;
@@ -59,7 +61,7 @@ public final class RmowFile {
         FooterCodec.merge(null, Set.of(), footers(regions), 0, 0);
     byte[] tail = FooterCodec.serialize(merged);
     checkContiguous(regions, 0);
-    try (OutputStream out = io.newOutputFile(location).create()) {
+    try (OutputStream out = io.newOutputFile(location).createOrOverwrite()) {
       for (Region r : regions) {
         out.write(r.bytes());
       }
@@ -96,10 +98,27 @@ public final class RmowFile {
 
   /**
    * Appends {@code regions} and a footer that drops the row groups {@code dropRgIds} and adds the
-   * regions' row groups as {@code newRgIds}.
+   * regions' row groups as {@code newRgIds}, listed last.
    */
   public void append(
       RegionAppender appender, List<Region> regions, Collection<Long> dropRgIds, List<Long> newRgIds)
+      throws IOException {
+    append(appender, regions, dropRgIds, newRgIds, null);
+  }
+
+  /**
+   * Appends {@code regions}, one row group each, and a footer that drops the row groups {@code
+   * dropRgIds} and adds the regions' row groups as {@code newRgIds}.
+   *
+   * @param inPlaceOf null to list the new row groups last; otherwise, per region, the dropped row
+   *     group whose place in the footer its row group takes, or null to list it last
+   */
+  public void append(
+      RegionAppender appender,
+      List<Region> regions,
+      Collection<Long> dropRgIds,
+      List<Long> newRgIds,
+      List<Long> inPlaceOf)
       throws IOException {
     Set<Integer> drop = new HashSet<>();
     for (Long id : dropRgIds) {
@@ -109,9 +128,25 @@ public final class RmowFile {
       }
       drop.add(i);
     }
+    if (newRgIds.size() != regions.size()) {
+      throw new IllegalArgumentException("One new row group id per region");
+    }
+    List<Integer> slots = null;
+    Map<Integer, Long> slotted = new HashMap<>(); // position -> the new row group taking it
+    if (inPlaceOf != null) {
+      slots = new ArrayList<>(regions.size());
+      for (int j = 0; j < regions.size(); j++) {
+        Long replaced = inPlaceOf.get(j);
+        Integer slot = replaced == null ? null : rgIds.indexOf(replaced);
+        slots.add(slot);
+        if (slot != null) {
+          slotted.put(slot, newRgIds.get(j));
+        }
+      }
+    }
     checkContiguous(regions, length);
     FileMetaData merged =
-        FooterCodec.merge(footer, drop, footers(regions), length, versionLengths.size());
+        FooterCodec.merge(footer, drop, footers(regions), slots, length, versionLengths.size());
     byte[] newTail = FooterCodec.serialize(merged);
     ByteArrayOutputStream out = new ByteArrayOutputStream();
     for (Region r : regions) {
@@ -122,11 +157,17 @@ public final class RmowFile {
 
     List<Long> ids = new ArrayList<>();
     for (int i = 0; i < rgIds.size(); i++) {
-      if (!drop.contains(i)) {
+      if (slotted.containsKey(i)) {
+        ids.add(slotted.get(i));
+      } else if (!drop.contains(i)) {
         ids.add(rgIds.get(i));
       }
     }
-    ids.addAll(newRgIds);
+    for (int j = 0; j < newRgIds.size(); j++) {
+      if (slots == null || slots.get(j) == null) {
+        ids.add(newRgIds.get(j));
+      }
+    }
     commit(newLength, merged, newTail, ids);
   }
 

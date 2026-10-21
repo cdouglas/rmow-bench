@@ -26,7 +26,22 @@
     <assertj.version>3.27.7</assertj.version>
     <jqwik.version>1.9.1</jqwik.version>
     <jmh.version>1.37</jmh.version>
+    <!-- Iceberg 1.12.0's AWS SDK; iceberg-aws leaves the SDK to the application -->
+    <awssdk.version>2.54.17</awssdk.version>
+    <testcontainers.version>1.21.4</testcontainers.version>
   </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>software.amazon.awssdk</groupId>
+        <artifactId>bom</artifactId>
+        <version>${awssdk.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
 
   <dependencies>
     <dependency>
@@ -53,6 +68,20 @@
       <groupId>org.apache.iceberg</groupId>
       <artifactId>iceberg-bundled-guava</artifactId>
       <version>${iceberg.version}</version>
+    </dependency>
+    <!-- the S3 store: Iceberg's S3FileIO over a client this project builds and instruments -->
+    <dependency>
+      <groupId>org.apache.iceberg</groupId>
+      <artifactId>iceberg-aws</artifactId>
+      <version>${iceberg.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>s3</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>apache-client</artifactId>
     </dependency>
     <dependency>
       <groupId>org.apache.parquet</groupId>
@@ -115,6 +144,12 @@
       <groupId>net.jqwik</groupId>
       <artifactId>jqwik</artifactId>
       <version>${jqwik.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers</artifactId>
+      <version>${testcontainers.version}</version>
       <scope>test</scope>
     </dependency>
   </dependencies>

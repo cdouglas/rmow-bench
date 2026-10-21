@@ -43,6 +43,7 @@ public final class InitialLoad {
               .schema(Rows.SCHEMA)
               .createWriterFunc(GenericParquetWriter::create)
               .setAll(layout.writerProperties())
+              .overwrite()
               .build();
       try (FileAppender<Record> a = appender) {
         while (id < log.initialRows()) {
@@ -75,7 +76,7 @@ public final class InitialLoad {
       try (SeekableInputStream in = io.newInputFile(f.location(), f.length()).newStream()) {
         IOUtil.readFully(in, bytes, 0, bytes.length);
       }
-      try (OutputStream out = io.newOutputFile(location).create()) {
+      try (OutputStream out = io.newOutputFile(location).createOrOverwrite()) {
         out.write(bytes);
       }
       copies.add(

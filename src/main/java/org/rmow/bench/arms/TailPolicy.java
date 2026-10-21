@@ -87,10 +87,17 @@ public final class TailPolicy {
     return new Plan(merge, level);
   }
 
-  /** Records the batch's outcome: the merged units left; the new unit joins unless sealed. */
+  /**
+   * Records the batch's outcome: the merged units left; the new unit joins unless sealed. A sealed
+   * new unit seals the older open units too: they sit before it, so merging them later would make
+   * a unit spanning it, and the tail would no longer be the newest rows (in RMoW, row groups' id
+   * ranges would overlap).
+   */
   public void commit(Plan plan, long newId, long newBytes) {
     stack.removeAll(plan.merge());
-    if (!sealed(newBytes)) {
+    if (sealed(newBytes)) {
+      stack.clear();
+    } else {
       stack.add(new Unit(newId, plan.level(), newBytes));
     }
   }
