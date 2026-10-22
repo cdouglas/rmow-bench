@@ -3,3 +3,4 @@ lab.duckdb.*
 .ingest.lock
 _build/
 exports/
+.ipynb_checkpoints/
