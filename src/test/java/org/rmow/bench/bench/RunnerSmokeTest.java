@@ -116,6 +116,42 @@ class RunnerSmokeTest {
   }
 
   @Test
+  void timeTravelReadsLikeTheCurrentRead(@TempDir Path dir) throws IOException {
+    // read_old at step s reads the state read_full read at step s - travelBack, when it was
+    // current, so with no compaction (history is recorded before it) the two must cost the same:
+    // an old version is planned from its own split offsets, as a snapshot's manifest entry would
+    // plan it (H4). Files of 2 MiB hold several row groups, so stock splits per row group.
+    BenchConfig cfg = config("mem", dir);
+    cfg.arms =
+        List.of("mor-v3", "tailcow-c", "rmow-b", "rmow-c", "rmow-c-dv", "rmow-b-split", "rmow-c-split");
+    cfg.layout.targetFileBytes = 2 << 20;
+    cfg.layout.compactEvery = 0;
+    cfg.reads.every = 3;
+    cfg.reads.travelBack = 3;
+    List<JsonNode> recs = run(cfg, dir);
+    java.util.Map<String, JsonNode> full = new java.util.HashMap<>();
+    recs.stream()
+        .filter(r -> r.get("phase").asText().equals("read_full"))
+        .forEach(r -> full.put(key(r, r.get("step").asInt()), r));
+    List<JsonNode> old =
+        recs.stream().filter(r -> r.get("phase").asText().equals("read_old")).toList();
+    assertThat(old).hasSize(cfg.arms.size() * cfg.reads.readers.size() * 4);
+    for (JsonNode o : old) {
+      JsonNode c = full.get(key(o, o.get("step").asInt() - cfg.reads.travelBack));
+      for (String col :
+          List.of("requests", "get_range", "get_stream", "aborts", "bytes_read",
+              "bytes_skipped_through", "rows")) {
+        assertThat(o.get(col).asLong()).as(key(o, o.get("step").asInt()) + " " + col)
+            .isEqualTo(c.get(col).asLong());
+      }
+    }
+  }
+
+  private static String key(JsonNode r, int step) {
+    return r.get("arm").asText() + "/" + r.get("reader").asText() + "/" + step;
+  }
+
+  @Test
   void localStoreUniformKeys(@TempDir Path dir) throws IOException {
     BenchConfig cfg = config("local", dir.resolve("store"));
     cfg.workload.keyDist = WorkloadSpec.KeyDist.UNIFORM;

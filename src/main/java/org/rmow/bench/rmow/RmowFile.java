@@ -313,6 +313,15 @@ public final class RmowFile implements LogicalFile {
     return List.copyOf(versionLengths);
   }
 
+  /** The split offsets Iceberg derives from a version's footer, as its manifest entry holds them. */
+  public static List<Long> splitOffsets(FileMetaData footer) {
+    try {
+      return ParquetUtil.getSplitOffsets(new ParquetMetadataConverter().fromParquetMetadata(footer));
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    }
+  }
+
   /**
    * The current version described as an Iceberg data file: its length, and the column metrics
    * and split offsets Iceberg derives from its footer, as a manifest entry for it would hold.

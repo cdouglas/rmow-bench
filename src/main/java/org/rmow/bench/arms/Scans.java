@@ -52,11 +52,17 @@ final class Scans {
 
   /** A data file description of one version of an object: its path and that version's length. */
   static DataFile version(String location, long length, long rows) {
+    return version(location, length, rows, null);
+  }
+
+  /** The same, with the version's split offsets (null: none, as for a split file's objects). */
+  static DataFile version(String location, long length, long rows, List<Long> splitOffsets) {
     return DataFiles.builder(DataFileWriter.SPEC)
         .withPath(location)
         .withFormat(FileFormat.PARQUET)
         .withFileSizeInBytes(length)
         .withRecordCount(rows)
+        .withSplitOffsets(splitOffsets)
         .build();
   }
 

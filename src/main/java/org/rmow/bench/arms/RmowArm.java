@@ -75,8 +75,11 @@ import org.rmow.bench.workload.Rows;
  */
 public final class RmowArm implements Arm {
 
-  /** One file at one version, with its DV then: what a snapshot's manifest would name. */
-  private record Version(LogicalFile.Version at, DeleteFile dv) {}
+  /**
+   * One file at one version, with its footer and DV then: what a snapshot's manifest would name.
+   * Footers are never modified once written, so the version's own can be kept.
+   */
+  private record Version(LogicalFile.Version at, FileMetaData footer, DeleteFile dv) {}
 
   private final ArmContext ctx;
   private final RegionWriter regions;
@@ -168,7 +171,7 @@ public final class RmowArm implements Arm {
   private List<Version> versions() {
     List<Version> v = new ArrayList<>(files.size());
     for (LogicalFile f : files) {
-      v.add(new Version(f.current(), dvs.get(f)));
+      v.add(new Version(f.current(), f.footer(), dvs.get(f)));
     }
     return v;
   }
@@ -662,16 +665,27 @@ public final class RmowArm implements Arm {
     return h;
   }
 
-  /** Old versions are planned without split offsets (a snapshot's entry would carry them). */
+  /**
+   * Old versions are planned as a snapshot's manifest entries would plan them: an ordinary
+   * version with the split offsets of its own footer, so stock readers split it per row group as
+   * they did while it was current. A footer-only version has none (its row groups are in other
+   * objects).
+   */
   @Override
   public TableHash readAfter(int steps, Reader reader) throws IOException {
     List<Scans.ReadFile> plain = new ArrayList<>();
     List<Scans.ReadFile> footerOnly = new ArrayList<>();
     for (Version v : history.get(steps)) {
-      (v.at().footerOnly() ? footerOnly : plain)
-          .add(
-              new Scans.ReadFile(
-                  Scans.version(v.at().location(), v.at().length(), 1), dvArray(v.dv())));
+      String location = v.at().location();
+      long length = v.at().length();
+      if (v.at().footerOnly()) {
+        footerOnly.add(new Scans.ReadFile(Scans.version(location, length, 1), dvArray(v.dv())));
+      } else {
+        DataFile df =
+            Scans.version(
+                location, length, v.footer().getNum_rows(), RmowFile.splitOffsets(v.footer()));
+        plain.add(new Scans.ReadFile(df, dvArray(v.dv())));
+      }
     }
     return read(reader, plain, footerOnly, Expressions.alwaysTrue());
   }
