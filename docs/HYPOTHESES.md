@@ -122,3 +122,25 @@ the size of the writer's own row groups (docs/DESIGN.md#compaction).
 policy, bytes, requests and CPU per batch (batch and compaction phases), full-read GETs and bytes
 averaged over probes every 3 batches (which sample every phase of each compaction cycle), and
 kept/live averaged over steps.
+
+## Added 2026-10-22, before rerunning the uncompacted runs
+
+Until commit 150cc93, time travel planned old RMoW versions without split offsets, so the stock
+reader's time-travel reads did not measure stock Iceberg (lab/pages/time-travel.md). The seven
+uncompacted configurations that read old versions are rerun with the fix:
+`local-m1-recency-exp-nocompact`, `local-m1-uniform-nocompact`,
+`local-rg-sweep-recency-exp-rg{1,2,4,8}m` and `local-split-recency-exp-nocompact`.
+
+### H4, revisited: what the rerun should show
+
+- **Old versions read like current ones, under both readers.** Every time-travel read costs
+  exactly what the full read of the same table state cost, in every request and byte column, in
+  every arm. The one-footer reader's 0.11% fewer bytes for old RMoW versions goes too.
+- **Nothing else changes.** Every other record matches the earlier run of its configuration
+  exactly (`steps_diff`), except:
+  - the RMoW arms' `read_old` records;
+  - in the two m1 runs, the MoR and TailCoW arms, whose earlier builds predate counting Puffin's
+    `create()` HEAD and run-relative paths (one HEAD per Puffin file, and a few bytes).
+- **H3's numbers do not move.** They come from batch phases, full reads and state.
+
+*Decided by:* the `h4_pairs` view and `steps_diff` against the earlier runs.
