@@ -1,21 +1,26 @@
 -- analysis/compare_runs.py: requests and bytes are a deterministic function of the op log, the
 -- configuration and the code, so two runs of one configuration must match exactly in these
--- columns (wall and CPU time may not). A phase occurring twice for one arm and step would be
--- numbered n = 1, 2 in no particular order; no run has one today.
+-- columns (wall and CPU time may not). A record is keyed by arm, step, phase and reader: probes
+-- run every read phase once per reader model (runs before reader models have no reader). No run
+-- has two records with one key; if one did, its records are flagged 'duplicate key'.
 CREATE MACRO steps_diff(run_a, run_b) AS TABLE
 WITH a AS (
-    SELECT *, row_number() OVER (PARTITION BY arm, step, phase) AS n
+    SELECT *, coalesce(reader, '') AS reader_key,
+           count(*) OVER (PARTITION BY arm, step, phase, coalesce(reader, '')) AS copies
     FROM steps WHERE run_id = run_a
 ), b AS (
-    SELECT *, row_number() OVER (PARTITION BY arm, step, phase) AS n
+    SELECT *, coalesce(reader, '') AS reader_key,
+           count(*) OVER (PARTITION BY arm, step, phase, coalesce(reader, '')) AS copies
     FROM steps WHERE run_id = run_b
 ), arms AS (
     SELECT DISTINCT arm FROM a INTERSECT SELECT DISTINCT arm FROM b
 )
 SELECT coalesce(a.arm, b.arm) AS arm, coalesce(a.step, b.step) AS step,
-       coalesce(a.phase, b.phase) AS phase, coalesce(a.n, b.n) AS n,
+       coalesce(a.phase, b.phase) AS phase, coalesce(a.reader, b.reader) AS reader,
        a.run_id IS NULL OR b.run_id IS NULL AS one_run_only,
        list_filter([
+           CASE WHEN coalesce(a.copies, 1) > 1 OR coalesce(b.copies, 1) > 1
+                THEN 'duplicate key' END,
            CASE WHEN coalesce(a.requests, -1) <> coalesce(b.requests, -1) THEN 'requests' END,
            CASE WHEN coalesce(a.gets, -1) <> coalesce(b.gets, -1) THEN 'gets' END,
            CASE WHEN coalesce(a.get_range, -1) <> coalesce(b.get_range, -1) THEN 'get_range' END,
@@ -40,7 +45,7 @@ SELECT coalesce(a.arm, b.arm) AS arm, coalesce(a.step, b.step) AS step,
            CASE WHEN coalesce(a.delete_files, -1) <> coalesce(b.delete_files, -1)
                 THEN 'delete_files' END
        ], x -> x IS NOT NULL) AS differs
-FROM a FULL JOIN b USING (arm, step, phase, n)
+FROM a FULL JOIN b USING (arm, step, phase, reader_key)
 WHERE coalesce(a.arm, b.arm) IN (FROM arms);
 
 -- Repetitions: runs of one label and configuration hash (a rerun of the same config file).

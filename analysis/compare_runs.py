@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pandas as pd
 
-KEYS = ["arm", "step", "phase"]
+KEYS = ["arm", "step", "phase", "reader"]
 EXACT = ["requests", "gets", "get_range", "get_stream", "heads", "puts", "appends", "deletes",
          "aborts", "bytes_read", "bytes_skipped_through", "bytes_written", "rows",
          "objects", "stored_bytes", "live_bytes", "row_groups", "data_files", "delete_files"]
@@ -21,7 +21,9 @@ EXACT = ["requests", "gets", "get_range", "get_stream", "heads", "puts", "append
 
 def load(run):
     df = pd.read_json(Path(run) / "steps.jsonl", lines=True)
-    # a phase can occur more than once per arm and step (none do today); number them
+    # probes run every read phase once per reader model; runs before reader models have none
+    df["reader"] = df["reader"].fillna("") if "reader" in df else ""
+    # a key could occur more than once (none does today); number them in file order
     df["n"] = df.groupby(KEYS).cumcount()
     return df.set_index(KEYS + ["n"])
 
@@ -44,10 +46,11 @@ def main(argv):
         status = "same" if not diff.any() and missing == 0 else "DIFFERENT"
         print(f"{arm:18s} {status}: {len(common)} records compared, {int(diff.sum())} differ, "
               f"{missing} in one run only")
-        if diff.any():
+        if diff.any() or missing:
             bad += 1
+        if diff.any():
             first = diff[diff].index[0]
-            print("   first difference at (step, phase, n) =", first)
+            print("   first difference at (step, phase, reader, n) =", first)
             print(pd.DataFrame({"A": xs.loc[first], "B": ys.loc[first]})[lambda d: d.A != d.B])
     return 1 if bad else 0
 
