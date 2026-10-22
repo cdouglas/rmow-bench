@@ -1,0 +1,116 @@
+# CLAUDE.md
+
+rmow-bench measures **region-merge-on-write (RMoW)** for Parquet against Iceberg
+**merge-on-read (MoR)**. RMoW appends a merged region and a new footer to the same object; MoR
+writes new data files plus deletes. Every arm replays the same seeded op log, and the benchmark
+records requests, bytes and CPU per arm, step and phase.
+
+## Start here
+
+- **[docs/EXPERIMENTS.md](docs/EXPERIMENTS.md)** is the map. It covers:
+  - what has been run, and what each experiment varied and found;
+  - the arms and tail policies in one table;
+  - where each hypothesis stands.
+
+  Read it first, and keep it current (see [Adding an experiment](#adding-an-experiment)).
+- **[README.md](README.md)** has build and run, the phases, the I/O parity rules, the arms and
+  every config knob (`layout.*`, `reads.*`).
+- **[docs/HYPOTHESES.md](docs/HYPOTHESES.md)** holds H1–H6. **[docs/DESIGN.md](docs/DESIGN.md)**
+  holds the format-level findings and the writer's rules. **[docs/PLAN.md](docs/PLAN.md)** is the
+  original plan, whose default matrix was not what ran.
+- **`docs/measurements/<experiment>-<date>.md`** has one write-up per experiment.
+
+## Build, test, run
+
+Java 17 and Maven. Iceberg 1.12.0 and parquet-java 1.17.1 come from Maven Central. The
+`-Pfork` profile, built on the atomicio fork, is optional.
+
+```bash
+mvn -q package -DskipTests                     # target/rmow-bench-*.jar + target/lib
+mvn test                                       # unit, compatibility and end-to-end smoke tests
+bin/run.sh configs/smoke.json                  # one configuration; prints the run directory
+bin/matrix.sh --build configs/local-compact-*.json   # several, from a build snapshot
+```
+
+- **`bin/matrix.sh`** snapshots the build into `results/builds/<UTC>-<sha>[-dirty]/` (jar,
+  configs, and the diff if the tree is dirty), so you can keep editing and rebuilding while runs
+  go. Each run's manifest names its snapshot.
+- **Flags:** `--dump-versions` keeps every version of the appendable objects for
+  `analysis/interop_check.py`, and `--keep-store` keeps the objects.
+- **Duration:** a `local-*` configuration has taken 8–34 minutes, longest with all 9 arms
+  (`elapsed_s` in each manifest). The README's S3 section says what
+  `S3StoreTest` needs (versitygw in Docker; skipped without it).
+- **Tests that pin results:** `RunnerSmokeTest` asserts H2 for both layouts.
+  `AppendableParquetTest`, `SplitFileTest` and `VersionDumpTest` cover reader compatibility.
+
+## Results
+
+- A run writes `results/<label>-<config hash>/<UTC start>/`:
+  - `manifest.json`: the full config, git commit and dirty flag, versions, host, and the op log's
+    SHA-256;
+  - `oplog.bin`;
+  - `steps.jsonl`: one record per arm, step and phase;
+  - `versions/` with `--dump-versions`.
+- `results/` is not in git. **Never edit, move or delete results.** To retire a run, the
+  project's convention is to rename its directory `superseded-<…>-<reason>`, and only when the
+  user decides. Record it with `lab annotate` too.
+
+## Analysis
+
+- **labbook** (`lab`, with the labbook skill) is the way to answer questions about results.
+  `lab/lab.toml` describes `results/` to it. Use the `labbook` skill:
+  - `lab ingest` after new runs;
+  - `lab runs` and `lab sql "…"` for answers, giving the query with the numbers;
+  - pages in `lab/pages/*.md`, built with `lab build --strict`.
+- **Tables available in `lab sql`:**
+  - `steps` (every JSONL record);
+  - `runs` and `canonical_runs`, with promoted config columns such as `rg_bytes`,
+    `compact_every` and `key_dist`;
+  - `run_params` (every config key);
+  - `arm_summary` (`analysis/sweep.py`'s per-run, per-arm summary, ported to SQL and checked equal
+    on 429 values);
+  - `arm_meta` (labels, families, plot encoding);
+  - `rg_meta` (row-group sizes from the version dumps' footers);
+  - `micro` (JMH);
+  - `steps_diff(a, b)` (`compare_runs.py`).
+- **`analysis/*.py`** are the scripts behind the existing write-ups. They run in the project venv,
+  `.venv/bin/python analysis/<script>.py`. If you change one that a lab view ports
+  (`sweep.summarize` → `arm_summary`), change the view too and check that both agree.
+
+## Rules for measurements
+
+- **Local runs report requests, bytes and CPU, never latency.** WSL2 and the page cache make
+  local wall time meaningless; latency comes from cloud runs.
+- **Requests and bytes are deterministic** in the op log, config and code. Two runs of one config
+  must match exactly (`steps_diff`, or `analysis/compare_runs.py`). A mismatch is a bug, not
+  noise. CPU is noisy: under 2% decides nothing.
+- **The I/O parity rules in the README** guard against biases found in Iceberg's code. A change
+  to any arm's read or write path must keep them, and the tests that check them must pass.
+- **Hypotheses come before the runs that decide them.** Add each one to `docs/HYPOTHESES.md` in a
+  new dated section, before running. Never edit an earlier one in place; record a revision as a
+  new section. Report a contradicted hypothesis as contradicted.
+
+## Adding an experiment
+
+1. State the question and hypothesis in `docs/HYPOTHESES.md` (new dated section).
+2. Add `configs/<label>.json`, one per setting. The label names the setting, as in
+   `local-compact-aggr-p5`.
+3. Run with `bin/matrix.sh --build configs/<label>*.json`, in the background. It takes a while.
+4. Run `lab ingest`, and add a campaign for the runs in `lab/annotations.toml`
+   (`lab annotate 'local-<label>-*' --campaign <name>`).
+5. Write `docs/measurements/<name>-<date>.md`, following the existing ones: setup (configs,
+   workload, arms, build snapshot); the tables, naming the script or query that made them;
+   findings; the hypothesis verdict; limits.
+6. Update `docs/EXPERIMENTS.md`. Its run table and findings are written by hand; the lab's
+   Experiments page regenerates the run table from the runs to check against. Update the README's
+   Status too.
+
+## Working here
+
+- **Other sessions may work in this repository at the same time.** Check `git status` before
+  editing, and commit only the files you changed (`git commit -- <paths>`).
+- **The lab's pages may be open in JupyterLab** (`lab jupyter`), whose autosave can overwrite
+  edits made underneath it. Before editing a page, ask whether it is open.
+- **Commits:** the history is linear on `main`; never merge. Subjects are a sentence-case summary
+  (`Split files: an object per version instead of appends`), with a prose body saying what
+  changed and why. Commit only when the user asks.
