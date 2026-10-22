@@ -1,12 +1,14 @@
 ---
-title: Repetitions
 kernelspec:
   name: labbook
   display_name: Python (labbook)
+  language: python
+title: Repetitions
 ---
 
-```{code-cell} python
+```{code-cell} ipython3
 :tags: [remove-cell]
+
 from labbook import q, table
 ```
 
@@ -16,9 +18,10 @@ page checks every repetition: runs sharing a label and configuration hash. For a
 `lab sql "FROM steps_diff('<run a>', '<run b>') WHERE len(differs) > 0 OR one_run_only"` lists
 the records that differ (`analysis/compare_runs.py`).
 
-```{code-cell} python
+```{code-cell} ipython3
 :label: repetitions
 :tags: [remove-input]
+
 reps = q("FROM repetitions ORDER BY label")
 rows = []
 for rep in reps.itertuples():
@@ -37,4 +40,8 @@ else:
     print("No repetitions yet: every finished run has its own label and configuration hash.")
     out = None
 out
+```
+
+```{code-cell} ipython3
+
 ```

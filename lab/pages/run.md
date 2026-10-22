@@ -1,12 +1,14 @@
 ---
-title: One run, step by step
 kernelspec:
   name: labbook
   display_name: Python (labbook)
+  language: python
+title: One run, step by step
 ---
 
-```{code-cell} python
+```{code-cell} ipython3
 :tags: [remove-cell]
+
 import altair as alt
 from labbook import figures_module, q, table, theme
 theme()
@@ -27,10 +29,11 @@ reads, the reader model) below the charts. Headline arms only: MoR v3, TailCoW-C
 RMoW-C, appendable and split. Local and in-memory runs: requests and bytes are exact and
 reproducible; wall time is not shown.
 
-```{code-cell} python
+```{code-cell} ipython3
 :label: run-steps
 :tags: [remove-input]
 :class: col-page-right
+
 base = """
     SELECT s.run_id, s.step, m.arm_label, s.reader, s.bytes_written / 1e6 AS mb_written,
            s.bytes_read / 1e6 AS mb_read, s.requests, s.gets,
@@ -72,10 +75,11 @@ alt.vconcat(
 The per-arm summary of every M1 run (all arms; `arm_summary`, the numbers `analysis/sweep.py`
 and `layouts.py` tabulate):
 
-```{code-cell} python
+```{code-cell} ipython3
 :label: m1-summary
 :tags: [remove-input]
 :class: col-page-right
+
 table(q("""
     SELECT r.label, m.arm_label AS arm, s.write_mb_per_batch, s.compact_mb_per_batch,
            s.requests_per_batch, s.read_full_gets, s.read_recent_gets, s.read_old_gets,

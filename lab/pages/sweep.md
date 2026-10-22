@@ -1,12 +1,14 @@
 ---
-title: Row-group size sweep
 kernelspec:
   name: labbook
   display_name: Python (labbook)
+  language: python
+title: Row-group size sweep
 ---
 
-```{code-cell} python
+```{code-cell} ipython3
 :tags: [remove-cell]
+
 import altair as alt
 from labbook import figures_module, q, table, theme
 theme()
@@ -20,10 +22,11 @@ The `rg-sweep` campaign: the `local-m1` recency workload with compaction off and
 (`docs/measurements/rg-sweep-recency-2026-10-21.md`). Reads are the last probe's, under the
 one-footer reader. The x axis is log 2.
 
-```{code-cell} python
+```{code-cell} ipython3
 :label: rg-sweep
 :tags: [remove-input]
 :class: col-page-right
+
 panels = [title for _, title, _ in fm.SWEEP_PANELS]
 long = t.melt(id_vars=["arm_label", "rg_mib"], value_vars=[m for m, _, _ in fm.SWEEP_PANELS],
               var_name="metric", value_name="value").dropna(subset=["value"])
@@ -43,10 +46,11 @@ The same numbers, as `analysis/sweep.py` writes them to `sweep.md`; `rg_mb_media
 `new_rg_mb_median` are the median compressed row group at the end, all of them and those written
 after the initial load:
 
-```{code-cell} python
+```{code-cell} ipython3
 :label: rg-sweep-table
 :tags: [remove-input]
 :class: col-page-right
+
 table(t[["arm", "rg_mib"] + [m for m, _, _ in fm.SWEEP_PANELS]
         + ["read_old_gets", "row_groups", "rg_mb_median", "new_rg_mb_median"]])
 ```

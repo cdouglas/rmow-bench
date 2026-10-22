@@ -27,7 +27,9 @@ as updates accumulate. Ingest in rough timestamp order, where updates mostly hit
 the case of most interest. The measurement is of I/O; this does not patch Iceberg to accept the
 layout.
 
-Three documents go with this one:
+Four documents go with this one:
+- [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md): a map of what has been run, what each experiment
+  varied and found, and where each hypothesis stands. Start here.
 - [docs/PLAN.md](docs/PLAN.md): the plan, with its milestones.
 - [docs/DESIGN.md](docs/DESIGN.md): the format-level findings and the writer's rules.
 - [docs/HYPOTHESES.md](docs/HYPOTHESES.md): the hypotheses, fixed before any cloud run.

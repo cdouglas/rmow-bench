@@ -1,12 +1,14 @@
 ---
-title: Footer micro-benchmarks
 kernelspec:
   name: labbook
   display_name: Python (labbook)
+  language: python
+title: Footer micro-benchmarks
 ---
 
-```{code-cell} python
+```{code-cell} ipython3
 :tags: [remove-cell]
+
 import altair as alt
 from labbook import q, table, theme
 theme()
@@ -24,10 +26,11 @@ groups, for 11 and 50 columns, with the 99.9% confidence interval. `footer-merge
 later `mergeAndSerialize` variant. Both axes are log 10, so intervals reaching below zero (too few
 samples for the spread) are not drawn; the table below lists them.
 
-```{code-cell} python
+```{code-cell} ipython3
 :label: footer-micro
 :tags: [remove-input]
 :class: col-page-right
+
 base = alt.Chart(df).encode(
     x=alt.X("row_groups:Q", title="row groups", scale=alt.Scale(type="log")),
     color=alt.Color("columns:N", title="columns"),
@@ -41,8 +44,9 @@ bars = base.mark_rule().encode(y="ci_lo_drawn:Q", y2="ci_hi:Q").transform_filter
 (lines + bars).properties(width=230, height=200).facet(column=alt.Column("method:N", title=None))
 ```
 
-```{code-cell} python
+```{code-cell} ipython3
 :label: footer-micro-table
 :tags: [remove-input]
+
 table(df.drop(columns="ci_lo_drawn"))
 ```
