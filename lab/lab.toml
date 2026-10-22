@@ -1,0 +1,74 @@
+# labbook: where rmow-bench's results are and how to read them (see the labbook skill).
+version = 1
+
+[project]
+name = "rmow-bench"
+root = ".."
+
+# bin/run.sh writes results/<label>-<config hash>/<UTC start>/ with manifest.json, steps.jsonl and,
+# with --dump-versions, versions/<arm>/**/*.parquet plus versions/versions.csv. Retired runs are
+# renamed superseded-*; the run id comes from the manifest, so it survives the rename.
+[[runs]]
+name = "bench"
+kind = "manifest"
+root = "results"
+glob = "*/*"
+exclude = ["builds/*", "micro/*"]
+id = "{label}-{config_hash}/{started}"
+
+[runs.fields]
+started = { path = "started", format = "%Y%m%dT%H%M%SZ" }
+git_sha = "versions.rmow_bench_git"
+git_dirty = "versions.rmow_bench_dirty"
+
+[runs.promote]
+store = "config.store.type"
+key_dist = "config.workload.keyDist"
+batches = { path = "config.workload.batches", type = "INTEGER" }
+rg_bytes = { path = "config.layout.rowGroupBytes", type = "BIGINT" }
+tail_seal_bytes = { path = "config.layout.tailSealBytes", type = "BIGINT" }
+compact_every = { path = "config.layout.compactEvery", type = "INTEGER" }
+compact_delete_ratio = { path = "config.layout.compactDeleteRatio", type = "DOUBLE" }
+compact_garbage_ratio = { path = "config.layout.compactGarbageRatio", type = "DOUBLE" }
+compact_small_rgs = { path = "config.layout.compactSmallRowGroups", type = "INTEGER" }
+reads_every = { path = "config.reads.every", type = "INTEGER" }
+oplog = "oplog_sha256"
+
+# JMH micro-benchmarks (-rf json), one run per file
+[[runs]]
+name = "micro"
+kind = "jmh"
+root = "results/micro"
+glob = "*.json"
+
+# One row per arm, step and phase. Phases carry different fields (state rows: stored_bytes,
+# live_bytes, ...; later runs add live_objects), so the files are read by name; an interrupted
+# run's last line can be cut off. -1 means unknown in footer_bytes and row_groups_out_of_order.
+[[facts]]
+name = "steps"
+runs = "bench"
+file = "steps.jsonl"
+format = "jsonl"
+mode = "table"
+options = { ignore_errors = true }
+cast = { footer_bytes = "BIGINT", row_groups_out_of_order = "BIGINT" }
+
+# The version dumps' Parquet footers: one row per column chunk (file_name, row_group_id,
+# total_compressed_size, ...); arm from the path. Footers only, so the 5 GB of dumps stay unread.
+[[facts]]
+name = "rg_meta"
+runs = "bench"
+file = "versions/**/*.parquet"
+format = "parquet_metadata"
+path_pattern = '^versions/(?P<arm>[^/]+)/'
+mode = "table"
+
+[[facts]]
+name = "version_dump"
+runs = "bench"
+file = "versions/versions.csv"
+format = "csv"
+
+# analysis/plots.py's encoding: hue is the arm's family, shape the variant within it
+[style]
+family = { mor = "#2a78d6", cow = "#eb6834", rmow = "#1baf7a", rmowdv = "#eda100", rmowsplit = "#e87ba4" }

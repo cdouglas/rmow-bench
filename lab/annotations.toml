@@ -1,0 +1,53 @@
+# What the raw results cannot say about themselves; applied by `lab ingest`, edited by hand or
+# with `lab annotate`. Selectors: a run_id glob, "path:<glob>" (path under the project root),
+# "source:<name>", or "where:<SQL over runs_raw>".
+
+[campaigns.m1]
+title = "M1: every arm, uniform and recency-skewed updates, with and without compaction"
+select = ["local-m1-*"]
+
+[campaigns.rg-sweep]
+title = "Row-group size sweep, recency-skewed updates (docs/measurements/rg-sweep-recency-2026-10-21.md)"
+select = ["local-rg-sweep-recency-exp-*"]
+
+[campaigns.split-vs-append]
+title = "Appendable and split RMoW files, H5 (docs/measurements/split-vs-append-2026-10-21.md)"
+select = ["local-split-*"]
+
+[campaigns.compaction]
+title = "Compaction policy sweep, H6 (docs/measurements/compaction-sweep-2026-10-21.md)"
+select = ["local-compact-*"]
+
+[campaigns.micro]
+title = "Footer micro-benchmarks (JMH)"
+select = ["source:micro"]
+
+# Retired runs: their directories were renamed superseded-<label>-...-<reason>
+[[annotate]]
+select = "path:results/superseded-*"
+mark = "superseded"
+
+[[annotate]]
+select = "path:results/superseded-*-v2bounds/*"
+tags = ["v2bounds"]
+
+[[annotate]]
+select = "path:results/superseded-*-onereader/*"
+tags = ["onereader"]
+
+[[annotate]]
+select = "path:results/superseded-*-twopass/*"
+tags = ["twopass"]
+
+[[annotate]]
+select = "path:results/superseded-*-unmerged/*"
+tags = ["unmerged"]
+
+[[annotate]]
+select = "path:results/superseded-*-partial/*"
+tags = ["partial"]
+
+[[annotate]]
+select = "smoke-*"
+mark = "excluded"
+note = "in-memory smoke test of the harness"

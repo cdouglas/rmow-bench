@@ -1,0 +1,5 @@
+lab.duckdb
+lab.duckdb.*
+.ingest.lock
+_build/
+exports/

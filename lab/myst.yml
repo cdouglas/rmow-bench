@@ -1,0 +1,14 @@
+version: 1
+project:
+  title: rmow-bench results
+  toc:
+    - file: index.md
+    - file: pages/run.md
+    - file: pages/sweep.md
+    - file: pages/layouts.md
+    - file: pages/micro.md
+    - file: pages/compare.md
+  exclude:
+    - NOTES.md
+site:
+  template: book-theme
