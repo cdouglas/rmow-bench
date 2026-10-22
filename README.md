@@ -248,5 +248,11 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
 - **Done locally:** when to compact, as an outcome. Eleven compaction policies were run, and each
   arm's cheapest one was found per store, read rate and storage weight
   ([docs/measurements/compaction-sweep-2026-10-21.md](docs/measurements/compaction-sweep-2026-10-21.md)).
+- **Done locally, from the existing runs:**
+  - layout against tail policy, H3
+    ([lab/pages/layout-vs-policy.md](lab/pages/layout-vs-policy.md));
+  - time travel and dead bytes, H4
+    ([lab/pages/time-travel.md](lab/pages/time-travel.md)). Time travel now plans an old
+    version with its own split offsets, as Iceberg plans an old snapshot.
 - **Next:** S3 Express (M3), starting with `configs/s3x-calibration.json`, which needs credentials,
   a directory bucket and an instance in its zone. Split files can also run on standard S3.

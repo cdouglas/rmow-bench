@@ -12,7 +12,7 @@ of 2026-10-22.
 | [docs/PLAN.md](PLAN.md) | The plan as approved on 2026-10-20, with milestones. Its default matrix is not what ran ([below](#what-every-experiment-shares)). |
 | [docs/DESIGN.md](DESIGN.md) | The format-level findings: writer rules, footer order, split files, compaction. |
 | [docs/HYPOTHESES.md](HYPOTHESES.md) | H1–H6, each written down before the runs that decide it. |
-| `docs/measurements/` | One write-up per experiment. |
+| `docs/measurements/` | One write-up per experiment. Write-ups from 2026-10-22 on are lab pages (`lab/pages/`), whose tables and numbers are computed from the runs. |
 | `lab/` | The results database and pages (labbook). `lab jupyter` opens them as notebooks and `lab serve` as a site. `lab/pages/experiments.md` regenerates this page's parameter tables from the runs. |
 | `results/` | The raw runs, one directory per configuration (`<label>-<hash>/<start>/`). Not in git. |
 
@@ -87,6 +87,8 @@ the local experiments repeats a run, so the Repetitions page has nothing to comp
 | **split-vs-append** (`configs/local-split-*`) | Appendable against split RMoW files (H5). | recency, no compaction; recency, compaction every 10; uniform, compaction every 10 | MoR-v3, TailCoW-C, RMoW-B and -C in both layouts (plus CoW for uniform) | 3 | [split-vs-append-2026-10-21.md](measurements/split-vs-append-2026-10-21.md). Its compaction numbers are superseded by the sweep. |
 | **compaction** (`configs/local-compact-*`) | When to compact, as an outcome (H6). | check period `P` = none, 1, 5, 10, 20 × threshold level (table below) | the split comparison's six | 11 | [compaction-sweep-2026-10-21.md](measurements/compaction-sweep-2026-10-21.md) |
 | **micro** (`results/micro/*.json`, JMH) | What a footer costs per row group. | row groups 10–10k × 11 or 50 columns; parse, convert, merge and serialize | n/a | 2 files | `docs/measurements/footer-*-2026-10-20.txt`. The source of the README's "about 1.2 KB and 30 µs per row group". |
+| **layout vs policy** (no new runs) | H3: is RMoW against TailCoW (layout) a smaller difference than TailCoW against MoR-v3 (tail policy), and mostly in read requests? | read from the uncompacted rg-sweep, split and m1 uniform runs | MoR-v3, TailCoW-B and -C, RMoW-B and -C in both layouts | 6 of the above | [lab/pages/layout-vs-policy.md](../lab/pages/layout-vs-policy.md) |
+| **time travel** (no new runs) | H4: does an old version read like the current one, and do dead bytes cost reads? | read from the 7 uncompacted runs: each time-travel read against the full read of the same state | all that ran | 7 of the above | [lab/pages/time-travel.md](../lab/pages/time-travel.md) |
 
 The compaction sweep's threshold levels:
 
@@ -153,6 +155,20 @@ All are local runs: requests and bytes are exact, latency is not measured.
   - Space is the only reason to compact RMoW. It pays only when storage weighs enough (a day
     between batches at this table size).
   - Split files need little compaction, and it is cheap.
+- **Layout against tail policy (H3).**
+  - In request counts, RMoW against TailCoW is the smaller difference, and mostly in reads
+    (2–8 MiB).
+  - In bytes it is the larger: RMoW writes 3.3–5.3 MB more per batch, from rewriting the row
+    groups that updates touch. So on S3 Express it is the larger cost at up to one full read per
+    batch.
+  - Append itself is worth 1.28 requests per batch. Most of the rest comes from how RMoW applies
+    updates (no locate scan, no DVs) and from one footer per file.
+- **Time travel (H4).**
+  - Under the one-footer reader, an old version costs exactly the current read's GETs, in all 110
+    RMoW pairs. Dead bytes are never read: appendable files read 1.000–1.002× their live bytes.
+  - Under the stock reader, these runs' harness planned old RMoW versions without split offsets,
+    so that comparison measures the harness. The harness is fixed; the runs predate the fix.
+  - The trace cannot show S3's extra abort per old footer.
 
 ## The hypotheses
 
@@ -160,8 +176,8 @@ All are local runs: requests and bytes are exact, latency is not measured.
 |---|---|---|
 | H1 | Recency-skewed updates: RMoW-C's full read stays flat, its writes within 3× MoR-v3's | **Open.** Decided on S3 Express, which has not run. |
 | H2 | Uniform updates: RMoW's writes approach copy-on-write | **Held** (local, m1). |
-| H3 | RMoW-C against TailCoW is the single-object effect | **Open.** No write-up yet compares them per request type. |
-| H4 | Old versions read like current ones; dead bytes cost nothing | **Open.** Decided by the traces' skip-through and abort counts; not yet written up. |
+| H3 | RMoW-C against TailCoW is the single-object effect | **Mixed.** Smaller, and mostly in reads, in request counts; larger, and mostly write bytes, on S3 Express prices at up to one full read per batch. Not the single object: append is 1.28 requests per batch. |
+| H4 | Old versions read like current ones; dead bytes cost nothing | **Held** for reads and dead bytes, under the one-footer reader. The extra abort on S3 is **open**: the trace cannot show it. |
 | H5 | Split files: one more request per changed file, the same reads, kept bytes within 1.5× | **Held**, except that RMoW-C kept 1.52×. |
 | H6 | When to compact | **Mixed.** The read half held for RMoW-B, not RMoW-C; the space and write-for-read halves held; costs half held. |
 
@@ -169,9 +185,14 @@ All are local runs: requests and bytes are exact, latency is not measured.
 
 - **S3 Express (milestone M3).** It starts with `configs/s3x-calibration.json`, which needs
   credentials, a directory bucket and an instance in its zone. It is what decides H1 and gives the
-  first latencies. Split files can also run on standard S3.
+  first latencies. It is also where H4's abort can be measured, from aborted connections or the
+  GET bytes the SDK declares. Split files can also run on standard S3.
 - **Gaps in what ran:**
   - no repetitions or second seeds;
   - no write-up of m1 beyond H2;
-  - the `-dv` ablation is in no experiment;
-  - H3 and H4 need their comparisons written up from the existing local runs.
+  - the `-dv` ablation is in no experiment. `rmow-c-dv` against `tailcow-c` would isolate the
+    single object, which H3's comparison could not;
+  - every run so far planned old RMoW versions without split offsets, which biases the stock
+    reader's `read_old` (lab/pages/time-travel.md). The harness is fixed, and
+    `RunnerSmokeTest.timeTravelReadsLikeTheCurrentRead` pins it. A rerun of the uncompacted
+    configurations would make the stock-reader pairs a test.

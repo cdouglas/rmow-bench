@@ -7,6 +7,8 @@ project:
     - file: pages/run.md
     - file: pages/sweep.md
     - file: pages/layouts.md
+    - file: pages/layout-vs-policy.md
+    - file: pages/time-travel.md
     - file: pages/micro.md
     - file: pages/compare.md
   exclude:

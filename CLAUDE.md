@@ -18,7 +18,9 @@ records requests, bytes and CPU per arm, step and phase.
 - **[docs/HYPOTHESES.md](docs/HYPOTHESES.md)** holds H1–H6. **[docs/DESIGN.md](docs/DESIGN.md)**
   holds the format-level findings and the writer's rules. **[docs/PLAN.md](docs/PLAN.md)** is the
   original plan, whose default matrix was not what ran.
-- **`docs/measurements/<experiment>-<date>.md`** has one write-up per experiment.
+- **Write-ups**, one per experiment, are lab pages (`lab/pages/<name>.md`), so the data stay in
+  context: their tables, charts and quoted numbers are computed from the runs. Those before
+  2026-10-22 are `docs/measurements/<experiment>-<date>.md`.
 
 ## Build, test, run
 
@@ -98,9 +100,16 @@ bin/matrix.sh --build configs/local-compact-*.json   # several, from a build sna
 3. Run with `bin/matrix.sh --build configs/<label>*.json`, in the background. It takes a while.
 4. Run `lab ingest`, and add a campaign for the runs in `lab/annotations.toml`
    (`lab annotate 'local-<label>-*' --campaign <name>`).
-5. Write `docs/measurements/<name>-<date>.md`, following the existing ones: setup (configs,
-   workload, arms, build snapshot); the tables, naming the script or query that made them;
-   findings; the hypothesis verdict; limits.
+5. Write the write-up as a lab page, `lab/pages/<name>.md` (the labbook skill), not a plain
+   markdown report, and add it to `lab/myst.yml`'s toc. Follow `layout-vs-policy.md` and
+   `time-travel.md`:
+   - setup (configs, workload, arms, build snapshot), with the runs pinned by id;
+   - tables and charts computed from the runs, each chart with its table;
+   - findings, with every number they quote computed (`{eval}`);
+   - the hypothesis verdict, and limits.
+
+   Queries worth reusing go in `lab/views/`. Build with `lab build --strict` and look at the
+   charts in `lab/_build/charts/`.
 6. Update `docs/EXPERIMENTS.md`. Its run table and findings are written by hand; the lab's
    Experiments page regenerates the run table from the runs to check against. Update the README's
    Status too.
