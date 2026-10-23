@@ -231,3 +231,92 @@ in-memory store, logging requests. Its replay must predict its own wall times:
   20% of the measured wall time.
 
 *Decided by:* `figures.replay` on the run's own log, against `steps.wall_ns`.
+
+## Added 2026-10-23, before rerunning the logged 4 MiB recency setting without payload checks
+
+Two changes since `sim-recency-4m`:
+- **Payload checks off.** The payload check of every decoded row (`verifyRows`) is the harness's,
+  not an engine's. In a small A/B in scratch (400k rows, 10 batches, `cached` reader), full reads
+  took 0.29–0.32× the CPU without it, and batches the same CPU. So the simulated reads of
+  lab/pages/store-latency.md are mostly the harness's CPU. The id-and-version oracle stays.
+- **Split files are planned per row group.** Each object of a footer-only version is planned on
+  its own split offsets, as an appendable file's version is, so a split read runs one task per
+  live row group instead of one per object (`RequestLogTest`).
+
+`configs/sim-recency-4m-noverify.json` is `sim-recency-4m` with `verifyRows` false, run with
+`--log-requests`. Profiles and batch 60 are as in lab/pages/store-latency.md.
+
+- **N1: requests and bytes are unchanged, except stock reads of split files.** Every record matches
+  `sim-recency-4m` in requests and bytes (`steps_diff`), except the split arms' reads under
+  `stock`. Those take more GETs, a footer read per split rather than per object. Under
+  `one-footer`, `cached` and `cached-p8`, the split arms' requests and bytes do not change.
+- **N2: reads lose most of their CPU, batches none.** Each arm's CPU over its one-thread reads
+  (full, recent, old) is at most 0.4× the earlier run's. Batch and compaction CPU are within 5%.
+- **N3: on one thread, RMoW's read advantage grows.** With `cached`, RMoW-C's simulated full read
+  takes at most 0.75× MoR-v3's on S3 Express (it was 0.78×), and at most 0.4× on Azure Blob
+  (0.45×).
+- **N4: on eight threads, parallelism still erases most of it where requests are cheap.** With
+  `cached-p8`, RMoW-C's replayed full read is within 20% of MoR-v3's on S3 Express (it was 1.04×),
+  and at most 0.7× on Azure Blob (0.59×).
+- **N5: split files read in parallel.** With `cached-p8` on S3 Express, RMoW-C-split's replayed full
+  read takes at most 1.5× RMoW-C's (it was 1.9 s against 563 ms).
+
+*Decided by:* `steps_diff` against `sim-recency-4m`, `steps.cpu_ns`, `phase_latency` (one thread)
+and `figures.replay` (eight threads).
+
+## Added 2026-10-23, before the scale campaign on havoc
+
+**Question.** Do the simulated latencies hold at Iceberg's defaults (128 MiB row groups, 512 MiB
+files)? Latency is part per request and part per byte (and CPU). Scaling the files changes the
+balance between the two.
+
+**Setup.** `configs/scale-recency-rg{4,16,64,128}m.json` scale the logged 4 MiB recency setting
+with its row group R, so that each batch has the same structure:
+- 128k × R initial rows: one file of about four row groups;
+- 1,280 × R operations per batch (1% of the initial rows);
+- R-MiB row groups and tail seal, and 4R-MiB files.
+
+Everything else is `sim-recency-4m-noverify`'s:
+- the six arms;
+- the readers `cached`, `cached-p8` and `stock`;
+- 60 batches, no compaction, payload checks off, requests logged.
+
+At 128 MiB, a table of one 512 MiB file and its deltas is a few GiB stored in all. It runs in
+the container on havoc (`docker/campaigns/scale.json`), each configuration on 10 whole cores of
+one NUMA node. CPU there is not comparable with this laptop's, so each prediction compares the
+scale points with each other. Batch 60 and the profiles are as in lab/pages/store-latency.md.
+
+- **P1: the structure does not depend on scale.** For every arm and reader, requests per batch
+  and per full read at batch 60 at 16, 64 and 128 MiB are within 25% of the 4 MiB point's.
+- **P2: bytes scale with the row group.** Bytes written per batch, and bytes read per full read
+  at batch 60, are within 25% of R/4 times the 4 MiB point's.
+- **P3: CPU scales with bytes.** At 128 MiB, CPU per MiB read (full reads, `cached`) and per MiB
+  written (batches) are within 30% of the 4 MiB point's.
+- **P4: on one thread, requests stop mattering.**
+  - At 128 MiB, RMoW-C's simulated full read with `cached` is within 10% of MoR-v3's on S3
+    Express, and at most 0.9× on Azure Blob.
+  - RMoW-C's batches are slower than MoR-v3's on every profile: its extra bytes cost more than
+    the requests it saves.
+- **P5: on eight threads, the largest row group bounds a read.** At 128 MiB, every arm's replayed
+  full read with `cached-p8` is within 25% of MoR-v3's on S3 Express.
+- **P6: it fits.** Summed over arms, each arm's largest `stored_bytes` at 128 MiB is under 24
+  GiB.
+
+*Decided by:* `steps`, `phase_latency` and `figures.replay` over the four runs, with each job's
+foreign load from `results/campaigns/scale/` (a job with foreign load decides nothing about CPU).
+
+## Added 2026-10-23, after a three-batch pilot of the 128 MiB setting: P6 revised
+
+A pilot of `scale-recency-rg128m` on this laptop (3 batches, one probe, results in scratch) sized
+the campaign:
+- each RMoW arm wrote 110 MiB per batch, re-merging the initial load's last, open row group every
+  batch (MoR-v3: 5 MiB), at about 11 s of CPU per batch (MoR-v3: 1.3 s);
+- a one-thread full read of the 490 MiB table took 12–14 s of CPU;
+- the heap peaked at 13.8 GB (`-Xmx24g`, 17.6 GB resident), and the run took 14 minutes.
+
+Over 60 batches that comes to about 7 GiB stored per RMoW arm, so P6 as written (under 24 GiB
+summed over arms) will not hold. P6 stands as registered and will be reported against the runs.
+- **P6, revised:** at 128 MiB, each RMoW arm's largest `stored_bytes` is under 8 GiB, and the sum
+  over arms under 40 GiB.
+
+The campaign's store estimates follow the pilot (`docker/campaigns/scale.json`).
