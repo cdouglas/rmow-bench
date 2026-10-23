@@ -89,7 +89,7 @@ the local experiments repeats a run, so the Repetitions page has nothing to comp
 | **micro** (`results/micro/*.json`, JMH) | What a footer costs per row group. | row groups 10–10k × 11 or 50 columns; parse, convert, merge and serialize | n/a | 2 files | `docs/measurements/footer-*-2026-10-20.txt`. The source of the README's "about 1.2 KB and 30 µs per row group". |
 | **layout vs policy** (no new runs) | H3: is RMoW against TailCoW (layout) a smaller difference than TailCoW against MoR-v3 (tail policy), and mostly in read requests? | read from the uncompacted rg-sweep, split and m1 uniform runs | MoR-v3, TailCoW-B and -C, RMoW-B and -C in both layouts | 6 of the above | [lab/pages/layout-vs-policy.md](../lab/pages/layout-vs-policy.md) |
 | **time travel** (reruns) | H4: does an old version read like the current one, and do dead bytes cost reads? | the 7 uncompacted configurations that read old versions, rerun 2026-10-22/23 with the split-offset fix: each time-travel read against the full read of the same state | all that ran | 7 of the above, rerun | [lab/pages/time-travel.md](../lab/pages/time-travel.md) |
-| **store latency** (`configs/sim-*`, and the existing runs) | What would each arm take on a given store? Latency simulated from what each phase records: CPU, requests and bytes. | endive's store profiles (S3 Express, S3, Azure), and a sweep of request latency × throughput; a validation run with latency injected; a 4 MiB recency run with its requests logged | MoR-v3, TailCoW-C, RMoW-B and -C, both layouts | 2 (and the 4 MiB recency and uniform runs) | [lab/pages/store-latency.md](../lab/pages/store-latency.md) |
+| **store latency** (`configs/sim-*`, and the existing runs) | What would each arm take on a given store? Latency simulated from what each phase records: CPU, requests and bytes. | endive's store profiles (S3 Express, S3, Azure), and a sweep of request latency × throughput; a validation run with latency injected; a 4 MiB recency run with its requests logged | MoR-v3, TailCoW-C, RMoW-B and -C, both layouts | 3 (and the 4 MiB recency and uniform runs) | [lab/pages/store-latency.md](../lab/pages/store-latency.md) |
 | **s3x calibration, local twin** (`configs/s3x-calibration-local.json`) | The requests and bytes the first S3 Express run must reproduce exactly, and its runtime. | the S3 Express calibration's settings (200k rows, 20 batches, 1 MiB row groups) on the local store, with a JIT warmup and three readers (one-footer on 1 and 8 threads, stock) | MoR-v2-file, MoR-v3, TailCoW-C, RMoW-A, -B and -C | 1 | None: a baseline. 1.8 minutes, 10,446 requests. |
 | **dv ablation** (`configs/local-dv-*`) | H3's attribution: how much of RMoW against TailCoW is the layout, and how much the update handling (region rewrites against DVs)? | key distribution (recency, uniform); 4 MiB, no compaction | MoR-v3, CoW, TailCoW-B and -C, RMoW-A, -B and -C, RMoW-A-dv, -B-dv and -C-dv | 3, deleted | Conclusions in [DESIGN.md](DESIGN.md#deletion-vectors-on-an-appendable-file-an-ablation-removed); numbers under Retired runs. |
 
@@ -124,6 +124,7 @@ The compaction sweep's threshold levels:
 | s3x calibration | s3x-calibration-local | recency | 1 MiB | never | — | 6 |
 | store latency | sim-validate-s3x | recency | 1 MiB | 10 | default | 5 |
 | store latency | sim-recency-4m | recency | 4 MiB | never | — | 6 |
+| store latency | sim-recency-4m-noverify | recency | 4 MiB | never | — | 6 |
 
 "Thresholds" are only used when compaction runs, so "—" marks runs that never compact (their
 configurations carry the default values). The lab's Experiments page builds the same table from
@@ -292,6 +293,27 @@ All are local runs: requests and bytes are exact, latency is not measured.
     Blob, RMoW-C (838 ms) still beats MoR-v3 (1,423) and matches TailCoW-C (890).
   - The harness's split reader runs one task per object, so split files read slowly on 8
     threads (1.9 s). That is the reader model, not the layout.
+- **Store latency without the payload check (`sim-recency-4m-noverify`, 2026-10-23).** The run
+  is `sim-recency-4m` with `verifyRows` off. Split files are now planned per row group. N1–N5
+  all held:
+  - Requests and bytes match `sim-recency-4m` in 2,248 of 2,277 records. The other 29 are the
+    split arms' stock reads, which re-read the version's footer per split: 206 GETs against 154
+    for RMoW-B-split's full reads, and slightly more bytes.
+  - Reads take 0.29–0.31× the CPU, and batches 0.97–1.02×: the payload check was about 70% of a
+    read.
+  - On one thread (`cached`, batch 60), RMoW-C's full read takes 0.67× MoR-v3's on S3 Express
+    (1,319 against 1,982 ms; 0.78× with the check) and 0.33× on Azure Blob (0.45×).
+  - On 8 threads (`cached-p8`), RMoW-C's still matches MoR-v3's on S3 Express (380 against
+    376 ms), and is 0.54× on Azure Blob (672 against 1,256).
+  - Split files now read in parallel: RMoW-C-split takes 347 ms against RMoW-C's 380 on S3
+    Express (1,882 before).
+  - lab/pages/store-latency.md still shows the run with the check.
+  - The run's build planned every split object per row group, even one of at most 1 MiB, which a
+    footer-cache reader fetches whole: each of its splits fetched it again. The fix, one task for
+    such an object (as `readAll` already plans small files), came after the run, and changes none
+    of its records: its footer-cache reads match `sim-recency-4m` exactly, so it had no such
+    object. A compacting run does (`sim-validate-s3x`'s split objects under 1 MiB), and
+    `RequestLogTest` now pins it.
   - Appendable RMoW's GETs hit objects of 24 appended parts on average (up to 47). At an extra
     0.1 ms per part a full read costs 3% more; the S4 spike would measure the real cost.
 
@@ -327,3 +349,7 @@ All are local runs: requests and bytes are exact, latency is not measured.
   - only runs from 2026-10-23 on can have the `cached` reader model, which loads each file's
     deletes once per read. Earlier runs' readers load a file's DV once per split (row group), as
     Iceberg's readers do, which inflates MoR-v3's and TailCoW's reads;
+  - runs before `sim-recency-4m-noverify` read a split file's objects as one task each, not one
+    per row group, and under `stock` read the version's footer once per object instead of once
+    per split. Their split arms' parallel reads are slow for that reason alone, and their stock
+    reads take fewer GETs than a rerun would;

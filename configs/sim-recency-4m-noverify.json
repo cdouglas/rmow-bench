@@ -1,0 +1,73 @@
+{
+  "label": "sim-recency-4m-noverify",
+  "store": {
+    "type": "local",
+    "root": "/home/chris/work/catalog/rmow-bench/target/store",
+    "fsync": false
+  },
+  "workload": {
+    "seed": 1,
+    "initialRows": 1000000,
+    "batches": 60,
+    "opsPerBatch": 10000,
+    "insertFrac": 0.7,
+    "updateFrac": 0.25,
+    "deleteFrac": 0.05,
+    "keyDist": "RECENCY_EXP",
+    "recencyMeanBatches": 2.0
+  },
+  "layout": {
+    "codec": "zstd",
+    "rowGroupBytes": 4194304,
+    "targetFileBytes": 33554432,
+    "sortWrites": true,
+    "writerCachesFooters": true,
+    "tailSealBytes": 4194304,
+    "tierFanout": 4,
+    "maxRowGroupsPerFile": 128,
+    "footerPrefetchBytes": 0,
+    "locate": "scan",
+    "compactEvery": 0
+  },
+  "arms": [
+    "mor-v3",
+    "tailcow-c",
+    "rmow-b",
+    "rmow-c",
+    "rmow-b-split",
+    "rmow-c-split"
+  ],
+  "reads": {
+    "every": 10,
+    "recentFraction": 0.01,
+    "travelBack": 20,
+    "readers": [
+      {
+        "name": "one-footer",
+        "footerCache": true,
+        "footerPrefetchBytes": 65536
+      },
+      {
+        "name": "cached",
+        "footerCache": true,
+        "deleteCache": true,
+        "footerPrefetchBytes": 65536
+      },
+      {
+        "name": "cached-p8",
+        "footerCache": true,
+        "deleteCache": true,
+        "footerPrefetchBytes": 65536,
+        "parallelism": 8
+      },
+      {
+        "name": "stock"
+      }
+    ]
+  },
+  "verifyRows": false,
+  "warmup": {
+    "batches": 5,
+    "initialRows": 100000
+  }
+}
