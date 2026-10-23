@@ -144,3 +144,24 @@ uncompacted configurations that read old versions are rerun with the fix:
 - **H3's numbers do not move.** They come from batch phases, full reads and state.
 
 *Decided by:* the `h4_pairs` view and `steps_diff` against the earlier runs.
+
+## Added 2026-10-23, before rerunning the compacted runs that read old versions
+
+The four compacted configurations with time travel are rerun with the split-offset fix:
+`local-m1-recency-exp-compact10`, `local-m1-uniform-compact10`,
+`local-split-recency-exp-compact10` and `local-split-uniform-compact10`. No hypothesis rides on
+them. In a run that compacts, a time-travel read and the full read of its state read different
+files (history is recorded before compaction), so they make no paired test.
+
+What the reruns should show against the earlier runs (`steps_diff`):
+- **Up to the first compaction (step 10)**, every record matches, except, in the two m1 runs, the
+  MoR and TailCoW arms' build differences (Puffin's HEAD, run-relative paths).
+- **From step 10 on**, the RMoW arms differ, because RMoW compaction changed after these runs
+  (0564114: one trigger per goal, packing up to the writer's row-group size, and split files
+  moving row groups out of mostly dead objects). From step 20 on, so do their `read_old` records,
+  by the fix.
+- **MoR-v3, TailCoW and CoW** match throughout in the split runs: their compaction has not
+  changed. In the m1 runs, CoW matches, and MoR and TailCoW differ only in their build
+  differences.
+
+*Decided by:* `steps_diff` against the earlier runs.
