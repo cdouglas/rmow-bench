@@ -135,18 +135,52 @@ public final class Main {
     return v;
   }
 
+  /**
+   * The machine, as CPU is measured on it: its CPU model and the CPUs this process may run on. In
+   * a container ({@code docker/run.sh}), the system properties {@code rmow.host.name} and {@code
+   * rmow.host.os} name the host rather than the container, and {@code rmow.placement} says which
+   * cores the campaign gave this run.
+   */
   private static Map<String, Object> host() {
     Map<String, Object> h = new LinkedHashMap<>();
-    try {
-      h.put("name", InetAddress.getLocalHost().getHostName());
-    } catch (IOException e) {
-      h.put("name", "unknown");
+    String name = System.getProperty("rmow.host.name");
+    if (name == null) {
+      try {
+        name = InetAddress.getLocalHost().getHostName();
+      } catch (IOException e) {
+        name = "unknown";
+      }
     }
+    h.put("name", name);
     h.put("os", System.getProperty("os.name") + " " + System.getProperty("os.version"));
+    if (System.getProperty("rmow.host.os") != null) {
+      h.put("distribution", System.getProperty("rmow.host.os"));
+    }
     h.put("arch", System.getProperty("os.arch"));
+    h.put("cpu_model", procField("/proc/cpuinfo", "model name"));
     h.put("cpus", Runtime.getRuntime().availableProcessors());
+    h.put("cpus_allowed", procField("/proc/self/status", "Cpus_allowed_list"));
     h.put("max_heap_bytes", Runtime.getRuntime().maxMemory());
+    if (System.getProperty("rmow.placement") != null) {
+      h.put("container", true);
+      h.put("placement", System.getProperty("rmow.placement"));
+    }
     return h;
+  }
+
+  /** The first {@code key: value} line's value in a /proc file; empty when there is none. */
+  private static String procField(String file, String key) {
+    try {
+      for (String line : Files.readAllLines(Path.of(file))) {
+        int colon = line.indexOf(':');
+        if (colon > 0 && line.substring(0, colon).trim().equals(key)) {
+          return line.substring(colon + 1).trim();
+        }
+      }
+    } catch (IOException e) {
+      // not Linux
+    }
+    return "";
   }
 
   /**

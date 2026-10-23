@@ -95,6 +95,49 @@ class RequestLogTest {
     }
   }
 
+  @Test
+  void splitFilesArePlannedPerRowGroup(@TempDir Path dir) throws IOException {
+    // a split file's objects are planned as an appendable file's version is: on their own split
+    // offsets, one task per live row group, except that a footer-cache reader reads an object of
+    // at most 1 MiB, which Iceberg fetches whole, in one task. So under stock a full read runs one
+    // task per live row group, and under one-footer no object is fetched whole twice in a read.
+    // Compaction leaves small objects; the initial file (under 1 MiB, not footer-only) is skipped
+    BenchConfig cfg = config(dir);
+    cfg.arms = List.of("rmow-c-split");
+    cfg.reads.readers = List.of(BenchConfig.ReaderSpec.oneFooter(), BenchConfig.ReaderSpec.stock());
+    List<JsonNode> steps = run(cfg, dir);
+    Map<String, Long> tasks = new HashMap<>();
+    Map<String, Long> wholeFetches = new HashMap<>();
+    for (JsonNode e : lines(dir.resolve("requests.jsonl"))) {
+      if (e.get("kind").asText().equals("task")) {
+        tasks.merge(key(e), 1L, Long::sum);
+      } else if (e.get("kind").asText().equals("get_stream")) {
+        wholeFetches.merge(key(e) + " " + e.get("object").asText(), 1L, Long::sum);
+      }
+    }
+    Map<Integer, Long> rowGroups = new HashMap<>();
+    steps.stream()
+        .filter(s -> s.get("phase").asText().equals("state"))
+        .forEach(s -> rowGroups.put(s.get("step").asInt(), s.get("row_groups").asLong()));
+    int checked = 0;
+    for (JsonNode s : steps) {
+      if (s.get("phase").asText().equals("read_full") && s.get("step").asInt() > 0
+          && s.get("reader").asText().equals("stock")) {
+        assertThat(tasks.get(key(s))).as(key(s)).isEqualTo(rowGroups.get(s.get("step").asInt()));
+        checked++;
+      }
+    }
+    assertThat(checked).isEqualTo(2);
+    assertThat(wholeFetches).isNotEmpty();
+    wholeFetches.forEach(
+        (k, n) -> {
+          if (k.contains(" one-footer ")) {
+            assertThat(n).as(k).isEqualTo(1);
+          }
+        });
+    assertThat(rowGroups.values()).anyMatch(n -> n > 1);
+  }
+
   /** What the logged requests of each phase take on the store, in ns (the lab's replay). */
   private static Map<String, Double> replay(List<JsonNode> log, BenchConfig.LatencySpec l) {
     double get = l.getMs * Math.exp(l.getSigma * l.getSigma / 2) * 1e6;

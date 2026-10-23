@@ -50,8 +50,12 @@ import org.rmow.bench.rmow.RegionWriter.Region;
  */
 public final class SplitFile implements LogicalFile {
 
-  /** One object a footer-only version reads, as a virtual Parquet file (see {@link #views}). */
-  public record ObjectView(String location, long length, byte[] tail, long rows) {}
+  /**
+   * One object a footer-only version reads, as a virtual Parquet file (see {@link #views}), with
+   * the split offsets Iceberg would derive from its footer.
+   */
+  public record ObjectView(
+      String location, long length, byte[] tail, long rows, List<Long> splitOffsets) {}
 
   private static final String PREV_FILE = "rmow.prev-file";
 
@@ -212,8 +216,12 @@ public final class SplitFile implements LogicalFile {
     }
     List<ObjectView> out = new ArrayList<>(extent.size());
     for (Map.Entry<String, long[]> e : extent.entrySet()) {
-      byte[] t = FooterCodec.serialize(FooterCodec.localFooter(footer, e.getKey()));
-      out.add(new ObjectView(base + e.getKey(), e.getValue()[0] + t.length, t, e.getValue()[1]));
+      FileMetaData local = FooterCodec.localFooter(footer, e.getKey());
+      byte[] t = FooterCodec.serialize(local);
+      out.add(
+          new ObjectView(
+              base + e.getKey(), e.getValue()[0] + t.length, t, e.getValue()[1],
+              RmowFile.splitOffsets(local)));
     }
     return out;
   }

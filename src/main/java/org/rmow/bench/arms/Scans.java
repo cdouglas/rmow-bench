@@ -62,7 +62,7 @@ final class Scans {
     return version(location, length, rows, null);
   }
 
-  /** The same, with the version's split offsets (null: none, as for a split file's objects). */
+  /** The same, with the version's split offsets (null: none). */
   static DataFile version(String location, long length, long rows, List<Long> splitOffsets) {
     return DataFiles.builder(DataFileWriter.SPEC)
         .withPath(location)
@@ -216,8 +216,11 @@ final class Scans {
   /**
    * Reads footer-only versions ({@link SplitFile}): each version's one footer, then every object
    * it names as a virtual Parquet file whose footer comes from memory ({@link SplitFile#views}),
-   * so an object costs only its row groups' reads. A footer-cache reader reads the version's
-   * footer once; a stock one reads it again for every object it opens, as stock readers re-read a
+   * so an object costs only its row groups' reads. Each object is planned as {@link #readAll}
+   * plans an appendable file's version: into split tasks on its own split offsets, one per row
+   * group, except that a footer-cache reader reads an object of at most 1 MiB in one task (Iceberg
+   * fetches it whole, so each split would fetch it again). A footer-cache reader reads the
+   * version's footer once; a stock one reads it again for every split, as stock readers re-read a
    * file's footer for every split. No stock reader reads these files at all: this is the reader
    * an engine would need.
    */
@@ -231,16 +234,28 @@ final class Scans {
       byte[] tail = readFooterObject(ctx, reader, location, length);
       FileMetaData footer = FooterCodec.read(tail, 0, tail.length - 8);
       for (SplitFile.ObjectView v : SplitFile.views(location, footer)) {
-        tasks.add(
-            () -> {
-              if (!reader.footerCache()) {
-                readFooterObject(ctx, reader, location, length);
-              }
-              TableHash h = new TableHash();
-              scan(ctx, reader, version(v.location(), v.length(), v.rows()), f.deletes(),
-                  Rows.SCHEMA, filter, v.tail(), -1, -1, r -> h.add(r, ctx.verifyRows()));
-              return h;
-            });
+        DataFile object = version(v.location(), v.length(), v.rows(), v.splitOffsets());
+        FileScanTask whole =
+            new BaseFileScanTask(
+                object, f.deletes(), SCHEMA_JSON, SPEC_JSON, ResidualEvaluator.unpartitioned(filter));
+        Iterable<FileScanTask> splits =
+            reader.footerCache() && v.length() <= EAGER_BYTES
+                ? List.of(whole)
+                : whole.split(reader.splitTargetBytes());
+        for (FileScanTask split : splits) {
+          long start = split.start();
+          long splitLength = split.length();
+          tasks.add(
+              () -> {
+                if (!reader.footerCache()) {
+                  readFooterObject(ctx, reader, location, length);
+                }
+                TableHash h = new TableHash();
+                scan(ctx, reader, object, f.deletes(), Rows.SCHEMA, filter, v.tail(), start,
+                    splitLength, r -> h.add(r, ctx.verifyRows()));
+                return h;
+              });
+        }
       }
     }
     return run(ctx, reader, tasks);

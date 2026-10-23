@@ -122,7 +122,12 @@ Each rule guards against a bias found in Iceberg's code:
    every arm that writes DVs pays one HEAD per Puffin file.
 3. **Footers are read the same way in every arm.**
 4. **Local and in-memory runs report requests, bytes and CPU, not latency.** WSL2 and the page
-   cache make local wall times meaningless. Latency comes from cloud runs.
+   cache make local wall times meaningless. Latency is simulated from requests, bytes and CPU
+   ([lab/pages/store-latency.md](lab/pages/store-latency.md)).
+5. **Every file is planned as Iceberg plans it**: one split task per row group, on the split
+   offsets of the version read. A footer-cache reader reads a file of at most 1 MiB in one task,
+   since Iceberg fetches such a file whole and each split would fetch it again. A split file's
+   objects are planned the same way, each on its own footer's offsets.
 
 ## The S3 store
 
