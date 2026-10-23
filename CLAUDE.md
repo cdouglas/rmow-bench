@@ -42,6 +42,13 @@ bin/matrix.sh --build configs/local-compact-*.json   # several, from a build sna
   request to `requests.jsonl` for the latency replay. `store.latency` in a config injects a
   simulated store's latency (README).
 - **Never edit `bin/matrix.sh` while it runs:** bash reads the script as it goes.
+- **Campaigns too large for the laptop** (the production-sized `scale`) run on havoc, in a
+  container: `docker/run.sh build`, then `start <campaign>` ([docker/README.md](docker/README.md)).
+  They are the user's runs. A session prepares the campaign (configs, `docker/campaigns/*.json`,
+  hypotheses) and reads the results once they are copied back into `results/`. Each job has
+  whole idle cores, and records its foreign load in `results/campaigns/<name>/`.
+- **Simulation runs turn `verifyRows` off.** The payload check costs about 70% of a read's CPU,
+  and CPU counts toward simulated latency. The id-and-version oracle stays on.
 - **Duration:** a `local-*` configuration has taken 8–34 minutes, longest with all 9 arms
   (`elapsed_s` in each manifest). The README's S3 section says what
   `S3StoreTest` needs (versitygw in Docker; skipped without it).

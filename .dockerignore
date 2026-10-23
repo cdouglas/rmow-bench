@@ -1,0 +1,10 @@
+# docker/run.sh builds from `git archive HEAD`; this applies to DIRTY_OK=1 builds from the tree.
+results/
+store/
+target/
+.venv/
+**/__pycache__/
+lab/_build/
+lab/*.duckdb*
+lab/.ipynb_checkpoints/
+.git/

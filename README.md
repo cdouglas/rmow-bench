@@ -57,6 +57,10 @@ The snapshot holds the jar, hard links to its released dependencies, the configu
 dirty tree the diff and the untracked files; each run's manifest names it. Runs keep their objects
 under `store/` and delete them when they end (`--keep-store` keeps them).
 
+Campaigns too large for a laptop run in a container on another machine, each configuration on
+whole idle cores of one NUMA node: `docker/run.sh build`, then `docker/run.sh start <campaign>`
+([docker/README.md](docker/README.md)).
+
 `--dump-versions` (on `bin/run.sh` or `bin/matrix.sh`) keeps every version of every appendable
 object in `<run>/versions/`, checked against the reference model at every step, for
 `analysis/interop_check.py <run>/versions` to read with pyarrow and DuckDB (see
@@ -103,7 +107,9 @@ The phases recorded in `steps.jsonl` are:
 Each phase records wall time, thread CPU time, and the requests a tracing FileIO saw: GETs (ranged
 or streamed), HEADs, PUTs, APPENDs, aborts, bytes read and bytes written. Requests are counted the
 way Iceberg's object-store streams issue them. Every read is checked against a reference model,
-using an order-independent hash of (id, version), and a mismatch stops the run.
+using an order-independent hash of (id, version), and a mismatch stops the run. With `verifyRows`
+(the default), every decoded row's payload is checked as well. That check is the harness's, not an
+engine's, and it costs about 70% of a read's CPU, so runs made for latency simulation turn it off.
 
 ### I/O parity rules
 
@@ -294,5 +300,9 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
   - layout against update handling, the `-dv` ablation, whose runs and arms were deleted once its
     conclusions were recorded
     ([docs/DESIGN.md](docs/DESIGN.md#deletion-vectors-on-an-appendable-file-an-ablation-removed)).
-- **Next:** S3 Express (M3), starting with `configs/s3x-calibration.json`, which needs credentials,
-  a directory bucket and an instance in its zone. Split files can also run on standard S3.
+- **Prepared:** the scale campaign, the 4 MiB recency setting scaled to Iceberg's defaults (128 MiB
+  row groups, 512 MiB files), to run on havoc in a container (`docker/campaigns/scale.json`,
+  [docker/README.md](docker/README.md)).
+- **Next:** S3 Express (M3), only to check the simulation's parameters. It starts with
+  `configs/s3x-calibration.json`, which needs credentials, a directory bucket and an instance in
+  its zone. Split files can also run on standard S3.

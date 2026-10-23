@@ -22,6 +22,10 @@ select = ["local-compact-*"]
 title = "Store latency simulation: validation and logged runs (lab/pages/store-latency.md)"
 select = ["sim-*"]
 
+[campaigns.scale]
+title = "The 4 MiB recency setting scaled to Iceberg's defaults, on havoc (docker/campaigns/scale.json)"
+select = ["scale-*"]
+
 [campaigns.s3x]
 title = "S3 Express: the calibration run and its local twin (configs/s3x-calibration*.json)"
 select = ["s3x-*"]

@@ -308,9 +308,13 @@ All are local runs: requests and bytes are exact, latency is not measured.
 
 ## What is next
 
-- **Simulate first.** Latency is simulated locally (lab/pages/store-latency.md), from endive's
-  store measurements. Production-sized settings (512 MiB files, 128 MiB row groups) run locally
-  with their requests logged, and are timed by the replay.
+- **Simulate first.** Latency is simulated (lab/pages/store-latency.md), from endive's store
+  measurements, over runs whose requests are logged, with payload checks off: the check is the
+  harness's and costs about 70% of a read's CPU.
+- **The scale campaign, on havoc.** The 4 MiB recency setting scaled to Iceberg's defaults
+  (128 MiB row groups, 512 MiB files) through 16 and 64 MiB (`configs/scale-recency-*`,
+  `docker/campaigns/scale.json`). It runs in a container, each configuration on whole idle cores
+  (docker/README.md); hypotheses P1–P6 (docs/HYPOTHESES.md).
 - **S3 Express (milestone M3)**, only to check the simulation's parameters.
   - It starts with `configs/s3x-calibration.json` and the S4 spike, which need credentials, a
     directory bucket and an instance in its zone.

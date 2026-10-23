@@ -1,0 +1,9 @@
+{
+  "description": "A pipeline check of the image and the runner: two small configurations, minutes on any machine. Its numbers mean nothing.",
+  "flags": ["--log-requests"],
+  "cores_per_job": 2,
+  "jobs": [
+    {"config": "configs/smoke.json", "heap": "2g"},
+    {"config": "configs/sim-validate-s3x.json", "heap": "2g"}
+  ]
+}

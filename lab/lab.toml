@@ -13,7 +13,7 @@ name = "bench"
 kind = "manifest"
 root = "results"
 glob = "*/*"
-exclude = ["builds/*", "micro/*", "spike/*"]
+exclude = ["builds/*", "micro/*", "spike/*", "campaigns/*"]
 id = "{label}-{config_hash}/{started}"
 
 [runs.fields]
@@ -33,6 +33,8 @@ compact_garbage_ratio = { path = "config.layout.compactGarbageRatio", type = "DO
 compact_small_rgs = { path = "config.layout.compactSmallRowGroups", type = "INTEGER" }
 reads_every = { path = "config.reads.every", type = "INTEGER" }
 oplog = "oplog_sha256"
+verify_rows = { path = "config.verifyRows", type = "BOOLEAN" }
+cpu_model = "host.cpu_model"
 
 # JMH micro-benchmarks (-rf json), one run per file
 [[runs]]

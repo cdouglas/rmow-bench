@@ -1,0 +1,29 @@
+{
+  "description": "The 4 MiB recency setting scaled up to Iceberg's defaults (128 MiB row groups, 512 MiB files): rows, operations per batch, row groups and files grow together, payload checks off, requests logged (docs/HYPOTHESES.md, 2026-10-23).",
+  "flags": [
+    "--log-requests"
+  ],
+  "cores_per_job": 10,
+  "jobs": [
+    {
+      "config": "configs/scale-recency-rg128m.json",
+      "heap": "32g",
+      "store_gib": 40
+    },
+    {
+      "config": "configs/scale-recency-rg64m.json",
+      "heap": "16g",
+      "store_gib": 20
+    },
+    {
+      "config": "configs/scale-recency-rg16m.json",
+      "heap": "8g",
+      "store_gib": 6
+    },
+    {
+      "config": "configs/scale-recency-rg4m.json",
+      "heap": "8g",
+      "store_gib": 2
+    }
+  ]
+}
