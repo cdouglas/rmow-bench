@@ -54,6 +54,11 @@ public final class BenchConfig {
     public String name = "stock";
     /** Fetch each file's footer once per read, for all its splits. */
     public boolean footerCache = false;
+    /**
+     * Load each data file's deletes once per read, for all its splits, as an engine with a delete
+     * cache would. Iceberg's readers load a file's deletion vector again for every split.
+     */
+    public boolean deleteCache = false;
     /** Prefetch this tail on each footer read (0: stock parquet-java's two requests). */
     public int footerPrefetchBytes = 0;
     /** Split files into scan tasks of about this size (Iceberg's read.split.target-size). */
@@ -79,6 +84,17 @@ public final class BenchConfig {
       r.name = "one-footer";
       r.footerCache = true;
       r.footerPrefetchBytes = 64 << 10;
+      return r;
+    }
+
+    /**
+     * An engine-like model: as {@link #oneFooter}, and each data file's deletes loaded once per
+     * read too, so a read costs one footer and one delete load per file, then its row groups.
+     */
+    public static ReaderSpec cached() {
+      ReaderSpec r = oneFooter();
+      r.name = "cached";
+      r.deleteCache = true;
       return r;
     }
   }

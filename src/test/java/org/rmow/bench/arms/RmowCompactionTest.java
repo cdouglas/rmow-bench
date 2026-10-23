@@ -30,7 +30,7 @@ import org.rmow.bench.workload.WorkloadSpec;
  */
 class RmowCompactionTest {
 
-  private static final Reader READER = new Reader("one-footer", true, 64 << 10, 128L << 20, null);
+  private static final Reader READER = new Reader("one-footer", true, false, 64 << 10, 128L << 20, null);
 
   private static final class Run {
     final OpLog log;

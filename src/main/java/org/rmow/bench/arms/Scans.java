@@ -6,7 +6,9 @@ import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Callable;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.function.Consumer;
@@ -21,6 +23,7 @@ import org.apache.iceberg.Schema;
 import org.apache.iceberg.SchemaParser;
 import org.apache.iceberg.data.InternalRecordWrapper;
 import org.apache.iceberg.data.Record;
+import org.apache.iceberg.deletes.PositionDeleteIndex;
 import org.apache.iceberg.expressions.Evaluator;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
@@ -85,12 +88,29 @@ final class Scans {
       long length,
       Consumer<Record> rows)
       throws IOException {
+    scan(ctx, reader, df, deletes, projection, filter, tail, start, length, null, rows);
+  }
+
+  /** @param deleteCache the read's loaded deletes ({@link Reader#deleteCache}); null: none */
+  static void scan(
+      ArmContext ctx,
+      Reader reader,
+      DataFile df,
+      DeleteFile[] deletes,
+      Schema projection,
+      Expression filter,
+      byte[] tail,
+      long start,
+      long length,
+      Map<String, PositionDeleteIndex> deleteCache,
+      Consumer<Record> rows)
+      throws IOException {
     FileScanTask task =
         new BaseFileScanTask(
             df, deletes, SCHEMA_JSON, SPEC_JSON, ResidualEvaluator.unpartitioned(filter));
     LengthAwareDeleteFilter deleteFilter =
         new LengthAwareDeleteFilter(
-            ctx.io(), task, Rows.SCHEMA, projection, reader.footerPrefetchBytes());
+            ctx.io(), task, Rows.SCHEMA, projection, reader.footerPrefetchBytes(), deleteCache);
     Schema required = deleteFilter.requiredSchema();
     Evaluator residual =
         filter == Expressions.alwaysTrue() ? null : new Evaluator(required.asStruct(), filter);
@@ -155,6 +175,7 @@ final class Scans {
   static TableHash readAll(ArmContext ctx, Reader reader, List<ReadFile> files, Expression filter)
       throws IOException {
     List<Callable<TableHash>> tasks = new ArrayList<>();
+    Map<String, PositionDeleteIndex> deletes = reader.deleteCache() ? new ConcurrentHashMap<>() : null;
     for (ReadFile f : files) {
       FileScanTask task =
           new BaseFileScanTask(
@@ -180,7 +201,7 @@ final class Scans {
             () -> {
               TableHash h = new TableHash();
               scan(ctx, reader, f.file(), f.deletes(), Rows.SCHEMA, filter, footer, start, length,
-                  r -> h.add(r, ctx.verifyRows()));
+                  deletes, r -> h.add(r, ctx.verifyRows()));
               return h;
             });
       }

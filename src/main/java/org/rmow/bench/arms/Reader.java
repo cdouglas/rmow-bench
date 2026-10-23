@@ -9,6 +9,9 @@ import java.util.concurrent.ExecutorService;
  * @param footerCache a read fetches each file version's one footer once, for all its splits (a
  *     version is summarized in exactly one footer); without it, as with stock Iceberg readers
  *     today, every split (one per row group) opens the file and reads the footer again
+ * @param deleteCache a read loads each data file's deletes once, for all its splits; without it,
+ *     as Iceberg's readers do ({@code BaseDeleteLoader} never caches a deletion vector), every
+ *     split loads its file's DV again
  * @param footerPrefetchBytes the tail each footer read prefetches (0: stock parquet-java, which
  *     takes two requests, the 8-byte tail and then the footer)
  * @param splitTargetBytes files are split into scan tasks of about this size
@@ -17,12 +20,13 @@ import java.util.concurrent.ExecutorService;
 public record Reader(
     String name,
     boolean footerCache,
+    boolean deleteCache,
     int footerPrefetchBytes,
     long splitTargetBytes,
     ExecutorService pool) {
 
   /** How writers read (locate scans, merges, compaction): sequential, with the layout's prefetch. */
   static Reader writer(LayoutSpec layout) {
-    return new Reader("writer", false, layout.footerPrefetchBytes, Long.MAX_VALUE, null);
+    return new Reader("writer", false, false, layout.footerPrefetchBytes, Long.MAX_VALUE, null);
   }
 }

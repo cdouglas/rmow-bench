@@ -165,7 +165,8 @@ For latency, a configuration can set two more things:
 - **`warmup`** runs a small op log on the in-memory store before the measured run, so the JIT has
   compiled the paths first. It changes no request or byte (`RunnerSmokeTest`).
 - **`reads.readers`** can list a reader model with `parallelism` above 1, to read on several
-  threads as an engine does.
+  threads as an engine does. With `deleteCache` (the `cached` model), it loads each data file's
+  deletes once per read rather than once per split, as an engine with a delete cache would.
 
 ## Arms
 

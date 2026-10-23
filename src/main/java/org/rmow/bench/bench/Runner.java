@@ -153,7 +153,9 @@ public final class Runner {
       if (pool != null) {
         pools.add(pool);
       }
-      readers.add(new Reader(r.name, r.footerCache, r.footerPrefetchBytes, r.splitTargetBytes, pool));
+      readers.add(
+          new Reader(
+              r.name, r.footerCache, r.deleteCache, r.footerPrefetchBytes, r.splitTargetBytes, pool));
     }
     List<ArmRun> arms = new ArrayList<>();
     for (String name : cfg.arms) {

@@ -90,11 +90,11 @@ class ReaderModelTest {
   /** The two reader models as the runner builds them from the default config. */
   private static final class BenchReaders {
     static Reader oneFooter() {
-      return new Reader("one-footer", true, 64 << 10, 128L << 20, null);
+      return new Reader("one-footer", true, false, 64 << 10, 128L << 20, null);
     }
 
     static Reader stock() {
-      return new Reader("stock", false, 0, 128L << 20, null);
+      return new Reader("stock", false, false, 0, 128L << 20, null);
     }
   }
 }

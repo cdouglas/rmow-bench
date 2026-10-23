@@ -148,6 +148,45 @@ class RunnerSmokeTest {
   }
 
   @Test
+  void cachedReaderLoadsEachFilesDeletesOnce(@TempDir Path dir) throws IOException {
+    // the cached reader loads a data file's deletes once per read, for all its splits: no read
+    // costs more under it than under one-footer, arms without deletes read exactly alike, and
+    // an arm whose files of several row groups carry DVs (MoR-v3, TailCoW-C) reads with fewer GETs:
+    // uniform updates put DVs on the initial load's 2 MiB files
+    BenchConfig cfg = config("mem", dir);
+    cfg.arms = List.of("mor-v3", "tailcow-c", "rmow-c");
+    cfg.workload.initialRows = 100_000;
+    cfg.workload.keyDist = WorkloadSpec.KeyDist.UNIFORM;
+    cfg.layout.targetFileBytes = 2 << 20;
+    cfg.layout.compactEvery = 0;
+    cfg.reads.readers = List.of(BenchConfig.ReaderSpec.oneFooter(), BenchConfig.ReaderSpec.cached());
+    List<JsonNode> recs = run(cfg, dir);
+    java.util.Map<String, JsonNode> oneFooter = new java.util.HashMap<>();
+    for (JsonNode r : recs) {
+      if (r.has("reader") && r.get("reader").asText().equals("one-footer")) {
+        oneFooter.put(r.get("arm").asText() + " " + r.get("phase").asText() + " " + r.get("step"), r);
+      }
+    }
+    boolean fewer = false;
+    for (JsonNode c : recs) {
+      if (!c.has("reader") || !c.get("reader").asText().equals("cached")) {
+        continue;
+      }
+      String at = c.get("arm").asText() + " " + c.get("phase").asText() + " " + c.get("step");
+      JsonNode o = oneFooter.get(at);
+      assertThat(c.get("rows").asLong()).as(at + " rows").isEqualTo(o.get("rows").asLong());
+      assertThat(c.get("gets").asLong()).as(at + " GETs").isLessThanOrEqualTo(o.get("gets").asLong());
+      if (c.get("arm").asText().equals("rmow-c")) {
+        assertThat(c.get("gets").asLong()).as(at + " GETs").isEqualTo(o.get("gets").asLong());
+        assertThat(c.get("bytes_read").asLong()).as(at).isEqualTo(o.get("bytes_read").asLong());
+      }
+      fewer |= !c.get("arm").asText().equals("rmow-c")
+          && c.get("gets").asLong() < o.get("gets").asLong();
+    }
+    assertThat(fewer).as("a DV arm loads each file's DV once under the cached reader").isTrue();
+  }
+
+  @Test
   void warmupChangesNoRequestOrByte(@TempDir Path dir) throws IOException {
     // the warmup only warms the JIT: the measured run's records must match a run without one
     BenchConfig cfg = config("mem", dir);
