@@ -165,3 +165,69 @@ What the reruns should show against the earlier runs (`steps_diff`):
   differences.
 
 *Decided by:* `steps_diff` against the earlier runs.
+
+## Added 2026-10-23, before the -dv ablation
+
+H3 attributed the difference between RMoW-C and TailCoW to the single appendable object. The
+local runs showed that most of it comes instead from how RMoW applies updates: it rewrites every
+row group an update touches, where TailCoW deletes with DVs (lab/pages/layout-vs-policy.md). The
+`-dv` arms separate the two. They keep RMoW's layout and tail policies, but delete rows in a
+file's sealed prefix with a DV and append their updated versions to the tail, as TailCoW does.
+So:
+- **RMoW-X-dv against TailCoW-X is the layout alone**: one appendable object with one footer,
+  against data files.
+- **RMoW-X against RMoW-X-dv is the update handling alone**: region rewrites against DVs.
+
+**Runs.** `configs/local-dv-{recency-exp,uniform}-nocompact.json` are the 4 MiB uncompacted
+settings of `local-rg-sweep-recency-exp-rg4m` and `local-m1-uniform-nocompact`. Arms: MoR-v3, CoW,
+TailCoW-B and -C, RMoW-A, -B and -C, and RMoW-A-dv, -B-dv and -C-dv. With version dumps.
+
+### What the ablation should show (recency-skewed updates unless noted)
+
+- **D1: the layout alone costs few bytes.**
+  - RMoW-C-dv writes at most 2× TailCoW-C's bytes per batch (RMoW-C writes 9.7×).
+  - RMoW-A-dv, whose row groups are all sealed (no tail merges), writes at most 2× MoR-v3's.
+- **D2: the update handling carries RMoW's write bytes.** RMoW-C minus RMoW-C-dv accounts for at
+  least 80% of RMoW-C minus TailCoW-C in bytes written per batch. The same holds for B.
+- **D3: the layout alone keeps most of the read savings.** RMoW-C-dv's full read at batch 60 takes
+  at most half TailCoW-C's GETs: one footer and one DV per file instead of one per data file.
+- **D4: under uniform updates, DVs avoid copy-on-write.** The RMoW-dv arms write at most 3× MoR-v3's
+  bytes per batch, against RMoW's 82× (CoW's).
+- **D5: the shared arms match.** Every arm the ablation shares with `local-rg-sweep-recency-exp-rg4m`
+  or `local-m1-uniform-nocompact` matches that run record for record (`steps_diff`). Time travel
+  costs what the current read of the same state cost in every `-dv` arm, as in every other arm
+  (`h4_pairs`).
+
+*Decided by:* `h3_arms` and `h3_diffs`, with the differences extended to the `-dv` arms, and
+`steps_diff`.
+
+## Added 2026-10-23, before rerunning the recency -dv ablation with a delete cache
+
+The ablation's reader models load a file's deletion vector once per split (row group), as
+Iceberg's readers do: `BaseDeleteLoader` never caches a DV. That confounded D3. A third reader
+model, `cached`, loads each data file's deletes once per read, as an engine with a delete cache
+would. `configs/local-dv-recency-exp-nocompact.json` is rerun with readers `one-footer`, `cached`
+and `stock`.
+
+- **D3, revisited.** Under `cached`, RMoW-C-dv's full read at batch 60 takes at most half
+  TailCoW-C's GETs.
+- **The cache changes only what it should.** Under `cached`:
+  - arms without deletes (RMoW, CoW) read exactly as under `one-footer`;
+  - arms with DVs read the same rows with no more GETs.
+- **Nothing else changes.** Every `one-footer` and `stock` record, and every write, matches the
+  earlier run of the configuration (`steps_diff`).
+
+## Added 2026-10-23, before validating the store simulation
+
+Store latency is simulated two ways, with one model (`org.rmow.bench.io.StoreLatency`): injected
+into a run, where each request sleeps its expected latency, and replayed from a run's request
+log (`figures.replay`), which sums each phase's requests and schedules its split tasks on its
+reader's threads. `configs/sim-validate-s3x.json` runs the S3 Express profile injected on the
+in-memory store, logging requests. Its replay must predict its own wall times:
+
+- **S1: one thread.** For every outermost phase on one thread that took at least 20 ms, the
+  replay is within 10% of the measured wall time.
+- **S2: eight threads.** For full reads under the 8-thread `cached` reader, the replay is within
+  20% of the measured wall time.
+
+*Decided by:* `figures.replay` on the run's own log, against `steps.wall_ns`.
