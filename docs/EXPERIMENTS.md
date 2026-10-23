@@ -88,7 +88,7 @@ the local experiments repeats a run, so the Repetitions page has nothing to comp
 | **compaction** (`configs/local-compact-*`) | When to compact, as an outcome (H6). | check period `P` = none, 1, 5, 10, 20 × threshold level (table below) | the split comparison's six | 11 | [compaction-sweep-2026-10-21.md](measurements/compaction-sweep-2026-10-21.md) |
 | **micro** (`results/micro/*.json`, JMH) | What a footer costs per row group. | row groups 10–10k × 11 or 50 columns; parse, convert, merge and serialize | n/a | 2 files | `docs/measurements/footer-*-2026-10-20.txt`. The source of the README's "about 1.2 KB and 30 µs per row group". |
 | **layout vs policy** (no new runs) | H3: is RMoW against TailCoW (layout) a smaller difference than TailCoW against MoR-v3 (tail policy), and mostly in read requests? | read from the uncompacted rg-sweep, split and m1 uniform runs | MoR-v3, TailCoW-B and -C, RMoW-B and -C in both layouts | 6 of the above | [lab/pages/layout-vs-policy.md](../lab/pages/layout-vs-policy.md) |
-| **time travel** (no new runs) | H4: does an old version read like the current one, and do dead bytes cost reads? | read from the 7 uncompacted runs: each time-travel read against the full read of the same state | all that ran | 7 of the above | [lab/pages/time-travel.md](../lab/pages/time-travel.md) |
+| **time travel** (reruns) | H4: does an old version read like the current one, and do dead bytes cost reads? | the 7 uncompacted configurations that read old versions, rerun 2026-10-22/23 with the split-offset fix: each time-travel read against the full read of the same state | all that ran | 7 of the above, rerun | [lab/pages/time-travel.md](../lab/pages/time-travel.md) |
 
 The compaction sweep's threshold levels:
 
@@ -126,14 +126,50 @@ the runs' manifests. Rebuild it after new runs with `lab ingest && lab build`, o
 
 ### Retired runs
 
-Seven early m1 runs were retired by renaming their directories `superseded-…-<reason>`:
-- `v2bounds` (2 runs)
-- `onereader` (2 runs)
-- `twopass`
-- `unmerged`
-- `partial`
+Outdated runs are deleted, not kept: `results/` is not in git, so this section records what went
+and why.
 
-The in-memory `smoke` run tests the harness. The lab marks all eight and leaves them out of every
+**Deleted 2026-10-22: seven early m1 runs** (retired on 2026-10-21 as `superseded-…-<reason>`).
+All ran before the first commit, from uncommitted code. What their data showed:
+- **`unmerged`** (`local-m1-recency-exp`, finished) and **`v2bounds`** (`nocompact`, finished;
+  `compact10`, stopped at step 1). `mor-v2-file` ended with 807 position-delete files for 61 data
+  files: Iceberg did not treat its deletes as file-scoped, so they were never merged.
+  `RunnerSmokeTest` now asserts at most one live delete file per data file, and `MorV2Arm` writes
+  full `file_path` bounds.
+- **`partial`** (`local-m1-uniform`): stopped at step 21, with 231 delete files for 22 data files.
+- **`onereader`** (`nocompact`, finished; `compact10`, stopped at step 24): a single reader, before
+  reader models.
+- **`twopass`** (`nocompact`): readers `stock` and `cached`; stopped at step 50.
+
+**Deleted 2026-10-23: the seven earlier runs of the uncompacted configurations that read old
+versions** (2026-10-21):
+- `local-m1-recency-exp-nocompact` and `local-m1-uniform-nocompact`;
+- `local-rg-sweep-recency-exp-rg{1,2,4,8}m`;
+- `local-split-recency-exp-nocompact`.
+
+Reruns from cfe40b2 replace them. Three build snapshots went with them:
+`20261021T044313Z-4b682c91d403-dirty` and `20261021T162327Z-45b4c692f26f-dirty` (only those runs
+used them), and `20261022T224501Z-cfe40b2f65bf` (a rerun stream a power loss cut off). What their
+data showed:
+- **Time travel planned old RMoW versions without split offsets.** Against the full read of the
+  same state:
+  - the stock reader's time-travel reads took 62% fewer GETs: 3,938 against 10,248 over 100 pairs
+    on appendable files, and 199 against 239 over 10 on split files;
+  - the one-footer reader's took the same GETs, and 0.11% fewer bytes.
+
+  The MoR, CoW and TailCoW arms matched in all 190 pairs per reader.
+- **Otherwise the reruns match them record for record** (`steps_diff`), except:
+  - the RMoW arms' `read_old` records;
+  - in the two m1 runs, the MoR and TailCoW arms, whose builds predate counting Puffin's HEAD and
+    run-relative paths.
+
+  That is what docs/HYPOTHESES.md registered on 2026-10-22: no difference outside those.
+
+The compacted runs with time travel (`local-m1-*-compact10`, `local-split-*-compact10`) were not
+rerun. Their stock-reader `read_old` records carry the same bias, though nothing published uses
+them; the one-footer reader's GETs are unaffected.
+
+The in-memory `smoke` run tests the harness. The lab marks it excluded and leaves it out of every
 result (`lab/annotations.toml`).
 
 ## Findings so far
@@ -164,10 +200,12 @@ All are local runs: requests and bytes are exact, latency is not measured.
   - Append itself is worth 1.28 requests per batch. Most of the rest comes from how RMoW applies
     updates (no locate scan, no DVs) and from one footer per file.
 - **Time travel (H4).**
-  - Under the one-footer reader, an old version costs exactly the current read's GETs, in all 110
-    RMoW pairs. Dead bytes are never read: appendable files read 1.000–1.002× their live bytes.
-  - Under the stock reader, these runs' harness planned old RMoW versions without split offsets,
-    so that comparison measures the harness. The harness is fixed; the runs predate the fix.
+  - Under both readers, an old version costs exactly what the current read of the same state
+    costs, in every request and byte column: all 600 pairs, 220 of them over RMoW files.
+  - Dead bytes are never read: appendable files read 1.000–1.002× their live bytes.
+  - The earlier runs planned old RMoW versions without split offsets, so their stock-reader
+    comparison measured the harness. The reruns fix that, and otherwise match them record for
+    record, as registered (Retired runs).
   - The trace cannot show S3's extra abort per old footer.
 
 ## The hypotheses
@@ -177,7 +215,7 @@ All are local runs: requests and bytes are exact, latency is not measured.
 | H1 | Recency-skewed updates: RMoW-C's full read stays flat, its writes within 3× MoR-v3's | **Open.** Decided on S3 Express, which has not run. |
 | H2 | Uniform updates: RMoW's writes approach copy-on-write | **Held** (local, m1). |
 | H3 | RMoW-C against TailCoW is the single-object effect | **Mixed.** Smaller, and mostly in reads, in request counts; larger, and mostly write bytes, on S3 Express prices at up to one full read per batch. Not the single object: append is 1.28 requests per batch. |
-| H4 | Old versions read like current ones; dead bytes cost nothing | **Held** for reads and dead bytes, under the one-footer reader. The extra abort on S3 is **open**: the trace cannot show it. |
+| H4 | Old versions read like current ones; dead bytes cost nothing | **Held** for reads, under both readers (after the rerun), and for dead bytes. The extra abort on S3 is **open**: the trace cannot show it. |
 | H5 | Split files: one more request per changed file, the same reads, kept bytes within 1.5× | **Held**, except that RMoW-C kept 1.52×. |
 | H6 | When to compact | **Mixed.** The read half held for RMoW-B, not RMoW-C; the space and write-for-read halves held; costs half held. |
 
@@ -192,7 +230,6 @@ All are local runs: requests and bytes are exact, latency is not measured.
   - no write-up of m1 beyond H2;
   - the `-dv` ablation is in no experiment. `rmow-c-dv` against `tailcow-c` would isolate the
     single object, which H3's comparison could not;
-  - every run so far planned old RMoW versions without split offsets, which biases the stock
-    reader's `read_old` (lab/pages/time-travel.md). The harness is fixed, and
-    `RunnerSmokeTest.timeTravelReadsLikeTheCurrentRead` pins it. A rerun of the uncompacted
-    configurations would make the stock-reader pairs a test.
+  - the compacted runs with time travel (`local-m1-*-compact10`, `local-split-*-compact10`)
+    predate the split-offset fix, so their stock-reader `read_old` is biased (Retired runs).
+    Nothing published uses it.

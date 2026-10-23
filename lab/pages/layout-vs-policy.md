@@ -15,16 +15,16 @@ import pandas as pd
 from labbook import q, table, theme
 theme()
 
-# The runs this page reads (2026-10-22): the uncompacted rg-sweep runs, the uncompacted split run
-# (its split arms) and the uniform run without compaction.
+# The runs this page reads, rerun on 2026-10-22/23 from cfe40b2: the uncompacted rg-sweep runs,
+# the uncompacted split run (its split arms) and the uniform run without compaction.
 RG = {
-    1: "local-rg-sweep-recency-exp-rg1m-ddb0f45ee310/20261021T044314Z",
-    2: "local-rg-sweep-recency-exp-rg2m-9ff075ae2483/20261021T050810Z",
-    4: "local-rg-sweep-recency-exp-rg4m-b2e059145e94/20261021T053530Z",
-    8: "local-rg-sweep-recency-exp-rg8m-4920abe2147d/20261021T055810Z",
+    1: "local-rg-sweep-recency-exp-rg1m-ddb0f45ee310/20261023T042220Z",
+    2: "local-rg-sweep-recency-exp-rg2m-9ff075ae2483/20261023T044613Z",
+    4: "local-rg-sweep-recency-exp-rg4m-b2e059145e94/20261023T042224Z",
+    8: "local-rg-sweep-recency-exp-rg8m-4920abe2147d/20261023T044422Z",
 }
-SPLIT = "local-split-recency-exp-nocompact-309eabcc0dc5/20261021T162327Z"
-UNIFORM = "local-m1-uniform-nocompact-55dd4776cbb6/20261021T032905Z"
+SPLIT = "local-split-recency-exp-nocompact-309eabcc0dc5/20261023T045645Z"
+UNIFORM = "local-m1-uniform-nocompact-c7e50a35a7c5/20261023T042229Z"
 RUNS = [*RG.values(), SPLIT, UNIFORM]
 ARMS = ["mor-v3", "tailcow-b", "tailcow-c", "rmow-b", "rmow-c", "rmow-b-split", "rmow-c-split"]
 # analysis/compaction.py's PRICES, per request and per GB
@@ -134,7 +134,10 @@ It predicts that on object stores with cheap PUTs the first difference is the sm
 that it matters mostly for read requests. It is decided by comparing the two, request type by
 request type.
 
-No new runs were made. This page reads the existing local runs.
+This page reads local runs of uncompacted configurations. They were rerun on 2026-10-22/23 for
+the time-travel fix (Time travel and dead bytes, H4). In everything used here (batches, full
+reads, state) the reruns match the earlier runs exactly. The one exception is the uniform run's
+MoR and TailCoW arms, which now count Puffin's HEAD.
 
 ## Setup
 
@@ -142,17 +145,19 @@ No new runs were made. This page reads the existing local runs.
 - `local-rg-sweep-recency-exp-rg{1,2,4,8}m`: all 9 arms. Row-group target and tail seal are
   1, 2, 4 or 8 MiB, with recency-skewed updates and no compaction.
 - `local-split-recency-exp-nocompact`: the same settings at 4 MiB, with the split arms. Its four
-  other arms match the 4 MiB rg-sweep run exactly in every request and byte column, though the
-  two runs came from different builds (`steps_diff`).
+  other arms match the 4 MiB rg-sweep run exactly in every request and byte column
+  (`steps_diff`).
 - `local-m1-uniform-nocompact`: uniform updates.
 
 **Workload.** The m1 workload: 1M initial rows, then 60 batches of 10k operations, with 70%
 inserts, 25% updates and 5% deletes. Rows are located by scan.
 
-**Builds.**
-- rg-sweep: `results/builds/20261021T044313Z-4b682c91d403-dirty`;
-- split: `results/builds/20261021T162327Z-45b4c692f26f-dirty`;
-- m1 uniform: 4b682c9, clean, with no snapshot.
+**Builds.** All are commit cfe40b2, from snapshots in `results/builds/` marked dirty by a patch
+to docs only (`CLAUDE.md`, `docs/EXPERIMENTS.md`, `lab/annotations.toml`):
+- rg-sweep: `20261023T042219Z-cfe40b2f65bf-dirty` (1 and 2 MiB) and
+  `20261023T042224Z-cfe40b2f65bf-dirty` (4 and 8 MiB);
+- split: `20261023T045645Z-cfe40b2f65bf-dirty`;
+- m1 uniform: `20261023T042228Z-cfe40b2f65bf-dirty`.
 
 **Pairs.** Each comparison holds the tail policy fixed:
 - layout is RMoW-B against TailCoW-B, and RMoW-C against TailCoW-C;
@@ -413,14 +418,12 @@ WHERE r.label LIKE 'local-rg-sweep-%' OR r.label = 'local-split-recency-exp-noco
 
 ## Limits
 
-- **One run per setting, one seed, local.** Requests and bytes are deterministic (the 4 MiB
-  rg-sweep and split runs match exactly), but no setting was repeated. There is no latency.
+- **One seed, local.** Requests and bytes are deterministic. The 4 MiB rg-sweep and split runs
+  match exactly, and the reruns matched the earlier runs. There is no latency.
 - **No compaction.** Compaction cuts MoR-v3's and TailCoW's read GETs, which shrinks the policy
   step's read savings. See the compaction sweep (H6).
 - **Storage and CPU are left out.**
   - Uncompacted, appendable RMoW keeps {eval}`N["kept_rmow"]`× its live bytes and TailCoW
     {eval}`N["kept_tc"]`×. That is a layout cost (H5, H6).
   - CPU under 2% decides nothing.
-- **The uniform run's build predates counting Puffin's HEAD.** In `local-m1-uniform-nocompact`,
-  MoR-v3 and TailCoW lack one HEAD per batch (0.03 µ\$ on Express).
 - **Prices are list prices**, as `analysis/compaction.py` has them.

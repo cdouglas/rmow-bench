@@ -53,9 +53,10 @@ bin/matrix.sh --build configs/local-compact-*.json   # several, from a build sna
   - `oplog.bin`;
   - `steps.jsonl`: one record per arm, step and phase;
   - `versions/` with `--dump-versions`.
-- `results/` is not in git. **Never edit, move or delete results.** To retire a run, the
-  project's convention is to rename its directory `superseded-<…>-<reason>`, and only when the
-  user decides. Record it with `lab annotate` too.
+- `results/` is not in git. **Never edit results.** Outdated runs (replaced by a rerun, or
+  retired) are deleted rather than kept, when the user decides. Deleting is permanent, so first
+  record in `docs/EXPERIMENTS.md` (Retired runs) what goes and why, and carry over anything a
+  write-up still needs from it.
 
 ## Analysis
 
