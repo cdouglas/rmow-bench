@@ -329,9 +329,6 @@ The m1 runs' other differences are their MoR and TailCoW arms' HEADs and bytes, 
   checks the model's request counts against versitygw; it does not check read bytes or aborts.
 - **No compaction.** Compacted runs pair different files, because history is recorded before
   compaction. The compaction sweep has no time travel at all (`travelBack` 1000 with 60 batches).
-- **Compacted runs were not rerun.** `local-m1-*-compact10` and `local-split-*-compact10`
-  predate the fix, so their stock-reader `read_old` records still carry the bias. Nothing here or
-  in the earlier write-ups uses them.
 - **One distance.** Every pair is 20 batches back, and probes come every 10 batches. Each run has
   {eval}`N["pairs_per"]` pairs per arm and reader.
 - **Next step.** Counting aborts needs the AWS SDK's HTTP-client metrics on the S3 runs (M3).

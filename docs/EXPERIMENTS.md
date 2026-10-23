@@ -165,9 +165,33 @@ data showed:
 
   That is what docs/HYPOTHESES.md registered on 2026-10-22: no difference outside those.
 
-The compacted runs with time travel (`local-m1-*-compact10`, `local-split-*-compact10`) were not
-rerun. Their stock-reader `read_old` records carry the same bias, though nothing published uses
-them; the one-footer reader's GETs are unaffected.
+**Deleted 2026-10-23: the four earlier compacted runs with time travel** (2026-10-21):
+- `local-m1-recency-exp-compact10` and `local-m1-uniform-compact10`, from 763423b and 4b682c9;
+- `local-split-recency-exp-compact10` and `local-split-uniform-compact10`, from build snapshot
+  `20261021T163850Z-45b4c692f26f-dirty`, deleted with them.
+
+Reruns from 17476f3 replace them. The earlier runs predate both the split-offset fix and the
+compaction rework (0564114). What their data showed (recency, 4 MiB, at batch 60):
+- **Appendable RMoW.** Its old rewrite packed row groups to about twice the writer's size, so it
+  read the table in 10–11 GETs against 17–18 now. It also wrote 6.0–6.4 MB per batch against
+  5.2–5.4.
+- **Split RMoW.** It never reached the old trigger, so it had no compaction writes, and kept
+  1.41–1.52× its live bytes against 1.28–1.29× now.
+
+These are the numbers in split-vs-append-2026-10-21.md's compaction tables, which the compaction
+sweep had already superseded. The lab's Layouts page now shows the reruns.
+
+The reruns match them as registered in docs/HYPOTHESES.md (2026-10-23), with no difference
+outside the expected kinds:
+- the RMoW arms from step 10, the first compaction, on;
+- the m1 runs' MoR and TailCoW build differences.
+
+| configuration | records | differing | RMoW from step 10 | m1 build differences | other |
+|---|---|---|---|---|---|
+| m1-recency-exp-compact10 | 3,172 | 1,800 | 668 | 1,132 | 0 |
+| m1-uniform-compact10 | 3,175 | 1,778 | 708 | 1,070 | 0 |
+| split-recency-exp-compact10 | 2,085 | 555 | 555 | 0 | 0 |
+| split-uniform-compact10 | 2,430 | 475 | 475 | 0 | 0 |
 
 The in-memory `smoke` run tests the harness. The lab marks it excluded and leaves it out of every
 result (`lab/annotations.toml`).
@@ -230,6 +254,3 @@ All are local runs: requests and bytes are exact, latency is not measured.
   - no write-up of m1 beyond H2;
   - the `-dv` ablation is in no experiment. `rmow-c-dv` against `tailcow-c` would isolate the
     single object, which H3's comparison could not;
-  - the compacted runs with time travel (`local-m1-*-compact10`, `local-split-*-compact10`)
-    predate the split-offset fix, so their stock-reader `read_old` is biased (Retired runs).
-    Nothing published uses it.
