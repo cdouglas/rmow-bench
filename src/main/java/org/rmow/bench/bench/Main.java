@@ -27,6 +27,7 @@ import org.apache.iceberg.IcebergBuild;
  *
  * <pre>
  *   bin/run.sh &lt;config.json&gt; [--out &lt;dir&gt;] [--store-root &lt;dir&gt;] [--keep-store] [--dump-versions]
+ *       [--log-requests]
  * </pre>
  *
  * Results go to {@code <out>/<label>-<config hash>/<UTC start time>/}: {@code manifest.json}
@@ -38,7 +39,9 @@ import org.apache.iceberg.IcebergBuild;
  *       a local store lives does not change what is measured, so it is not part of the hash);
  *   <li>{@code --keep-store} keeps the run's objects, which are otherwise deleted at the end;
  *   <li>{@code --dump-versions} writes every version of the appendable objects to {@code
- *       versions/} in the run directory, for {@code analysis/interop_check.py}.
+ *       versions/} in the run directory, for {@code analysis/interop_check.py};
+ *   <li>{@code --log-requests} writes every request each phase issued to {@code requests.jsonl},
+ *       with its split task and each task's CPU, for latency models.
  * </ul>
  *
  * <p>{@code bin/matrix.sh} runs from a snapshot of the build and names it, and its git state, in
@@ -53,13 +56,14 @@ public final class Main {
     if (args.length < 1) {
       System.err.println(
           "usage: run.sh <config.json> [--out <dir>] [--store-root <dir>] [--keep-store]"
-              + " [--dump-versions]");
+              + " [--dump-versions] [--log-requests]");
       System.exit(2);
     }
     Path out = Path.of("results");
     String storeRoot = null;
     boolean keepStore = false;
     boolean dumpVersions = false;
+    boolean logRequests = false;
     for (int i = 1; i < args.length; i++) {
       if (args[i].equals("--out") && i + 1 < args.length) {
         out = Path.of(args[++i]);
@@ -69,6 +73,8 @@ public final class Main {
         keepStore = true;
       } else if (args[i].equals("--dump-versions")) {
         dumpVersions = true;
+      } else if (args[i].equals("--log-requests")) {
+        logRequests = true;
       } else {
         throw new IllegalArgumentException("Unknown argument: " + args[i]);
       }
@@ -95,7 +101,7 @@ public final class Main {
     manifest.put("started", started);
     manifest.put("versions", versions());
     manifest.put("host", host());
-    Runner.Options options = new Runner.Options(storeRoot, keepStore, dumpVersions);
+    Runner.Options options = new Runner.Options(storeRoot, keepStore, dumpVersions, logRequests);
     manifest.put("store_root", options.storeRoot(cfg));
     Path manifestFile = runDir.resolve("manifest.json");
     pretty.writeValue(manifestFile.toFile(), manifest);

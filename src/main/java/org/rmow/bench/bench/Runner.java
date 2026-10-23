@@ -30,6 +30,7 @@ import org.rmow.bench.arms.TailPolicy;
 import org.rmow.bench.arms.VersionDump;
 import org.rmow.bench.io.IoTrace;
 import org.rmow.bench.io.RelocatedFileIO;
+import org.rmow.bench.io.StoreLatency;
 import org.rmow.bench.io.TracingFileIO;
 import org.rmow.bench.oracle.ReferenceModel;
 import org.rmow.bench.oracle.TableHash;
@@ -55,9 +56,12 @@ public final class Runner {
    * @param keepStore keep the run's objects; by default they are deleted once the run ends
    * @param dumpVersions write every version of the appendable objects to {@code versions/} in
    *     the run directory ({@link VersionDump})
+   * @param logRequests write every request each phase issued to {@code requests.jsonl} in the
+   *     run directory, with its split task and each task's CPU, for latency models
    */
-  public record Options(String storeRoot, boolean keepStore, boolean dumpVersions) {
-    public static final Options DEFAULT = new Options(null, false, false);
+  public record Options(
+      String storeRoot, boolean keepStore, boolean dumpVersions, boolean logRequests) {
+    public static final Options DEFAULT = new Options(null, false, false, false);
 
     String storeRoot(BenchConfig cfg) {
       return storeRoot != null ? storeRoot : cfg.store.root;
@@ -75,6 +79,7 @@ public final class Runner {
   private final Options options;
   private final ObjectMapper json = new ObjectMapper();
   private final List<Reader> readers = new ArrayList<>();
+  private BufferedWriter requestsOut; // the request log, while a run with one writes steps
 
   public Runner(BenchConfig cfg, Path runDir, String runId) {
     this(cfg, runDir, runId, Options.DEFAULT);
@@ -157,6 +162,13 @@ public final class Runner {
           new Reader(
               r.name, r.footerCache, r.deleteCache, r.footerPrefetchBytes, r.splitTargetBytes, pool));
     }
+    BenchConfig.LatencySpec ls = cfg.store.latency;
+    StoreLatency latency =
+        ls == null
+            ? null
+            : new StoreLatency(
+                ls.getMs, ls.getSigma, ls.putMs, ls.putSigma, ls.appendMs, ls.appendSigma,
+                ls.partMs, ls.readMsPerMib, ls.writeMsPerMib);
     List<ArmRun> arms = new ArrayList<>();
     for (String name : cfg.arms) {
       IoTrace trace = new IoTrace();
@@ -165,7 +177,7 @@ public final class Runner {
           new ArmContext(
               name,
               LOGICAL_ROOT + "/" + name,
-              new TracingFileIO(io, io, trace),
+              new TracingFileIO(io, io, trace, latency),
               io,
               phases,
               cfg.layout,
@@ -174,6 +186,7 @@ public final class Runner {
       Arm arm = create(name, ctx);
       arm.load(InitialLoad.copy(io, base, ctx.root()));
       arms.add(new ArmRun(arm, phases, trace));
+      trace.logEvents(options.logRequests());
     }
 
     ReferenceModel model = new ReferenceModel(log);
@@ -182,7 +195,12 @@ public final class Runner {
       widen(tsBounds, log.ts(id));
     }
 
-    try (BufferedWriter out = Files.newBufferedWriter(runDir.resolve("steps.jsonl"))) {
+    try (BufferedWriter out = Files.newBufferedWriter(runDir.resolve("steps.jsonl"));
+        BufferedWriter requests =
+            options.logRequests()
+                ? Files.newBufferedWriter(runDir.resolve("requests.jsonl"))
+                : null) {
+      requestsOut = requests;
       probe(out, arms, model, 0, tsBounds);
       for (ArmRun a : arms) {
         emitState(out, a, 0);
@@ -334,6 +352,30 @@ public final class Runner {
       m.putAll(p.extra());
       out.write(json.writeValueAsString(m));
       out.newLine();
+      if (requestsOut != null) {
+        emitRequests(a, step, p);
+      }
+    }
+  }
+
+  /** The request log: one record per request (or stream read, or split task) of the phase. */
+  private void emitRequests(ArmRun a, int step, Phases.Measured p) throws IOException {
+    for (IoTrace.Event e : p.events()) {
+      Map<String, Object> m = new LinkedHashMap<>();
+      m.put("arm", a.arm().name());
+      m.put("step", step);
+      m.put("phase", p.phase());
+      m.put("reader", p.extra().get("reader"));
+      m.put("seq", e.seq());
+      m.put("task", e.task());
+      m.put("kind", e.kind().name().toLowerCase(java.util.Locale.ROOT));
+      String path = e.path() == null ? "" : e.path();
+      m.put("object", path.startsWith(LOGICAL_ROOT + "/") ? path.substring(LOGICAL_ROOT.length() + 1) : path);
+      m.put("offset", e.offset());
+      m.put("length", e.length());
+      m.put("cpu_ns", e.cpuNs());
+      requestsOut.write(json.writeValueAsString(m));
+      requestsOut.newLine();
     }
   }
 

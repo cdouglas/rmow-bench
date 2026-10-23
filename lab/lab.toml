@@ -63,6 +63,17 @@ format = "parquet_metadata"
 path_pattern = '^versions/(?P<arm>[^/]+)/'
 mode = "table"
 
+# The request log (bin/run.sh --log-requests): one record per request, stream read or split task
+# of each outermost phase, for the latency replay (figures.replay, lab/pages/store-latency.md).
+[[facts]]
+name = "requests"
+runs = "bench"
+file = "requests.jsonl"
+format = "jsonl"
+mode = "table"
+only_finished = true
+options = { ignore_errors = true }
+
 [[facts]]
 name = "version_dump"
 runs = "bench"

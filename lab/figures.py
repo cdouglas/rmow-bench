@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 
 import altair as alt
+import numpy as np
+import pandas as pd
 
 from labbook import figure, palette, q
 
@@ -38,6 +40,93 @@ def arm_encoding(arms: list[str] | None = None, title: str = "arm") -> tuple[alt
     shape = alt.Shape("arm_label:N", title=title, sort=domain,
                       scale=alt.Scale(domain=domain, range=list(arms.marker)))
     return color, shape
+
+
+# The store latency replay: what each outermost phase of a run with a request log
+# (--log-requests) would take on a simulated store. The model is the one the harness injects
+# (org.rmow.bench.io.StoreLatency) and lab/views/40_latency.sql sums: a request costs its kind's
+# expected latency (lognormal median x e^(sigma^2 / 2)), a GET a part's latency more per appended
+# part of its object, and each MiB its transfer time. Requests on the phase's own thread add up;
+# each group of split tasks runs on its reader's threads, first come first served, and costs its
+# makespan.
+
+def _expected(median_ms, sigma):
+    return median_ms * np.exp(sigma ** 2 / 2)
+
+
+def replay(run_id, profile, parallelism=None):
+    """Simulated latency (ms) of each outermost phase of `run_id` on the store `profile` (a dict
+    or row with store_profiles' columns, plus an optional part_ms). `parallelism` overrides the
+    threads of every reader model that ran on a pool. Returns arm, step, phase, reader, the
+    phase's measured wall and CPU (ms), and its simulated latency: NaN for a phase that appends
+    on a store without append (a NULL append_ms)."""
+    import heapq
+
+    ev = q("""
+        SELECT arm, step, phase, coalesce(reader, '') AS reader, seq, task, kind, object,
+               "offset", length, cpu_ns
+        FROM requests WHERE run_id = $r ORDER BY arm, seq""", r=run_id)
+    steps = q("""
+        SELECT arm, step, phase, coalesce(reader, '') AS reader, wall_ns / 1e6 AS wall_ms,
+               cpu_ns / 1e6 AS cpu_ms
+        FROM steps WHERE run_id = $r
+          AND phase IN ('batch', 'compact', 'read_full', 'read_recent', 'read_old')""", r=run_id)
+    threads = dict(q("SELECT reader, parallelism FROM run_readers WHERE run_id = $r",
+                     r=run_id).itertuples(index=False))
+    pr = dict(profile)
+    get = _expected(pr["get_ms"], pr["get_sigma"])
+    put = _expected(pr["put_ms"], pr["put_sigma"])
+    can_append = pr.get("append_ms") is not None and not pd.isna(pr.get("append_ms"))
+    append = _expected(pr["append_ms"], pr["append_sigma"]) if can_append else 0.0
+    part = pr.get("part_ms") or 0.0
+    read, write = pr["read_ms_per_mib"] / 2 ** 20, pr["write_ms_per_mib"] / 2 ** 20
+
+    # parts of each object: appends since its last PUT or DELETE, before this event
+    obj = ev.arm + "/" + ev.object
+    gen = ev.kind.isin(["put", "delete"]).groupby(obj).cumsum()
+    app = (ev.kind == "append").astype(int)
+    parts = app.groupby([obj, gen]).cumsum() - app
+    lat = np.select(
+        [ev.kind == "get_range", ev.kind == "get_stream",
+         ev.kind.isin(["stream_bytes", "skip_through"]), ev.kind == "head", ev.kind == "put",
+         ev.kind == "append", ev.kind == "delete"],
+        [get + parts * part + ev.length * read, get + parts * part, ev.length * read, get,
+         put + ev.length * write, append + ev.length * write, put],
+        0.0)
+    ev = ev.assign(lat=lat)
+    key = ["arm", "step", "phase", "reader"]
+    req = ev[ev.kind != "task"]
+    serial = req[req.task < 0].groupby(key).lat.sum()
+    tasks = ev[ev.kind == "task"][key + ["task", "offset", "length", "cpu_ns"]].rename(
+        columns={"offset": "group", "length": "inline"})
+    tasks = tasks.merge(req[req.task >= 0].groupby(key + ["task"]).lat.sum().reset_index(),
+                        on=key + ["task"], how="left").fillna({"lat": 0.0})
+    tasks["ms"] = tasks.cpu_ns / 1e6 + tasks.lat
+
+    rows = []
+    for k, g in tasks.groupby(key + ["group"]):
+        if g.inline.iloc[0] == 1:
+            span = g.ms.sum()
+        else:
+            n = parallelism or threads.get(k[3], 1)
+            free = [0.0] * n  # each thread's finish time; tasks start in order on the first free
+            for ms in g.sort_values("task").ms:
+                heapq.heappush(free, heapq.heappop(free) + ms)
+            span = max(free)
+        inline_cpu = g.cpu_ns.sum() / 1e6 if g.inline.iloc[0] == 1 else 0.0
+        rows.append((*k[:4], span, inline_cpu))
+    groups = pd.DataFrame(rows, columns=key + ["span", "inline_cpu"]).groupby(key).sum()
+
+    out = steps.set_index(key)
+    out["serial_io"] = serial.reindex(out.index).fillna(0.0)
+    out["tasks"] = groups.span.reindex(out.index).fillna(0.0)
+    # the phase thread's CPU includes the tasks it ran inline; those count in their tasks
+    out["serial_cpu"] = out.cpu_ms - groups.inline_cpu.reindex(out.index).fillna(0.0)
+    out["simulated_ms"] = out.serial_cpu + out.serial_io + out.tasks
+    if not can_append:
+        appends = ev[ev.kind == "append"].groupby(key).size()
+        out.loc[appends.reindex(out.index).fillna(0) > 0, "simulated_ms"] = np.nan
+    return out.reset_index()
 
 
 def sweep_summary():

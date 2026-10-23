@@ -32,6 +32,31 @@ public final class BenchConfig {
     public boolean pathStyle = false;
     /** For {@code s3}: the HTTP client's connection pool. */
     public int maxConnections = 64;
+    /**
+     * A simulated store latency injected into every measured request (null: none), so a phase's
+     * wall time becomes what it would take on such a store ({@link
+     * org.rmow.bench.io.StoreLatency}). Meant for the local and in-memory stores.
+     */
+    public LatencySpec latency = null;
+  }
+
+  /**
+   * A simulated store: median latencies by request kind with their lognormal sigmas, an extra GET
+   * latency per appended part, and transfer times per MiB, as {@code lab/views/40_latency.sql}'s
+   * {@code store_profiles} lists them.
+   */
+  public static final class LatencySpec {
+    /** A name for the profile, for the record. */
+    public String profile = "";
+    public double getMs = 0;
+    public double getSigma = 0;
+    public double putMs = 0;
+    public double putSigma = 0;
+    public double appendMs = 0;
+    public double appendSigma = 0;
+    public double partMs = 0;
+    public double readMsPerMib = 0;
+    public double writeMsPerMib = 0;
   }
 
   /** Which reads probe the arms, and how often. */

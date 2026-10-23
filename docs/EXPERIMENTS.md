@@ -1,8 +1,8 @@
 # Experiments: a map
 
 Where to start. This page says what has been run, what each experiment varied and asked, what it
-found, and where the details are. It covers the 22 canonical runs and the JMH micro-benchmarks as
-of 2026-10-22.
+found, and where the details are. It covers the 25 canonical runs and the JMH micro-benchmarks as
+of 2026-10-23.
 
 ## Where things are
 
@@ -89,6 +89,8 @@ the local experiments repeats a run, so the Repetitions page has nothing to comp
 | **micro** (`results/micro/*.json`, JMH) | What a footer costs per row group. | row groups 10–10k × 11 or 50 columns; parse, convert, merge and serialize | n/a | 2 files | `docs/measurements/footer-*-2026-10-20.txt`. The source of the README's "about 1.2 KB and 30 µs per row group". |
 | **layout vs policy** (no new runs) | H3: is RMoW against TailCoW (layout) a smaller difference than TailCoW against MoR-v3 (tail policy), and mostly in read requests? | read from the uncompacted rg-sweep, split and m1 uniform runs | MoR-v3, TailCoW-B and -C, RMoW-B and -C in both layouts | 6 of the above | [lab/pages/layout-vs-policy.md](../lab/pages/layout-vs-policy.md) |
 | **time travel** (reruns) | H4: does an old version read like the current one, and do dead bytes cost reads? | the 7 uncompacted configurations that read old versions, rerun 2026-10-22/23 with the split-offset fix: each time-travel read against the full read of the same state | all that ran | 7 of the above, rerun | [lab/pages/time-travel.md](../lab/pages/time-travel.md) |
+| **store latency** (`configs/sim-*`, and the existing runs) | What would each arm take on a given store? Latency simulated from what each phase records: CPU, requests and bytes. | endive's store profiles (S3 Express, S3, Azure), and a sweep of request latency × throughput; a validation run with latency injected; a 4 MiB recency run with its requests logged | MoR-v3, TailCoW-C, RMoW-B and -C, both layouts | 2 (and the 4 MiB recency and uniform runs) | [lab/pages/store-latency.md](../lab/pages/store-latency.md) |
+| **s3x calibration, local twin** (`configs/s3x-calibration-local.json`) | The requests and bytes the first S3 Express run must reproduce exactly, and its runtime. | the S3 Express calibration's settings (200k rows, 20 batches, 1 MiB row groups) on the local store, with a JIT warmup and three readers (one-footer on 1 and 8 threads, stock) | MoR-v2-file, MoR-v3, TailCoW-C, RMoW-A, -B and -C | 1 | None: a baseline. 1.8 minutes, 10,446 requests. |
 | **dv ablation** (`configs/local-dv-*`) | H3's attribution: how much of RMoW against TailCoW is the layout, and how much the update handling (region rewrites against DVs)? | key distribution (recency, uniform); 4 MiB, no compaction | MoR-v3, CoW, TailCoW-B and -C, RMoW-A, -B and -C, RMoW-A-dv, -B-dv and -C-dv | 3, deleted | Conclusions in [DESIGN.md](DESIGN.md#deletion-vectors-on-an-appendable-file-an-ablation-removed); numbers under Retired runs. |
 
 The compaction sweep's threshold levels:
@@ -119,6 +121,9 @@ The compaction sweep's threshold levels:
 | compaction | local-compact-{aggr,default,lazy}-p5 | recency | 4 MiB | 5 | aggressive, default, lazy | 6 |
 | compaction | local-compact-default-p10 | recency | 4 MiB | 10 | default | 6 |
 | compaction | local-compact-{aggr,default,lazy}-p20 | recency | 4 MiB | 20 | aggressive, default, lazy | 6 |
+| s3x calibration | s3x-calibration-local | recency | 1 MiB | never | — | 6 |
+| store latency | sim-validate-s3x | recency | 1 MiB | 10 | default | 5 |
+| store latency | sim-recency-4m | recency | 4 MiB | never | — | 6 |
 
 "Thresholds" are only used when compaction runs, so "—" marks runs that never compact (their
 configurations carry the default values). The lab's Experiments page builds the same table from
@@ -271,6 +276,24 @@ All are local runs: requests and bytes are exact, latency is not measured.
   - Both older reader models load a file's DV once per split (row group), as Iceberg's readers
     do. That inflates every DV arm's reads, MoR-v3's and TailCoW's included.
 
+- **Store latency, simulated (step 1: one thread, the 4 MiB recency run).**
+  - On S3 Express, RMoW-C's batches are slower than MoR-v3's (about 0.7 against 0.3 s), mostly
+    its own CPU re-encoding rewritten regions. Its 6 requests against 45 do not make up for it at
+    S3 Express's request latencies.
+  - Where requests are dear (Azure, S3 Standard), RMoW-C's batches are about twice as fast. In a
+    generic sweep the crossover lies between 10 and 20 ms per request.
+  - Full reads are mostly decode CPU (about 3 s). RMoW-C's take 0.40–0.91× MoR-v3's across the
+    sweep, and its lead grows as requests get dearer.
+  - The replay of a request log predicts a run with the same latency injected: 284 of 288
+    one-thread phases within 10%, and all 25 eight-thread full reads within 20%.
+  - On 8 reader threads (the logged run, `cached-p8`), RMoW's read advantage disappears on S3
+    Express: a full read at batch 60 takes 543 ms for MoR-v3, 456 for TailCoW-C and 563 for
+    RMoW-C. Decode CPU spreads across threads, and MoR's many small files spread well. On Azure
+    Blob, RMoW-C (838 ms) still beats MoR-v3 (1,423) and matches TailCoW-C (890).
+  - The harness's split reader runs one task per object, so split files read slowly on 8
+    threads (1.9 s). That is the reader model, not the layout.
+  - Appendable RMoW's GETs hit objects of 24 appended parts on average (up to 47). At an extra
+    0.1 ms per part a full read costs 3% more; the S4 spike would measure the real cost.
 
 ## The hypotheses
 
@@ -285,10 +308,15 @@ All are local runs: requests and bytes are exact, latency is not measured.
 
 ## What is next
 
-- **S3 Express (milestone M3).** It starts with `configs/s3x-calibration.json`, which needs
-  credentials, a directory bucket and an instance in its zone. It is what decides H1 and gives the
-  first latencies. It is also where H4's abort can be measured, from aborted connections or the
-  GET bytes the SDK declares. Split files can also run on standard S3.
+- **Simulate first.** Latency is simulated locally (lab/pages/store-latency.md), from endive's
+  store measurements. Production-sized settings (512 MiB files, 128 MiB row groups) run locally
+  with their requests logged, and are timed by the replay.
+- **S3 Express (milestone M3)**, only to check the simulation's parameters.
+  - It starts with `configs/s3x-calibration.json` and the S4 spike, which need credentials, a
+    directory bucket and an instance in its zone.
+  - It is also where H4's abort can be measured, from aborted connections or the GET bytes the
+    SDK declares.
+  - Split files can also run on standard S3.
 - **Gaps in what ran:**
   - no repetitions or second seeds;
   - no write-up of m1 beyond H2;

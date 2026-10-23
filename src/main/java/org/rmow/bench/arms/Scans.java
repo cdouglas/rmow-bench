@@ -1,6 +1,8 @@
 package org.rmow.bench.arms;
 
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
+import java.lang.management.ThreadMXBean;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
@@ -33,6 +35,7 @@ import org.apache.iceberg.io.IOUtil;
 import org.apache.iceberg.io.RangeReadable;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.parquet.format.FileMetaData;
+import org.rmow.bench.io.IoTrace;
 import org.rmow.bench.oracle.TableHash;
 import org.rmow.bench.rmow.FooterCodec;
 import org.rmow.bench.rmow.ParquetReads;
@@ -49,6 +52,7 @@ import org.rmow.bench.workload.Rows;
 final class Scans {
 
   private static final String SCHEMA_JSON = SchemaParser.toJson(Rows.SCHEMA);
+  private static final ThreadMXBean MX = ManagementFactory.getThreadMXBean();
   private static final String SPEC_JSON = PartitionSpecParser.toJson(DataFileWriter.SPEC);
 
   private Scans() {}
@@ -206,7 +210,7 @@ final class Scans {
             });
       }
     }
-    return run(reader, tasks);
+    return run(ctx, reader, tasks);
   }
 
   /**
@@ -239,7 +243,7 @@ final class Scans {
             });
       }
     }
-    return run(reader, tasks);
+    return run(ctx, reader, tasks);
   }
 
   /**
@@ -259,8 +263,34 @@ final class Scans {
     return Arrays.copyOfRange(all, FooterCodec.MAGIC.length, all.length);
   }
 
-  /** Runs a read's tasks on the reader's pool, or one after another without one. */
-  private static TableHash run(Reader reader, List<Callable<TableHash>> tasks) throws IOException {
+  /**
+   * Runs a read's tasks on the reader's pool, or one after another without one. When the trace
+   * logs requests, each task's requests carry its number, and its end its thread CPU.
+   */
+  private static TableHash run(ArmContext ctx, Reader reader, List<Callable<TableHash>> tasks)
+      throws IOException {
+    IoTrace trace = ctx.io().trace();
+    if (trace.logging()) {
+      boolean inline = reader.pool() == null;
+      int group = trace.nextTasks(tasks.size());
+      List<Callable<TableHash>> tagged = new ArrayList<>(tasks.size());
+      for (int i = 0; i < tasks.size(); i++) {
+        int id = group + i;
+        Callable<TableHash> t = tasks.get(i);
+        tagged.add(
+            () -> {
+              IoTrace.enterTask(id);
+              long cpu0 = MX.getCurrentThreadCpuTime();
+              try {
+                return t.call();
+              } finally {
+                trace.taskDone(id, group, MX.getCurrentThreadCpuTime() - cpu0, inline);
+                IoTrace.exitTask();
+              }
+            });
+      }
+      tasks = tagged;
+    }
     TableHash hash = new TableHash();
     try {
       if (reader.pool() == null) {

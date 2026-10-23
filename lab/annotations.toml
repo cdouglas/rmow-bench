@@ -18,6 +18,10 @@ select = ["local-split-*"]
 title = "Compaction policy sweep, H6 (docs/measurements/compaction-sweep-2026-10-21.md)"
 select = ["local-compact-*"]
 
+[campaigns.sim]
+title = "Store latency simulation: validation and logged runs (lab/pages/store-latency.md)"
+select = ["sim-*"]
+
 [campaigns.s3x]
 title = "S3 Express: the calibration run and its local twin (configs/s3x-calibration*.json)"
 select = ["s3x-*"]

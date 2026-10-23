@@ -161,12 +161,20 @@ workload and every default arm, from an EC2 instance in the bucket's zone. Its t
 `configs/s3x-calibration-local.json`, differs only in the store. Its requests and bytes are what
 the S3 Express run's model and SDK counts must match exactly, apart from `CreateSession`.
 
-For latency, a configuration can set two more things:
+For latency, a configuration can set more things, and a run can log its requests:
 - **`warmup`** runs a small op log on the in-memory store before the measured run, so the JIT has
   compiled the paths first. It changes no request or byte (`RunnerSmokeTest`).
 - **`reads.readers`** can list a reader model with `parallelism` above 1, to read on several
   threads as an engine does. With `deleteCache` (the `cached` model), it loads each data file's
   deletes once per read rather than once per split, as an engine with a delete cache would.
+- **`store.latency`** injects a simulated store's latency into every measured request: median
+  latencies by kind (GET and HEAD, PUT and DELETE, append) with their lognormal sigmas, an extra
+  GET latency per appended part, and transfer times per MiB. Each request sleeps its expected
+  latency, so a phase's wall time is what it would take on that store (`StoreLatency`).
+- **`--log-requests`** (on `bin/run.sh` and `bin/matrix.sh`) writes `requests.jsonl`: every
+  request each phase issued, with its split task and each task's CPU. The lab's
+  `figures.replay` times a logged run on any store, with parallel reads' critical paths
+  (lab/pages/store-latency.md); `RequestLogTest` checks the log and the injection.
 
 ## Arms
 
@@ -265,6 +273,9 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
 - **Done locally:** RMoW on split files, an object per version instead of appends, against
   appendable files
   ([docs/measurements/split-vs-append-2026-10-21.md](docs/measurements/split-vs-append-2026-10-21.md)).
+- **Done locally:** store latency, simulated from the runs' requests, bytes and CPU, with endive's
+  store profiles, and validated against injected latency
+  ([lab/pages/store-latency.md](lab/pages/store-latency.md)).
 - **Done locally:** when to compact, as an outcome. Eleven compaction policies were run, and each
   arm's cheapest one was found per store, read rate and storage weight
   ([docs/measurements/compaction-sweep-2026-10-21.md](docs/measurements/compaction-sweep-2026-10-21.md)).

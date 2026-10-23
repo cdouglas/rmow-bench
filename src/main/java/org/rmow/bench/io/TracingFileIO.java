@@ -32,20 +32,33 @@ import org.rmow.bench.append.RegionAppender;
  *
  * The wrapper keeps the delegate's {@link RangeReadable} capability: dropping it would silently
  * switch Parquet to seek-and-read (I/O parity rule 1).
+ *
+ * <p>Given a {@link StoreLatency}, each request also sleeps its simulated latency, so wall time
+ * becomes what the phase would take on that store.
  */
 public final class TracingFileIO implements FileIO, RegionAppender {
 
   /** Iceberg's S3InputStream/ADLSInputStream read through forward seeks up to this many bytes. */
   public static final long SKIP_SIZE = 1024 * 1024;
 
+  /** Stream transfer time is slept in chunks of at least this much, not per small read. */
+  private static final long MIN_SLEEP_NS = 100_000;
+
   private final FileIO delegate;
   private final RegionAppender appender;
   private final IoTrace trace;
+  private final StoreLatency latency; // null: no simulated latency
 
   public TracingFileIO(FileIO delegate, RegionAppender appender, IoTrace trace) {
+    this(delegate, appender, trace, null);
+  }
+
+  public TracingFileIO(
+      FileIO delegate, RegionAppender appender, IoTrace trace, StoreLatency latency) {
     this.delegate = delegate;
     this.appender = appender;
     this.trace = trace;
+    this.latency = latency;
   }
 
   public IoTrace trace() {
@@ -74,6 +87,9 @@ public final class TracingFileIO implements FileIO, RegionAppender {
   @Override
   public void deleteFile(String path) {
     trace.record(IoTrace.Kind.DELETE, path, 0, 0);
+    if (latency != null) {
+      latency.delete(path);
+    }
     delegate.deleteFile(path);
   }
 
@@ -83,6 +99,9 @@ public final class TracingFileIO implements FileIO, RegionAppender {
       throw new UnsupportedOperationException("This store has no append: " + location);
     }
     trace.record(IoTrace.Kind.APPEND, location, expectedLength, bytes.length);
+    if (latency != null) {
+      latency.append(location, bytes.length);
+    }
     return appender.append(location, expectedLength, bytes);
   }
 
@@ -101,6 +120,9 @@ public final class TracingFileIO implements FileIO, RegionAppender {
       if (!knownLength && !headDone) {
         headDone = true;
         trace.record(IoTrace.Kind.HEAD, file.location(), 0, 0);
+        if (latency != null) {
+          latency.head();
+        }
       }
       return file.getLength();
     }
@@ -123,6 +145,9 @@ public final class TracingFileIO implements FileIO, RegionAppender {
     @Override
     public boolean exists() {
       trace.record(IoTrace.Kind.HEAD, file.location(), 0, 0);
+      if (latency != null) {
+        latency.head();
+      }
       return file.exists();
     }
   }
@@ -132,6 +157,7 @@ public final class TracingFileIO implements FileIO, RegionAppender {
     private final String location;
     private boolean requestOpen = false;
     private long requestPos = 0; // the next byte the open request would deliver
+    private long transferNs = 0; // simulated transfer time not slept yet
 
     TracingStream(SeekableInputStream in, String location) {
       this.in = in;
@@ -155,6 +181,7 @@ public final class TracingFileIO implements FileIO, RegionAppender {
       }
       if (requestOpen && pos > requestPos && pos - requestPos <= SKIP_SIZE) {
         trace.record(IoTrace.Kind.SKIP_THROUGH, location, requestPos, pos - requestPos);
+        delivered(pos - requestPos);
         requestPos = pos;
         return;
       }
@@ -162,8 +189,27 @@ public final class TracingFileIO implements FileIO, RegionAppender {
         trace.record(IoTrace.Kind.ABORT, location, requestPos, 0);
       }
       trace.record(IoTrace.Kind.GET_STREAM, location, pos, -1);
+      if (latency != null) {
+        sleepTransfer();
+        latency.open(location);
+      }
       requestOpen = true;
       requestPos = pos;
+    }
+
+    /** Charges the transfer of {@code n} streamed bytes, slept once enough has built up. */
+    private void delivered(long n) {
+      if (latency != null) {
+        transferNs += latency.transfer(n);
+        if (transferNs >= MIN_SLEEP_NS) {
+          sleepTransfer();
+        }
+      }
+    }
+
+    private void sleepTransfer() {
+      StoreLatency.sleep(transferNs);
+      transferNs = 0;
     }
 
     @Override
@@ -171,7 +217,8 @@ public final class TracingFileIO implements FileIO, RegionAppender {
       beforeRead();
       int b = in.read();
       if (b >= 0) {
-        trace.streamBytes(1);
+        trace.streamBytes(location, 1);
+        delivered(1);
         requestPos += 1;
       }
       return b;
@@ -185,7 +232,8 @@ public final class TracingFileIO implements FileIO, RegionAppender {
       beforeRead();
       int n = in.read(b, off, len);
       if (n > 0) {
-        trace.streamBytes(n);
+        trace.streamBytes(location, n);
+        delivered(n);
         requestPos += n;
       }
       return n;
@@ -195,6 +243,9 @@ public final class TracingFileIO implements FileIO, RegionAppender {
     public void close() throws IOException {
       // A request closed before EOF is aborted by the cloud streams. The model does not know the
       // object's length here, so closes are not counted as aborts; seeks away are.
+      if (latency != null) {
+        sleepTransfer();
+      }
       in.close();
     }
 
@@ -214,6 +265,9 @@ public final class TracingFileIO implements FileIO, RegionAppender {
     @Override
     public void readFully(long position, byte[] buffer, int offset, int length) throws IOException {
       trace.record(IoTrace.Kind.GET_RANGE, location(), position, length);
+      if (latency != null) {
+        latency.get(location(), length);
+      }
       range.readFully(position, buffer, offset, length);
     }
 
@@ -221,6 +275,9 @@ public final class TracingFileIO implements FileIO, RegionAppender {
     public int readTail(byte[] buffer, int offset, int length) throws IOException {
       int n = range.readTail(buffer, offset, length);
       trace.record(IoTrace.Kind.GET_RANGE, location(), -1, n);
+      if (latency != null) {
+        latency.get(location(), n);
+      }
       return n;
     }
 
@@ -231,6 +288,9 @@ public final class TracingFileIO implements FileIO, RegionAppender {
       // SDK-level recorders would show.
       for (FileRange r : ranges) {
         trace.record(IoTrace.Kind.GET_RANGE, location(), r.offset(), r.length());
+        if (latency != null) {
+          latency.get(location(), r.length()); // one request after another
+        }
       }
       range.readVectored(ranges, allocate);
     }
@@ -251,6 +311,9 @@ public final class TracingFileIO implements FileIO, RegionAppender {
     @Override
     public PositionOutputStream create() {
       trace.record(IoTrace.Kind.HEAD, file.location(), 0, 0);
+      if (latency != null) {
+        latency.head();
+      }
       return new TracingOutputStream(file.create(), file.location());
     }
 
@@ -307,6 +370,9 @@ public final class TracingFileIO implements FileIO, RegionAppender {
         long len = out.getPos();
         out.close();
         trace.record(IoTrace.Kind.PUT, location, 0, len);
+        if (latency != null) {
+          latency.put(location, len);
+        }
       }
     }
   }

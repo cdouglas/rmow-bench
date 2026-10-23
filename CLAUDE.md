@@ -38,7 +38,10 @@ bin/matrix.sh --build configs/local-compact-*.json   # several, from a build sna
   configs, and the diff if the tree is dirty), so you can keep editing and rebuilding while runs
   go. Each run's manifest names its snapshot.
 - **Flags:** `--dump-versions` keeps every version of the appendable objects for
-  `analysis/interop_check.py`, and `--keep-store` keeps the objects.
+  `analysis/interop_check.py`, `--keep-store` keeps the objects, and `--log-requests` writes every
+  request to `requests.jsonl` for the latency replay. `store.latency` in a config injects a
+  simulated store's latency (README).
+- **Never edit `bin/matrix.sh` while it runs:** bash reads the script as it goes.
 - **Duration:** a `local-*` configuration has taken 8–34 minutes, longest with all 9 arms
   (`elapsed_s` in each manifest). The README's S3 section says what
   `S3StoreTest` needs (versitygw in Docker; skipped without it).
@@ -75,15 +78,20 @@ bin/matrix.sh --build configs/local-compact-*.json   # several, from a build sna
   - `arm_meta` (labels, families, plot encoding);
   - `rg_meta` (row-group sizes from the version dumps' footers);
   - `micro` (JMH);
-  - `steps_diff(a, b)` (`compare_runs.py`).
+  - `steps_diff(a, b)` (`compare_runs.py`);
+  - `requests` (the request logs), `store_profiles`, `run_readers`, `phase_latency` and
+    `store_sweep(...)` for simulated store latency; `figures.replay(run, profile)` replays a
+    logged run with parallel reads (lab/pages/store-latency.md).
 - **`analysis/*.py`** are the scripts behind the existing write-ups. They run in the project venv,
   `.venv/bin/python analysis/<script>.py`. If you change one that a lab view ports
   (`sweep.summarize` → `arm_summary`), change the view too and check that both agree.
 
 ## Rules for measurements
 
-- **Local runs report requests, bytes and CPU, never latency.** WSL2 and the page cache make
-  local wall time meaningless; latency comes from cloud runs.
+- **Local runs report requests, bytes and CPU, never measured latency.** WSL2 and the page cache
+  make local wall time meaningless. Latency is simulated from requests, bytes and CPU, with a
+  named store profile (lab/pages/store-latency.md), and reported as simulated; a cloud run is
+  needed only to check the simulation's parameters.
 - **Requests and bytes are deterministic** in the op log, config and code. Two runs of one config
   must match exactly (`steps_diff`, or `analysis/compare_runs.py`). A mismatch is a bug, not
   noise. CPU is noisy: under 2% decides nothing.

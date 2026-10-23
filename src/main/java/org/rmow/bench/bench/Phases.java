@@ -20,13 +20,16 @@ import org.rmow.bench.io.S3Recorder;
  * <p>Phases nest: the runner times each whole batch as {@code batch}, and arms time their parts
  * inside it ({@code merge-read}, {@code write}, {@code delete-write}). Analysis must not add a
  * phase to the phase that contains it.
+ *
+ * <p>When the trace logs events (the request log), an outermost phase takes the events logged
+ * while it ran, its nested phases' included; events logged outside every phase are dropped.
  */
 public final class Phases {
 
   /**
    * One phase's measurements: thread CPU of the arm's thread, and process CPU (which also counts
    * read-pool threads, and the JVM's own GC and JIT threads). {@code extra} holds phase-specific
-   * values (e.g. rows read).
+   * values (e.g. rows read); {@code events}, the logged requests of an outermost phase.
    */
   public record Measured(
       String phase,
@@ -34,7 +37,8 @@ public final class Phases {
       long cpuNs,
       long processCpuNs,
       IoTrace.Counters io,
-      Map<String, Object> extra) {}
+      Map<String, Object> extra,
+      List<IoTrace.Event> events) {}
 
   @FunctionalInterface
   public interface IoSupplier<T> {
@@ -53,6 +57,7 @@ public final class Phases {
   private final IoTrace trace;
   private final S3Recorder recorder; // null unless the store is S3
   private final List<Measured> measured = new ArrayList<>();
+  private int depth = 0;
 
   public Phases(IoTrace trace) {
     this(trace, null);
@@ -63,6 +68,10 @@ public final class Phases {
     this.recorder = recorder;
   }
 
+  public IoTrace trace() {
+    return trace;
+  }
+
   public <T> T run(String phase, IoSupplier<T> body) throws IOException {
     return run(phase, body, new LinkedHashMap<>());
   }
@@ -70,19 +79,30 @@ public final class Phases {
   /** Runs {@code body}; it may add phase-specific values to {@code extra} while it runs. */
   public <T> T run(String phase, IoSupplier<T> body, Map<String, Object> extra)
       throws IOException {
+    boolean outermost = depth++ == 0;
+    if (outermost && trace.logging()) {
+      trace.drainEvents(); // what ran outside every phase is not measured
+    }
     IoTrace.Counters before = trace.snapshot();
     S3Recorder.Counts sdk0 = recorder == null ? null : recorder.snapshot();
     long proc0 = OS.getProcessCpuTime();
     long cpu0 = MX.getCurrentThreadCpuTime();
     long t0 = System.nanoTime();
-    T result = body.get();
+    T result;
+    try {
+      result = body.get();
+    } finally {
+      depth--;
+    }
     long wall = System.nanoTime() - t0;
     long cpu = MX.getCurrentThreadCpuTime() - cpu0;
     long proc = OS.getProcessCpuTime() - proc0;
     if (recorder != null) {
       extra.putAll(recorder.snapshot().minus(sdk0).fields());
     }
-    measured.add(new Measured(phase, wall, cpu, proc, trace.snapshot().minus(before), extra));
+    List<IoTrace.Event> events = outermost && trace.logging() ? trace.drainEvents() : List.of();
+    measured.add(
+        new Measured(phase, wall, cpu, proc, trace.snapshot().minus(before), extra, events));
     return result;
   }
 
