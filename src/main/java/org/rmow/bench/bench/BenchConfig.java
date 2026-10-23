@@ -83,8 +83,22 @@ public final class BenchConfig {
     }
   }
 
+  /**
+   * A warmup before the measured run, so the JIT has compiled the write and read paths before
+   * latency counts: the same arms, layout and readers on a small op log of the same mix, on the
+   * in-memory store, with every probe (time travel included) each batch. Nothing it does is
+   * recorded, and it changes no request or byte of the measured run.
+   */
+  public static final class WarmupSpec {
+    /** Batches of the warmup's op log (0: no warmup). */
+    public int batches = 0;
+    /** Its initial load. */
+    public long initialRows = 100_000;
+  }
+
   public String label = "smoke";
   public StoreSpec store = new StoreSpec();
+  public WarmupSpec warmup = new WarmupSpec();
   public WorkloadSpec workload = new WorkloadSpec();
   public LayoutSpec layout = new LayoutSpec();
   public List<String> arms = List.of("mor-v3", "rmow-a");

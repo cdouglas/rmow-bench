@@ -8,6 +8,7 @@ import software.amazon.awssdk.core.interceptor.Context;
 import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
 import software.amazon.awssdk.core.interceptor.ExecutionInterceptor;
 import software.amazon.awssdk.http.SdkHttpMethod;
+import software.amazon.awssdk.services.s3.model.CreateSessionRequest;
 import software.amazon.awssdk.services.s3.model.DeleteObjectRequest;
 import software.amazon.awssdk.services.s3.model.DeleteObjectsRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
@@ -27,6 +28,8 @@ public final class S3Recorder implements ExecutionInterceptor {
   /**
    * Requests by operation, transmission attempts (a retry is a second attempt of one request), and
    * bytes: what GET responses declare (an aborted stream transfers fewer) and what PUTs send.
+   * {@code sessions} are S3 Express's {@code CreateSession} requests, which the client sends for
+   * credentials, not for the data: they count in {@link #requests} and cost, not in the model.
    */
   public record Counts(
       long gets,
@@ -35,6 +38,7 @@ public final class S3Recorder implements ExecutionInterceptor {
       long heads,
       long deletes,
       long lists,
+      long sessions,
       long other,
       long attempts,
       long getBytes,
@@ -48,6 +52,7 @@ public final class S3Recorder implements ExecutionInterceptor {
           heads - o.heads,
           deletes - o.deletes,
           lists - o.lists,
+          sessions - o.sessions,
           other - o.other,
           attempts - o.attempts,
           getBytes - o.getBytes,
@@ -55,7 +60,7 @@ public final class S3Recorder implements ExecutionInterceptor {
     }
 
     public long requests() {
-      return gets + puts + appends + heads + deletes + lists + other;
+      return gets + puts + appends + heads + deletes + lists + sessions + other;
     }
 
     /** As step-record fields, prefixed {@code sdk_}. */
@@ -68,6 +73,7 @@ public final class S3Recorder implements ExecutionInterceptor {
       m.put("sdk_heads", heads);
       m.put("sdk_deletes", deletes);
       m.put("sdk_lists", lists);
+      m.put("sdk_sessions", sessions);
       m.put("sdk_other", other);
       m.put("sdk_retries", attempts - requests());
       m.put("sdk_get_bytes", getBytes);
@@ -82,6 +88,7 @@ public final class S3Recorder implements ExecutionInterceptor {
   private final LongAdder heads = new LongAdder();
   private final LongAdder deletes = new LongAdder();
   private final LongAdder lists = new LongAdder();
+  private final LongAdder sessions = new LongAdder();
   private final LongAdder other = new LongAdder();
   private final LongAdder attempts = new LongAdder();
   private final LongAdder getBytes = new LongAdder();
@@ -95,6 +102,7 @@ public final class S3Recorder implements ExecutionInterceptor {
         heads.sum(),
         deletes.sum(),
         lists.sum(),
+        sessions.sum(),
         other.sum(),
         attempts.sum(),
         getBytes.sum(),
@@ -114,8 +122,10 @@ public final class S3Recorder implements ExecutionInterceptor {
       deletes.increment();
     } else if (r instanceof ListObjectsV2Request || r instanceof ListObjectsRequest) {
       lists.increment();
+    } else if (r instanceof CreateSessionRequest) {
+      sessions.increment(); // S3 Express credentials, if the SDK sends them through this client
     } else {
-      other.increment(); // e.g. CreateSession, which S3 Express clients send for credentials
+      other.increment();
     }
   }
 

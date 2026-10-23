@@ -13,7 +13,7 @@ name = "bench"
 kind = "manifest"
 root = "results"
 glob = "*/*"
-exclude = ["builds/*", "micro/*"]
+exclude = ["builds/*", "micro/*", "spike/*"]
 id = "{label}-{config_hash}/{started}"
 
 [runs.fields]

@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -88,6 +89,9 @@ public final class Runner {
 
   /** Runs the benchmark; returns the op log's SHA-256 (for the run manifest). */
   public String run() throws IOException {
+    if (cfg.warmup.batches > 0) {
+      warmUp();
+    }
     Store store = Store.open(cfg.store);
     try {
       return run(store);
@@ -96,6 +100,31 @@ public final class Runner {
         store.close();
       } catch (Exception e) {
         throw new IOException("Cannot close the store", e);
+      }
+    }
+  }
+
+  /**
+   * The warmup ({@link BenchConfig.WarmupSpec}): a run of its own on the in-memory store, with
+   * every probe each batch, in a temporary directory deleted after it.
+   */
+  private void warmUp() throws IOException {
+    BenchConfig w = json.readValue(json.writeValueAsBytes(cfg), BenchConfig.class);
+    w.store = new BenchConfig.StoreSpec();
+    w.warmup.batches = 0;
+    w.workload.seed = cfg.workload.seed + 1;
+    w.workload.initialRows = cfg.warmup.initialRows;
+    w.workload.batches = cfg.warmup.batches;
+    w.reads.every = 1;
+    w.reads.travelBack = 1;
+    Path dir = Files.createTempDirectory("rmow-warmup-");
+    try {
+      new Runner(w, dir, runId + "-warmup").run();
+    } finally {
+      try (var paths = Files.walk(dir)) {
+        for (Path p : paths.sorted(Comparator.reverseOrder()).toList()) {
+          Files.delete(p);
+        }
       }
     }
   }

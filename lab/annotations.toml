@@ -18,6 +18,10 @@ select = ["local-split-*"]
 title = "Compaction policy sweep, H6 (docs/measurements/compaction-sweep-2026-10-21.md)"
 select = ["local-compact-*"]
 
+[campaigns.s3x]
+title = "S3 Express: the calibration run and its local twin (configs/s3x-calibration*.json)"
+select = ["s3x-*"]
+
 [campaigns.micro]
 title = "Footer micro-benchmarks (JMH)"
 select = ["source:micro"]

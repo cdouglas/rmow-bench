@@ -142,9 +142,30 @@ checks that in every phase the SDK's GETs, PUTs, HEADs and DELETEs equal the mod
 retries, and that the run deletes its objects. So local runs count the requests S3 receives.
 
 What the emulator cannot check is the S3 Express append (versitygw ignores `writeOffsetBytes`),
-S3 Express's session requests (`CreateSession`, counted as `sdk_other`), and latency.
+S3 Express's session requests (`CreateSession`, counted as `sdk_sessions`: they count in cost,
+not in the model), and latency. Two things check them, given a directory bucket:
+
+- **`S3ExpressTest`** runs when `RMOW_S3X_ROOT` names a prefix in a directory bucket
+  (`s3://<bucket>--<az id>--x-s3/<prefix>`; region from `RMOW_S3X_REGION` or `AWS_REGION`). It
+  checks that:
+  - an append at the object's length lands, with the SDK's default checksums;
+  - one anywhere else fails with `InvalidWriteOffset` and changes nothing;
+  - the recorder sees an append as one PutObject with a write offset, and no HEAD;
+  - a run of every arm family matches the model, appends and bytes written included.
+- **`org.rmow.bench.micro.S3ExpressSpike <s3://bucket/prefix>`** measures latencies: appends
+  against PUTs from 64 KiB to 32 MiB, and GETs (whole, last 64 KiB, middle 64 KiB) of objects of
+  1 to 1000 appended parts. It writes `results/spike/s3x-spike-<UTC>/spike.jsonl`.
+
 `configs/s3x-calibration.json` is the first cloud run, to make once the bucket exists: a small
-workload, every default arm, from an EC2 instance in the bucket's zone.
+workload and every default arm, from an EC2 instance in the bucket's zone. Its twin,
+`configs/s3x-calibration-local.json`, differs only in the store. Its requests and bytes are what
+the S3 Express run's model and SDK counts must match exactly, apart from `CreateSession`.
+
+For latency, a configuration can set two more things:
+- **`warmup`** runs a small op log on the in-memory store before the measured run, so the JIT has
+  compiled the paths first. It changes no request or byte (`RunnerSmokeTest`).
+- **`reads.readers`** can list a reader model with `parallelism` above 1, to read on several
+  threads as an engine does.
 
 ## Arms
 

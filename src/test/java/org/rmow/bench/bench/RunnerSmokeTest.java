@@ -147,6 +147,33 @@ class RunnerSmokeTest {
     }
   }
 
+  @Test
+  void warmupChangesNoRequestOrByte(@TempDir Path dir) throws IOException {
+    // the warmup only warms the JIT: the measured run's records must match a run without one
+    BenchConfig cfg = config("mem", dir);
+    cfg.arms = List.of("mor-v3", "tailcow-c", "rmow-c", "rmow-c-split");
+    cfg.workload.batches = 6;
+    cfg.reads.every = 3;
+    cfg.reads.travelBack = 3;
+    Path cold = Files.createDirectories(dir.resolve("cold"));
+    Path warm = Files.createDirectories(dir.resolve("warm"));
+    List<JsonNode> without = run(cfg, cold);
+    cfg.warmup.batches = 2;
+    cfg.warmup.initialRows = 10_000;
+    List<JsonNode> with = run(cfg, warm);
+    assertThat(with).hasSameSizeAs(without);
+    for (int i = 0; i < without.size(); i++) {
+      JsonNode a = without.get(i);
+      JsonNode b = with.get(i);
+      String at = a.get("arm").asText() + " step " + a.get("step") + " " + a.get("phase").asText();
+      for (String col :
+          List.of("arm", "step", "phase", "requests", "gets", "puts", "appends", "heads",
+              "aborts", "bytes_read", "bytes_written", "rows", "stored_bytes", "live_bytes")) {
+        assertThat(String.valueOf(b.get(col))).as(at + " " + col).isEqualTo(String.valueOf(a.get(col)));
+      }
+    }
+  }
+
   private static String key(JsonNode r, int step) {
     return r.get("arm").asText() + "/" + r.get("reader").asText() + "/" + step;
   }

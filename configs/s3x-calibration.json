@@ -6,6 +6,10 @@
     "append": "express",
     "region": "us-east-1"
   },
+  "warmup": {
+    "batches": 5,
+    "initialRows": 100000
+  },
   "workload": {
     "seed": 1,
     "initialRows": 200000,
@@ -24,7 +28,34 @@
     "tailSealBytes": 1048576,
     "locate": "scan"
   },
-  "arms": ["mor-v2-file", "mor-v3", "tailcow-c", "rmow-a", "rmow-b", "rmow-c"],
-  "reads": { "every": 5, "recentFraction": 0.01, "travelBack": 10 },
+  "arms": [
+    "mor-v2-file",
+    "mor-v3",
+    "tailcow-c",
+    "rmow-a",
+    "rmow-b",
+    "rmow-c"
+  ],
+  "reads": {
+    "every": 5,
+    "recentFraction": 0.01,
+    "travelBack": 10,
+    "readers": [
+      {
+        "name": "one-footer",
+        "footerCache": true,
+        "footerPrefetchBytes": 65536
+      },
+      {
+        "name": "one-footer-p8",
+        "footerCache": true,
+        "footerPrefetchBytes": 65536,
+        "parallelism": 8
+      },
+      {
+        "name": "stock"
+      }
+    ]
+  },
   "verifyRows": true
 }
