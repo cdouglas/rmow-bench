@@ -69,16 +69,19 @@ LEFT JOIN sub USING (run_id, arm)
 LEFT JOIN f USING (run_id, arm)
 LEFT JOIN rr USING (run_id, arm);
 
--- H3's differences, per tail policy p (b, c) and run: layout = RMoW-p minus TailCoW-p, policy =
--- TailCoW-p minus MoR-v3, and append = RMoW-p minus RMoW-p-split (the split runs only). Writes per
--- batch, one full read, and both priced at q full reads per batch (usd_q = write_usd + q *
--- full_usd).
+-- H3's differences, per tail policy and run, as hi_arm minus lo_arm:
+--   layout    = RMoW-p minus TailCoW-p (the layout and the update handling together);
+--   policy    = TailCoW-p minus MoR-v3 (merging the tail);
+--   append    = RMoW-p minus RMoW-p-split (one appendable object against an object per version).
+-- Writes per batch, one full read, and both priced at q full reads per batch (usd_q = write_usd
+-- + q * full_usd).
 CREATE VIEW h3_diffs AS
-WITH pairs(diff, hi, lo) AS (
-    VALUES ('layout', 'rmow-', 'tailcow-'), ('policy', 'tailcow-', 'mor-v3'),
-           ('append', 'rmow-', 'rmow-split')
-), p(pol) AS (VALUES ('b'), ('c'))
-SELECT h.run_id, upper(p.pol) AS pol, pairs.diff, h.arm AS hi_arm, l.arm AS lo_arm,
+WITH pairs(diff, pol, hi, lo) AS (
+    VALUES ('layout', 'b', 'rmow-b', 'tailcow-b'), ('layout', 'c', 'rmow-c', 'tailcow-c'),
+           ('policy', 'b', 'tailcow-b', 'mor-v3'), ('policy', 'c', 'tailcow-c', 'mor-v3'),
+           ('append', 'b', 'rmow-b', 'rmow-b-split'), ('append', 'c', 'rmow-c', 'rmow-c-split')
+)
+SELECT h.run_id, upper(pairs.pol) AS pol, pairs.diff, h.arm AS hi_arm, l.arm AS lo_arm,
        h.requests - l.requests AS d_requests,
        h.puts + h.appends - l.puts - l.appends AS d_put_class,
        h.heads - l.heads AS d_heads,
@@ -89,9 +92,6 @@ SELECT h.run_id, upper(p.pol) AS pol, pairs.diff, h.arm AS hi_arm, l.arm AS lo_a
        h.full_mb - l.full_mb AS d_full_mb,
        h.write_usd - l.write_usd AS d_write_usd,
        h.full_usd - l.full_usd AS d_full_usd
-FROM pairs CROSS JOIN p
-JOIN h3_arms h ON h.arm = pairs.hi || p.pol
-JOIN h3_arms l ON l.run_id = h.run_id
-              AND l.arm = CASE pairs.lo WHEN 'tailcow-' THEN 'tailcow-' || p.pol
-                                        WHEN 'rmow-split' THEN 'rmow-' || p.pol || '-split'
-                                        ELSE pairs.lo END;
+FROM pairs
+JOIN h3_arms h ON h.arm = pairs.hi
+JOIN h3_arms l ON l.run_id = h.run_id AND l.arm = pairs.lo;

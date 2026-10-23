@@ -30,7 +30,7 @@ All arms replay the same op log from the same initial-load file. The ids are the
 | `tailcow-b`, `tailcow-c` | copy-on-write tail | merged into open tail **data files** by policy B or C | deletion vectors, except in tail files being merged |
 | `rmow-a`, `rmow-b`, `rmow-c` | RMoW, appendable | a row group appended to the tail **object**, merged with open tail row groups by policy A, B or C | every touched row group rewritten as a new region of its object |
 | `rmow-b-split`, `rmow-c-split` | RMoW, split | as `rmow-*`, but each version's regions go to a new object and its footer to a footer-only object | the same |
-| `rmow-*-dv` | RMoW with DVs (ablation) | as `rmow-*` | deletion vectors on each object's stable prefix. **In no experiment so far.** |
+| `rmow-*-dv` | RMoW with DVs (ablation, removed) | as `rmow-*` | deletion vectors on each object's stable prefix (its sealed row groups); open tail row groups were still rewritten. Removed after the dv ablation ([DESIGN.md](DESIGN.md#deletion-vectors-on-an-appendable-file-an-ablation-removed)). |
 
 The tail policies (`TailPolicy`), shared by TailCoW and RMoW:
 - **A** never merges. Each batch's inserts stay their own unit (the plan called this "append-CoW").
@@ -89,6 +89,7 @@ the local experiments repeats a run, so the Repetitions page has nothing to comp
 | **micro** (`results/micro/*.json`, JMH) | What a footer costs per row group. | row groups 10–10k × 11 or 50 columns; parse, convert, merge and serialize | n/a | 2 files | `docs/measurements/footer-*-2026-10-20.txt`. The source of the README's "about 1.2 KB and 30 µs per row group". |
 | **layout vs policy** (no new runs) | H3: is RMoW against TailCoW (layout) a smaller difference than TailCoW against MoR-v3 (tail policy), and mostly in read requests? | read from the uncompacted rg-sweep, split and m1 uniform runs | MoR-v3, TailCoW-B and -C, RMoW-B and -C in both layouts | 6 of the above | [lab/pages/layout-vs-policy.md](../lab/pages/layout-vs-policy.md) |
 | **time travel** (reruns) | H4: does an old version read like the current one, and do dead bytes cost reads? | the 7 uncompacted configurations that read old versions, rerun 2026-10-22/23 with the split-offset fix: each time-travel read against the full read of the same state | all that ran | 7 of the above, rerun | [lab/pages/time-travel.md](../lab/pages/time-travel.md) |
+| **dv ablation** (`configs/local-dv-*`) | H3's attribution: how much of RMoW against TailCoW is the layout, and how much the update handling (region rewrites against DVs)? | key distribution (recency, uniform); 4 MiB, no compaction | MoR-v3, CoW, TailCoW-B and -C, RMoW-A, -B and -C, RMoW-A-dv, -B-dv and -C-dv | 3, deleted | Conclusions in [DESIGN.md](DESIGN.md#deletion-vectors-on-an-appendable-file-an-ablation-removed); numbers under Retired runs. |
 
 The compaction sweep's threshold levels:
 
@@ -165,6 +166,32 @@ data showed:
 
   That is what docs/HYPOTHESES.md registered on 2026-10-22: no difference outside those.
 
+**Deleted 2026-10-23: the dv ablation's three runs**, with the `-dv` arms themselves (docs/DESIGN.md):
+- `local-dv-recency-exp-nocompact` twice (readers `one-footer` and `stock`; then also `cached`);
+- `local-dv-uniform-nocompact`.
+
+They came from build snapshots `20261023T075127Z`, `…075131Z` and `…175254Z`
+(`-55938debe2e4-dirty`), deleted with them. What they showed (batch 60, 4 MiB, no compaction):
+
+| | recency | uniform |
+|---|---|---|
+| bytes per batch, RMoW-A-dv / MoR-v3 | 0.97 | 1.04 |
+| bytes per batch, RMoW-B-dv / TailCoW-B | 0.90 | 0.95 |
+| bytes per batch, RMoW-C-dv / TailCoW-C | 3.6 (RMoW-C: 9.7) | 1.35 |
+| update handling's share of RMoW's extra bytes over TailCoW, B / C | 107% / 70% | |
+| full-read GETs, RMoW-C-dv / TailCoW-C, `one-footer` | 42 / 62 | 54 / 67 |
+| full-read GETs, RMoW-C-dv / TailCoW-C, `cached` | 24 / 52 | |
+| full-read GETs under `cached` (`one-footer`): MoR-v3, TailCoW-B, RMoW-A-dv, RMoW-B-dv | 132 (142), 26 (39), 75 (144), 19 (32) | |
+
+- Against the predictions registered on 2026-10-23: D1 contradicted for C (3.6×), held for A; D2
+  held for B, contradicted for C; D3 contradicted under the per-split readers (0.68) and held
+  under `cached` (0.46); D4 held for A and C, contradicted for B (4.79× MoR-v3, policy B's own
+  tail re-merging: TailCoW-B 5.05×); D5 held. The `cached` reader's predictions all held: the
+  same rows, no more GETs, arms without deletes identical, nothing else changed.
+- Every arm the runs shared with earlier runs matched them record for record (4,883 records),
+  and every time-travel pair was exact (200). Every dumped version read back in pyarrow and
+  DuckDB (420 recency, 508 uniform).
+
 **Deleted 2026-10-23: the four earlier compacted runs with time travel** (2026-10-21):
 - `local-m1-recency-exp-compact10` and `local-m1-uniform-compact10`, from 763423b and 4b682c9;
 - `local-split-recency-exp-compact10` and `local-split-uniform-compact10`, from build snapshot
@@ -231,6 +258,19 @@ All are local runs: requests and bytes are exact, latency is not measured.
     comparison measured the harness. The reruns fix that, and otherwise match them record for
     record, as registered (Retired runs).
   - The trace cannot show S3's extra abort per old footer.
+- **Layout against update handling (the dv ablation).**
+  - The single appendable object, with TailCoW's DVs, writes 0.9–1.0× its counterpart's bytes
+    for policies A and B, and 3.6× for C. The hybrid still rewrote open tail row groups that
+    updates hit.
+  - Rewriting the row groups updates touch carries 70% (C) to all (B) of RMoW's extra bytes
+    over TailCoW.
+  - The layout alone saves most of the write requests: locating rows in two logical files
+    instead of many data files.
+  - With deletes loaded once per file per read (the `cached` reader), the layout alone carries
+    most of the read savings too: 24 GETs at batch 60 against TailCoW-C's 52 (RMoW-C: 19).
+  - Both older reader models load a file's DV once per split (row group), as Iceberg's readers
+    do. That inflates every DV arm's reads, MoR-v3's and TailCoW's included.
+
 
 ## The hypotheses
 
@@ -238,7 +278,7 @@ All are local runs: requests and bytes are exact, latency is not measured.
 |---|---|---|
 | H1 | Recency-skewed updates: RMoW-C's full read stays flat, its writes within 3× MoR-v3's | **Open.** Decided on S3 Express, which has not run. |
 | H2 | Uniform updates: RMoW's writes approach copy-on-write | **Held** (local, m1). |
-| H3 | RMoW-C against TailCoW is the single-object effect | **Mixed.** Smaller, and mostly in reads, in request counts; larger, and mostly write bytes, on S3 Express prices at up to one full read per batch. Not the single object: append is 1.28 requests per batch. |
+| H3 | RMoW-C against TailCoW is the single-object effect | **Mixed.** Smaller, and mostly in reads, in request counts; larger, and mostly write bytes, on S3 Express prices at up to one full read per batch. The dv ablation puts 70% to all of the extra bytes on the update handling, and most of the read savings on the single object (with a delete cache). |
 | H4 | Old versions read like current ones; dead bytes cost nothing | **Held** for reads, under both readers (after the rerun), and for dead bytes. The extra abort on S3 is **open**: the trace cannot show it. |
 | H5 | Split files: one more request per changed file, the same reads, kept bytes within 1.5× | **Held**, except that RMoW-C kept 1.52×. |
 | H6 | When to compact | **Mixed.** The read half held for RMoW-B, not RMoW-C; the space and write-for-read halves held; costs half held. |
@@ -252,5 +292,6 @@ All are local runs: requests and bytes are exact, latency is not measured.
 - **Gaps in what ran:**
   - no repetitions or second seeds;
   - no write-up of m1 beyond H2;
-  - the `-dv` ablation is in no experiment. `rmow-c-dv` against `tailcow-c` would isolate the
-    single object, which H3's comparison could not;
+  - only runs from 2026-10-23 on can have the `cached` reader model, which loads each file's
+    deletes once per read. Earlier runs' readers load a file's DV once per split (row group), as
+    Iceberg's readers do, which inflates MoR-v3's and TailCoW's reads;

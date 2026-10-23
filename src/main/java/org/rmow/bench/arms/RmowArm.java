@@ -6,7 +6,6 @@ import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
-import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -15,17 +14,12 @@ import java.util.Set;
 import java.util.TreeMap;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DeleteFile;
-import org.apache.iceberg.MetadataColumns;
-import org.apache.iceberg.Schema;
 import org.apache.iceberg.data.Record;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.InclusiveMetricsEvaluator;
-import org.apache.iceberg.io.DeleteWriteResult;
 import org.apache.iceberg.io.IOUtil;
 import org.apache.iceberg.io.SeekableInputStream;
-import org.apache.iceberg.types.Conversions;
-import org.apache.iceberg.types.Types;
 import org.apache.parquet.format.FileMetaData;
 import org.apache.parquet.format.RowGroup;
 import org.apache.parquet.format.Statistics;
@@ -50,12 +44,6 @@ import org.rmow.bench.workload.Rows;
  *   <li><b>Updates and deletes</b> rewrite each row group they touch, in its own file, with its
  *       surviving rows and the updated versions (row-group-level copy-on-write). A touched row
  *       group the policy also merges is rewritten once, into the merged region.
- *   <li>With <b>DVs on sealed row groups</b> ({@code -dv} arms), rows in a file's stable prefix
- *       (its leading row groups in footer order that no tail merge will touch) are deleted with a
- *       deletion vector keyed to the file, as Iceberg would apply it, and their updated versions
- *       join the batch's new tail row group, as in MoR. Positions in the prefix never change, so
- *       a DV stays valid for every later version of the file. Rows in open tail row groups are
- *       still merged or rewritten.
  * </ul>
  *
  * The tail file rolls over once its live bytes reach the target file size or its footer lists
@@ -65,8 +53,7 @@ import org.rmow.bench.workload.Rows;
  * <p>A rewritten row group takes the replaced one's place in the footer ({@code footerOrder}
  * {@code logical}) or is listed last ({@code offset}). Inserts take new, larger ids and updates
  * rewrite rows within their row group, so under {@code logical} every footer lists its row groups
- * in id order, which is checked after each append (without DVs, which move updated rows to the
- * tail).
+ * in id order, which is checked after each append.
  *
  * <p>Files are appendable objects ({@link RmowFile}) or, in the {@code -split} arms, a new object
  * per version for its regions and another for its footer ({@link SplitFile}), which need no
@@ -76,22 +63,21 @@ import org.rmow.bench.workload.Rows;
 public final class RmowArm implements Arm {
 
   /**
-   * One file at one version, with its footer and DV then: what a snapshot's manifest would name.
-   * Footers are never modified once written, so the version's own can be kept.
+   * One file at one version, with its footer then: what a snapshot's manifest would name. Footers
+   * are never modified once written, so the version's own can be kept.
    */
-  private record Version(LogicalFile.Version at, FileMetaData footer, DeleteFile dv) {}
+  private record Version(LogicalFile.Version at, FileMetaData footer) {}
+
+  private static final DeleteFile[] NO_DELETES = new DeleteFile[0];
 
   private final ArmContext ctx;
   private final RegionWriter regions;
   private final TailPolicy policy;
-  private final boolean dvSealed;
   private final boolean inPlace; // footerOrder logical: rewritten row groups keep their place
   private final boolean split; // a new object per version (SplitFile), not one appendable object
   private final List<LogicalFile> files = new ArrayList<>();
   private final List<LogicalFile> rewritten = new ArrayList<>(); // replaced by compaction; stored
   private final List<List<Version>> history = new ArrayList<>(); // per step: each file's version
-  private final Map<LogicalFile, DeleteFile> dvs = new IdentityHashMap<>();
-  private final Map<String, Long> dvObjects = new LinkedHashMap<>(); // Puffin files written
   private int compactions = 0;
   private final Map<Long, Integer> fileOfRg = new HashMap<>();
   private int tail = -1; // the file inserts go to; -1: start a new one
@@ -101,19 +87,15 @@ public final class RmowArm implements Arm {
   private double bytesPerRow = 40; // running estimate, for planning merges
   private long packBytes; // compaction's row-group target: a full row group of the initial load
 
-  public RmowArm(ArmContext ctx, TailPolicy.Kind kind, boolean dvSealed) {
-    this(ctx, kind, dvSealed, false);
+  public RmowArm(ArmContext ctx, TailPolicy.Kind kind) {
+    this(ctx, kind, false);
   }
 
-  public RmowArm(ArmContext ctx, TailPolicy.Kind kind, boolean dvSealed, boolean split) {
-    if (split && dvSealed) {
-      throw new IllegalArgumentException("Split files take no DVs");
-    }
+  public RmowArm(ArmContext ctx, TailPolicy.Kind kind, boolean split) {
     this.split = split;
     this.ctx = ctx;
     this.regions = new RegionWriter(Rows.SCHEMA, ctx.layout().writerProperties());
     this.policy = new TailPolicy(kind, ctx.layout().tailSealBytes, ctx.layout().tierFanout);
-    this.dvSealed = dvSealed;
     this.inPlace =
         switch (ctx.layout().footerOrder) {
           case "logical" -> true;
@@ -171,7 +153,7 @@ public final class RmowArm implements Arm {
   private List<Version> versions() {
     List<Version> v = new ArrayList<>(files.size());
     for (LogicalFile f : files) {
-      v.add(new Version(f.current(), f.footer(), dvs.get(f)));
+      v.add(new Version(f.current(), f.footer()));
     }
     return v;
   }
@@ -231,54 +213,19 @@ public final class RmowArm implements Arm {
         : RmowFile.create(ctx.io(), p.location, p.regions, p.newRgIds);
   }
 
-  /** Each row group's first row position in a file's current footer order. */
-  private static Map<Long, Long> rowStarts(LogicalFile f) {
-    Map<Long, Long> starts = new HashMap<>();
-    List<Long> ids = f.rgIds();
-    long pos = 0;
-    for (int i = 0; i < ids.size(); i++) {
-      starts.put(ids.get(i), pos);
-      pos += f.footer().getRow_groups().get(i).getNum_rows();
-    }
-    return starts;
-  }
-
-  /** The row groups of a file whose positions are fixed: those before its first open one. */
-  private Set<Long> stablePrefix(LogicalFile f) {
-    Set<Long> prefix = new HashSet<>();
-    for (long rg : f.rgIds()) {
-      if (policy.isOpen(rg)) {
-        break;
-      }
-      prefix.add(rg);
-    }
-    return prefix;
-  }
-
   @Override
   public void apply(OpLog.Batch b) throws IOException {
     if ("scan".equals(ctx.layout().locate)) {
-      ctx.phases().run("locate", () -> locate(b));
+      ctx.phases().run("locate", () -> locateByStats(b));
     }
 
-    // rows in a stable prefix get DVs (-dv arms); every other touched row group is rewritten
+    // every row group an update or delete touches is rewritten
     Map<Long, Touched> touched = new TreeMap<>();
-    Map<LogicalFile, List<Long>> dvPositions = new IdentityHashMap<>();
-    List<Record> moved = new ArrayList<>(); // updated versions of DV'd rows, for the tail
-    Map<LogicalFile, Set<Long>> prefixes = new IdentityHashMap<>();
-    Map<LogicalFile, Map<Long, Long>> starts = new IdentityHashMap<>();
     for (int i = 0; i < b.updateIds().length + b.deleteIds().length; i++) {
       boolean update = i < b.updateIds().length;
       long id = update ? b.updateIds()[i] : b.deleteIds()[i - b.updateIds().length];
       long rg = rgOfId[(int) id];
-      LogicalFile f = files.get(fileOfRg.get(rg));
-      if (dvSealed && prefixes.computeIfAbsent(f, this::stablePrefix).contains(rg)) {
-        long pos = starts.computeIfAbsent(f, RmowArm::rowStarts).get(rg) + posInRg[(int) id];
-        dvPositions.computeIfAbsent(f, k -> new ArrayList<>()).add(pos);
-        if (update) {
-          moved.add(Rows.record(id, ctx.log().ts(id), b.updateVersions()[i]));
-        }
-      } else if (update) {
+      if (update) {
         touched.computeIfAbsent(rg, k -> new Touched()).updates.put(id, b.updateVersions()[i]);
       } else {
         touched.computeIfAbsent(rg, k -> new Touched()).deletes.add(id);
@@ -288,7 +235,7 @@ public final class RmowArm implements Arm {
       }
     }
 
-    int newRows = b.insertIds().length + moved.size();
+    int newRows = b.insertIds().length;
     TailPolicy.Plan plan =
         newRows > 0
             ? policy.plan((long) (newRows * bytesPerRow))
@@ -302,16 +249,12 @@ public final class RmowArm implements Arm {
     if (!touched.isEmpty()) {
       ctx.phases().run("merge-read", () -> readTouched(touched));
     }
-    ctx.phases().run("write", () -> writeRegions(b, touched, plan, mergeIds, moved));
-    if (!dvPositions.isEmpty()) {
-      ctx.phases().run("delete-write", () -> writeDVs(b.index(), dvPositions));
-    }
+    ctx.phases().run("write", () -> writeRegions(b, touched, plan, mergeIds));
     history.add(versions());
   }
 
   private void readTouched(Map<Long, Touched> touched) throws IOException {
     for (Map.Entry<Long, Touched> e : touched.entrySet()) {
-      // open row groups hold no DV'd rows, so the row group is read without its file's DV
       e.getValue().rows = readRowGroup(files.get(fileOfRg.get(e.getKey())), e.getKey());
     }
   }
@@ -325,7 +268,7 @@ public final class RmowArm implements Arm {
         ctx,
         Reader.writer(ctx.layout()),
         Scans.version(src.location(), src.length(), f.liveRows()),
-        new DeleteFile[0],
+        NO_DELETES,
         Rows.SCHEMA,
         Expressions.alwaysTrue(),
         footerFor(f, src),
@@ -368,8 +311,7 @@ public final class RmowArm implements Arm {
       OpLog.Batch b,
       Map<Long, Touched> touched,
       TailPolicy.Plan plan,
-      Set<Long> mergeIds,
-      List<Record> moved)
+      Set<Long> mergeIds)
       throws IOException {
     Map<Integer, Pending> pending = new TreeMap<>();
     Map<Long, List<Long>> idsOfNewRg = new HashMap<>();
@@ -391,13 +333,12 @@ public final class RmowArm implements Arm {
       }
     }
 
-    // the inserts (and moved updates), merged with the open tail row groups the policy picked
-    if (b.insertIds().length + moved.size() > 0) {
-      List<Record> rows = new ArrayList<>(b.insertIds().length + moved.size());
+    // the inserts, merged with the open tail row groups the policy picked
+    if (b.insertIds().length > 0) {
+      List<Record> rows = new ArrayList<>(b.insertIds().length);
       for (long id : b.insertIds()) {
         rows.add(Rows.record(id, ctx.log().ts(id), 0));
       }
-      rows.addAll(moved);
       Pending p = pending(pending, tail >= 0 ? tail : files.size());
       for (long rg : mergeIds) {
         rows.addAll(touched.get(rg).merged());
@@ -432,7 +373,7 @@ public final class RmowArm implements Arm {
       p.file.commit(
           ctx.io(), ctx.io(), p.regions, p.drop, p.newRgIds, inPlace ? p.inPlaceOf : null);
     }
-    if (inPlace && !dvSealed && outOfOrder(files.get(k)) > 0) {
+    if (inPlace && outOfOrder(files.get(k)) > 0) {
       throw new IllegalStateException(
           "Footer of " + files.get(k).location() + " lists row groups out of id order");
     }
@@ -477,33 +418,7 @@ public final class RmowArm implements Arm {
     return region;
   }
 
-  private void writeDVs(int batch, Map<LogicalFile, List<Long>> positions) throws IOException {
-    String location = String.format("%s/deletes/dv-%05d.puffin", ctx.root(), batch);
-    Map<String, List<Long>> byPath = new HashMap<>();
-    Map<String, LogicalFile> fileOfPath = new HashMap<>();
-    for (Map.Entry<LogicalFile, List<Long>> e : positions.entrySet()) {
-      byPath.put(e.getKey().location(), e.getValue());
-      fileOfPath.put(e.getKey().location(), e.getKey());
-    }
-    DeleteWriteResult result =
-        Dvs.write(ctx, location, byPath, path -> dvs.get(fileOfPath.get(path)));
-    for (DeleteFile dv : result.deleteFiles()) {
-      dvs.put(fileOfPath.get(dv.referencedDataFile()), dv);
-    }
-    if (!result.deleteFiles().isEmpty()) {
-      dvObjects.put(location, result.deleteFiles().get(0).fileSizeInBytes());
-    }
-  }
-
   // --- locating the rows a batch changes --------------------------------------------------------
-
-  private void locate(OpLog.Batch b) throws IOException {
-    if (dvSealed) {
-      locateByScan(b);
-    } else {
-      locateByStats(b);
-    }
-  }
 
   /**
    * Finds the row group of each updated and deleted row from the footers' {@code id} statistics:
@@ -545,72 +460,6 @@ public final class RmowArm implements Arm {
   }
 
   /**
-   * With DVs, updated rows move to the tail, so row-group id ranges overlap and statistics no
-   * longer place a row: finds rows as MoR does, scanning {@code id} and {@code _pos} (DVs
-   * applied) of every file whose id bounds may hold a target, row groups pruned to the targets'
-   * range. Checks every position found against the index.
-   */
-  private void locateByScan(OpLog.Batch b) throws IOException {
-    long[] targets = new long[b.updateIds().length + b.deleteIds().length];
-    System.arraycopy(b.updateIds(), 0, targets, 0, b.updateIds().length);
-    System.arraycopy(b.deleteIds(), 0, targets, b.updateIds().length, b.deleteIds().length);
-    if (targets.length == 0) {
-      return;
-    }
-    Arrays.sort(targets);
-    Schema projection = new Schema(Rows.SCHEMA.findField("id"), MetadataColumns.ROW_POSITION);
-    Expression range =
-        Expressions.and(
-            Expressions.greaterThanOrEqual("id", targets[0]),
-            Expressions.lessThanOrEqual("id", targets[targets.length - 1]));
-    int[] found = {0};
-    for (LogicalFile f : files) {
-      if (f.liveRows() == 0 || !mayHoldAny(f.dataFile(), targets)) {
-        continue;
-      }
-      Map<Long, Long> starts = rowStarts(f);
-      DeleteFile dv = dvs.get(f);
-      Scans.scan(
-          ctx,
-          Reader.writer(ctx.layout()),
-          f.dataFile(),
-          dv == null ? new DeleteFile[0] : new DeleteFile[] {dv},
-          projection,
-          range,
-          ctx.layout().writerCachesFooters ? f.tail() : null,
-          -1,
-          -1,
-          r -> {
-            long id = (Long) r.get(0);
-            if (Arrays.binarySearch(targets, id) >= 0) {
-              long rg = rgOfId[(int) id];
-              Long start = starts.get(rg);
-              if (start == null || start + posInRg[(int) id] != (Long) r.get(1)) {
-                throw new IllegalStateException("Located row " + id + " away from its index entry");
-              }
-              found[0]++;
-            }
-          });
-    }
-    if (found[0] != targets.length) {
-      throw new IllegalStateException(
-          "Located " + found[0] + " of the batch's " + targets.length + " rows");
-    }
-  }
-
-  private static boolean mayHoldAny(DataFile df, long[] targets) {
-    int idField = Rows.SCHEMA.findField("id").fieldId();
-    if (df.lowerBounds() == null || df.lowerBounds().get(idField) == null) {
-      return true;
-    }
-    long lower = Conversions.<Long>fromByteBuffer(Types.LongType.get(), df.lowerBounds().get(idField));
-    long upper = Conversions.<Long>fromByteBuffer(Types.LongType.get(), df.upperBounds().get(idField));
-    int i = Arrays.binarySearch(targets, lower);
-    int first = i >= 0 ? i : -i - 1;
-    return first < targets.length && targets[first] <= upper;
-  }
-
-  /**
    * Reads a file's current footer from storage the way parquet-java does: tail, then footer (a
    * footer object of up to 1 MiB in one request).
    */
@@ -634,9 +483,6 @@ public final class RmowArm implements Arm {
 
   // --- reads ------------------------------------------------------------------------------------
 
-  private static DeleteFile[] dvArray(DeleteFile dv) {
-    return dv == null ? new DeleteFile[0] : new DeleteFile[] {dv};
-  }
 
   @Override
   public TableHash read(Expression filter, Reader reader) throws IOException {
@@ -646,7 +492,7 @@ public final class RmowArm implements Arm {
     for (LogicalFile f : files) {
       if (f.liveRows() > 0 && prune.eval(f.dataFile())) {
         (f.current().footerOnly() ? footerOnly : plain)
-            .add(new Scans.ReadFile(f.dataFile(), dvArray(dvs.get(f))));
+            .add(new Scans.ReadFile(f.dataFile(), NO_DELETES));
       }
     }
     return read(reader, plain, footerOnly, filter);
@@ -679,12 +525,12 @@ public final class RmowArm implements Arm {
       String location = v.at().location();
       long length = v.at().length();
       if (v.at().footerOnly()) {
-        footerOnly.add(new Scans.ReadFile(Scans.version(location, length, 1), dvArray(v.dv())));
+        footerOnly.add(new Scans.ReadFile(Scans.version(location, length, 1), NO_DELETES));
       } else {
         DataFile df =
             Scans.version(
                 location, length, v.footer().getNum_rows(), RmowFile.splitOffsets(v.footer()));
-        plain.add(new Scans.ReadFile(df, dvArray(v.dv())));
+        plain.add(new Scans.ReadFile(df, NO_DELETES));
       }
     }
     return read(reader, plain, footerOnly, Expressions.alwaysTrue());
@@ -697,8 +543,8 @@ public final class RmowArm implements Arm {
    *
    * <ul>
    *   <li><b>Space.</b> An appendable file whose garbage (bytes its current version does not use)
-   *       reaches {@code compactGarbageRatio} of its length, or whose DV deletes {@code
-   *       compactDeleteRatio} of its rows, is {@linkplain #rewrite rewritten} into a new object.
+   *       reaches {@code compactGarbageRatio} of its length is {@linkplain #rewrite rewritten}
+   *       into a new object.
    *       A split file instead has each object whose dead bytes reach {@code compactGarbageRatio}
    *       of its length {@linkplain #evacuees evacuated}: the object's live row groups are
    *       rewritten as they are into the next version's region object, so it can be deleted once
@@ -709,8 +555,7 @@ public final class RmowArm implements Arm {
    *       appendable file the packed row groups become garbage.
    * </ul>
    *
-   * A file's evacuations and packing are one new version. In the {@code -dv} arms either trigger
-   * rewrites the file, as moving rows would move the positions its DV deletes.
+   * A file's evacuations and packing are one new version.
    */
   @Override
   public void compact() throws IOException {
@@ -728,12 +573,8 @@ public final class RmowArm implements Arm {
         }
         continue;
       }
-      DeleteFile dv = dvs.get(f);
-      double deleted = dv == null ? 0 : dv.recordCount() / (double) f.liveRows();
       double garbage = f.garbageBytes() / (double) (f.storedBytes() - f.reclaimableBytes());
-      if (garbage >= layout.compactGarbageRatio
-          || deleted >= layout.compactDeleteRatio
-          || dvSealed && !packs.isEmpty()) {
+      if (garbage >= layout.compactGarbageRatio) {
         rewrite(i);
       } else if (!packs.isEmpty()) {
         move(i, Set.of(), packs);
@@ -745,9 +586,7 @@ public final class RmowArm implements Arm {
    * The groups of row groups packing merges, each in id order: runs of small sealed row groups
    * (under half the writer's row-group size, and not open to the tail policy) adjacent in id
    * order, cut greedily into groups of up to that size; groups of one are left alone. None unless
-   * the file holds {@code compactSmallRowGroups} small sealed row groups (0: never). In the {@code
-   * -dv} arms, which move updated rows to the tail, id ranges overlap, so a group there only
-   * signals the trigger.
+   * the file holds {@code compactSmallRowGroups} small sealed row groups (0: never).
    */
   private List<List<Long>> packs(LogicalFile f) {
     long target = packBytes;
@@ -860,14 +699,14 @@ public final class RmowArm implements Arm {
       FileMetaData footer = ctx.layout().writerCachesFooters ? f.footer() : readFooter(f);
       for (SplitFile.ObjectView v : SplitFile.views(f.location(), footer)) {
         Scans.scan(ctx, writer, Scans.version(v.location(), v.length(), v.rows()),
-            new DeleteFile[0], Rows.SCHEMA, Expressions.alwaysTrue(), v.tail(), -1, -1, group);
+            NO_DELETES, Rows.SCHEMA, Expressions.alwaysTrue(), v.tail(), -1, -1, group);
       }
     } else {
       Scans.scan(
           ctx,
           writer,
           f.dataFile(),
-          dvArray(dvs.get(f)),
+          NO_DELETES,
           Rows.SCHEMA,
           Expressions.alwaysTrue(),
           ctx.layout().writerCachesFooters ? f.tail() : null,
@@ -912,7 +751,6 @@ public final class RmowArm implements Arm {
       }
     }
     files.set(i, compacted);
-    dvs.remove(f);
     rewritten.add(f);
     if (i == tail) {
       policy.sealAll(); // its open row groups are gone
@@ -951,24 +789,17 @@ public final class RmowArm implements Arm {
       reclaimable += f.storedBytes();
       objects += f.objects().size();
     }
-    Map<String, Long> livePuffins = new HashMap<>();
-    for (DeleteFile dv : dvs.values()) {
-      live += dv.contentSizeInBytes();
-      livePuffins.put(dv.location(), dv.fileSizeInBytes());
-    }
-    long puffins = dvObjects.values().stream().mapToLong(Long::longValue).sum();
-    reclaimable += puffins - livePuffins.values().stream().mapToLong(Long::longValue).sum();
     return new ArmStats(
-        objects + dvObjects.size(),
-        stored + reclaimable + livePuffins.values().stream().mapToLong(Long::longValue).sum(),
+        objects,
+        stored + reclaimable,
         live,
         reclaimable,
         rowGroups,
         files.size(),
-        dvs.size(),
+        0,
         footers,
         outOfOrder,
-        used + livePuffins.size());
+        used);
   }
 
   /** Row groups the footer lists after one holding a larger id. */
@@ -989,10 +820,6 @@ public final class RmowArm implements Arm {
 
   ArmContext ctx() {
     return ctx;
-  }
-
-  boolean dvSealed() {
-    return dvSealed;
   }
 
   /** The table's files at their current versions. */

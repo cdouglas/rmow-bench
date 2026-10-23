@@ -412,9 +412,10 @@ WHERE r.label LIKE 'local-rg-sweep-%' OR r.label = 'local-split-recency-exp-noco
     on Express) and none of the reads or bytes.
   - The rest of the step comes from how RMoW applies updates (rewriting the touched row groups
     in place, so no scan and no DVs), and from one footer per logical file.
-  - The arms that would isolate the object against TailCoW are the `-dv` ablation. `rmow-c-dv`
-    keeps TailCoW's DVs on sealed row groups, inside one appendable object. It is in no
-    experiment yet.
+  - A later ablation isolated the object against TailCoW with hybrid arms that kept TailCoW's DVs
+    inside one appendable object (docs/DESIGN.md, "Deletion vectors on an appendable file").
+    The update handling carries 70% to all of RMoW's extra bytes. With deletes loaded once per
+    file, the single object carries most of the read savings.
 
 ## Limits
 

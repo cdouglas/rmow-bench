@@ -28,8 +28,8 @@ import org.rmow.bench.rmow.VersionDigest;
  *       that prefix ({@link VersionDigest}).
  * </ul>
  *
- * Also checks each step against the reference model, for arms without DVs: the file versions the
- * table held after a step must add up to the model's digest then. Probes read the table only every
+ * Also checks each step against the reference model: the file versions the table held after a
+ * step must add up to the model's digest then. Probes read the table only every
  * few steps; this covers every version any step held.
  */
 public final class VersionDump {
@@ -86,19 +86,17 @@ public final class VersionDump {
       }
     }
 
-    if (!arm.dvSealed()) {
-      for (int step = 0; step < arm.steps(); step++) {
-        TableHash got = new TableHash();
-        for (Map.Entry<String, Long> v : arm.versionsAfter(step)) {
-          got.addAll(digests.get(v.getKey() + "@" + v.getValue()).hash());
-        }
-        TableHash want = expectedAfter.apply(step);
-        if (!got.equals(want)) {
-          throw new IllegalStateException(
-              String.format(
-                  "%s: the file versions after step %d hold %s, the model %s",
-                  arm.name(), step, got, want));
-        }
+    for (int step = 0; step < arm.steps(); step++) {
+      TableHash got = new TableHash();
+      for (Map.Entry<String, Long> v : arm.versionsAfter(step)) {
+        got.addAll(digests.get(v.getKey() + "@" + v.getValue()).hash());
+      }
+      TableHash want = expectedAfter.apply(step);
+      if (!got.equals(want)) {
+        throw new IllegalStateException(
+            String.format(
+                "%s: the file versions after step %d hold %s, the model %s",
+                arm.name(), step, got, want));
       }
     }
     return count;

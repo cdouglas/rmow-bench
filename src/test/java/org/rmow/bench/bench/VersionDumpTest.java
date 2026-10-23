@@ -40,7 +40,7 @@ class VersionDumpTest {
     cfg.layout.compactSmallRowGroups = 4;
     cfg.layout.footerOrder = order;
     cfg.arms =
-        List.of("rmow-a", "rmow-b", "rmow-c", "rmow-c-dv", "rmow-b-split", "rmow-c-split", "mor-v3");
+        List.of("rmow-a", "rmow-b", "rmow-c", "rmow-b-split", "rmow-c-split", "mor-v3");
     cfg.reads.every = 5;
     new Runner(cfg, dir, "t", new Runner.Options(null, false, true)).run();
 
@@ -50,7 +50,7 @@ class VersionDumpTest {
     // every RMoW arm, no other: each adopts the initial files and writes at least one version
     assertThat(rows.subList(1, rows.size()))
         .extracting(r -> r.split(",")[0])
-        .containsOnly("rmow-a", "rmow-b", "rmow-c", "rmow-c-dv", "rmow-b-split", "rmow-c-split");
+        .containsOnly("rmow-a", "rmow-b", "rmow-c", "rmow-b-split", "rmow-c-split");
     // updates rewrite sealed row groups in place only under logical order
     boolean anyUnordered = rows.stream().skip(1).anyMatch(r -> r.split(",")[10].equals("false"));
     assertThat(anyUnordered).isEqualTo(order.equals("logical"));

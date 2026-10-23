@@ -10,8 +10,8 @@ Figures (PNG, light surface) and summary.md go to <run dir>/plots/:
   detail-write.png, detail-reads-<reader>.png  every arm
   summary.md the same numbers as tables, every arm (the accessible twin of the figures)
 
-Encoding: hue is the arm's family (MoR, Iceberg copy-on-write, RMoW, the RMoW-dv ablation, and
-RMoW on split files, those that ran), marker shape the variant within it; every line is direct-labeled at its end and
+Encoding: hue is the arm's family (MoR, Iceberg copy-on-write, RMoW, and RMoW on split files,
+those that ran), marker shape the variant within it; every line is direct-labeled at its end and
 listed in the legend. Local and in-memory runs: requests and bytes are exact and reproducible;
 wall time is not reported.
 
@@ -30,7 +30,7 @@ import pandas as pd  # noqa: E402
 
 # Reference palette: the first five categorical slots, in order (validated adjacent pairs,
 # light surface; aqua, yellow and magenta are under 3:1, so lines are direct-labeled and tabled)
-FAMILY = {"mor": "#2a78d6", "cow": "#eb6834", "rmow": "#1baf7a", "rmowdv": "#eda100",
+FAMILY = {"mor": "#2a78d6", "cow": "#eb6834", "rmow": "#1baf7a",
           "rmowsplit": "#e87ba4"}
 ARMS = {  # arm -> (family, marker, label)
     "mor-v2-file": ("mor", "o", "MoR v2 file"),
@@ -42,9 +42,6 @@ ARMS = {  # arm -> (family, marker, label)
     "rmow-a": ("rmow", "o", "RMoW-A"),
     "rmow-b": ("rmow", "s", "RMoW-B"),
     "rmow-c": ("rmow", "^", "RMoW-C"),
-    "rmow-a-dv": ("rmowdv", "o", "RMoW-A-dv"),
-    "rmow-b-dv": ("rmowdv", "s", "RMoW-B-dv"),
-    "rmow-c-dv": ("rmowdv", "^", "RMoW-C-dv"),
     "rmow-a-split": ("rmowsplit", "o", "RMoW-A-split"),
     "rmow-b-split": ("rmowsplit", "s", "RMoW-B-split"),
     "rmow-c-split": ("rmowsplit", "^", "RMoW-C-split"),

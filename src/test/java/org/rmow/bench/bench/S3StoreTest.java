@@ -135,8 +135,7 @@ class S3StoreTest {
             "cow",
             "tailcow-c",
             "rmow-b",
-            "rmow-c",
-            "rmow-c-dv");
+            "rmow-c");
     new Runner(cfg, dir, "t").run();
 
     List<JsonNode> phases = records(dir).stream().filter(r -> r.has("sdk_requests")).toList();

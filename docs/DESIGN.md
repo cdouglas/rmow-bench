@@ -242,32 +242,36 @@ read rate and a price model (H6 in [HYPOTHESES.md](HYPOTHESES.md)). A policy is 
   layout, gave compacted appendable files their read advantage in
   [split-vs-append-2026-10-21.md](measurements/split-vs-append-2026-10-21.md).
 
-A file's moves and packing make one new version. In the `-dv` arms either trigger rewrites the
-file, because moving rows would move the positions its DV deletes. The MoR family keeps Iceberg's
+A file's moves and packing make one new version. The MoR family keeps Iceberg's
 `RewriteDataFiles` bin-packing, with its thresholds.
 
-## Deletion vectors on an appendable file (an ablation)
+## Deletion vectors on an appendable file (an ablation, removed)
 
-This section is outside the design's goal, under which readers apply no deletes. The `-dv` arms
-exist only to measure what region rewrites cost against deleting by DV.
+From 2026-10-21 to 2026-10-23 the benchmark had hybrid arms, `rmow-a-dv`, `-b-dv` and `-c-dv`,
+outside the design's goal (their readers applied deletes). They kept RMoW's layout and tail
+policies, but deleted rows in a file's *stable prefix* (its leading row groups in footer order
+that no tail merge will touch) with a deletion vector. Their updated versions joined the batch's
+tail region, as in MoR. A DV names positions, which are the running row count in footer order, so
+it stays valid while every row group before the deleted rows keeps its place. Rows in open tail
+row groups were still rewritten.
 
-A DV names positions in a data file. Positions here are the running row count in footer order,
-so a DV stays valid across versions only while every row group before the deleted rows keeps its
-place. The writer uses DVs only on a file's *stable prefix*: the leading row groups in footer
-order that no tail merge will drop.
+They served one ablation, of H3's attribution, and were removed once it was done; its runs were
+deleted too. docs/EXPERIMENTS.md (Retired runs) has the numbers. What it found, at 4 MiB without
+compaction:
 
-- Row groups in the stable prefix are never rewritten. Their deletes go to the DV, and updated
-  versions join the batch's tail region.
-- Open tail row groups, after the prefix, are still merged or rewritten. A row group sealed behind
-  an open one joins the prefix only once the open ones before it have been merged away. Its
-  position is fixed from then on.
-
-(`RmowArm` with `-dv`; the oracle checks every version, time travel included, in
-`RunnerSmokeTest`.)
-
-One cost comes with this. Updated rows move to the tail, so row-group `id` ranges overlap, and
-finding a row means scanning, as with MoR. Without DVs, updates rewrite rows in place, ranges stay
-disjoint, and the footers' statistics place each row exactly.
+- **The single appendable object costs few bytes.** With TailCoW's DVs, it wrote 0.97× MoR-v3's
+  bytes per batch for policy A, 0.90× TailCoW-B's for B, and 3.6× TailCoW-C's for C. For C the
+  hybrid still rewrote open tail row groups that updates hit, where TailCoW-C writes DVs for every
+  tail file it is not merging. Under uniform updates the hybrid avoided copy-on-write (1.0–2.0×
+  MoR-v3's bytes for A and C, against RMoW's 82×).
+- **RMoW's extra bytes come from rewriting the row groups updates touch:** 70% (C) to all (B) of
+  its extra bytes over TailCoW.
+- **The single object, with one footer per file, carries most of the read savings** once DVs are
+  loaded once per file. Under the `cached` reader, RMoW-C-dv read the table in 24 GETs at batch
+  60 against TailCoW-C's 52; RMoW-C took 19.
+- **A cost DVs bring to an appendable file.** Updated rows move to the tail, so row-group `id`
+  ranges overlap, and finding a row means scanning, as with MoR. Without DVs, updates rewrite rows
+  in place, ranges stay disjoint, and the footers' statistics place each row exactly.
 
 ## Costs a reader of the results should know
 

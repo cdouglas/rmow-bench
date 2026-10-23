@@ -41,9 +41,6 @@ class RunnerSmokeTest {
             "rmow-a",
             "rmow-b",
             "rmow-c",
-            "rmow-a-dv",
-            "rmow-b-dv",
-            "rmow-c-dv",
             "rmow-b-split",
             "rmow-c-split");
     cfg.layout.compactEvery = 4;
@@ -105,7 +102,7 @@ class RunnerSmokeTest {
     assertThat(recs)
         .filteredOn(r -> r.has("heads") && r.get("heads").asLong() > 0)
         .extracting(r -> r.get("arm").asText())
-        .allMatch(a -> a.equals("mor-v3") || a.startsWith("tailcow-") || a.endsWith("-dv"));
+        .allMatch(a -> a.equals("mor-v3") || a.startsWith("tailcow-"));
     assertThat(recs)
         .filteredOn(
             r ->
@@ -123,7 +120,7 @@ class RunnerSmokeTest {
     // plan it (H4). Files of 2 MiB hold several row groups, so stock splits per row group.
     BenchConfig cfg = config("mem", dir);
     cfg.arms =
-        List.of("mor-v3", "tailcow-c", "rmow-b", "rmow-c", "rmow-c-dv", "rmow-b-split", "rmow-c-split");
+        List.of("mor-v3", "tailcow-c", "rmow-b", "rmow-c", "rmow-b-split", "rmow-c-split");
     cfg.layout.targetFileBytes = 2 << 20;
     cfg.layout.compactEvery = 0;
     cfg.reads.every = 3;

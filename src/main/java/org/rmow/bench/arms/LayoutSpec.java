@@ -70,10 +70,7 @@ public final class LayoutSpec {
 
   /** Compact every this many batches (0: never), with the triggers below. */
   public int compactEvery = 0;
-  /**
-   * MoR family: rewrite files with at least this fraction of their rows deleted (RMoW {@code -dv}
-   * arms: by their DV).
-   */
+  /** MoR family: rewrite files with at least this fraction of their rows deleted. */
   public double compactDeleteRatio = 0.3;
   /** MoR family: bin-pack files smaller than this fraction of the target file size. */
   public double compactSmallFileFraction = 0.75;

@@ -57,7 +57,7 @@ class RmowCompactionTest {
               layout,
               log,
               true);
-      arm = new RmowArm(ctx, TailPolicy.Kind.A, false, split);
+      arm = new RmowArm(ctx, TailPolicy.Kind.A, split);
       arm.load(
           InitialLoad.copy(mem, InitialLoad.write(mem, "mem://t/base", log, layout), ctx.root()));
     }

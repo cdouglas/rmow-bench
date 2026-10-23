@@ -178,7 +178,6 @@ For latency, a configuration can set two more things:
 | `cow` | a new data file per batch | every touched data file is rewritten whole |
 | `tailcow-b`, `tailcow-c` | merged into open tail *data files* by policy B or C | DVs, except in tail files being merged |
 | `rmow-a`, `rmow-b`, `rmow-c` | appended to the tail object as a row group, merged with open tail *row groups* by policy A, B or C | every touched row group is rewritten as a region of its own object (row-group copy-on-write) |
-| `rmow-a-dv`, `rmow-b-dv`, `rmow-c-dv` (an ablation, not in the default matrix) | the same | DVs on each object's stable prefix (the row groups no tail merge will touch), with updated versions in the tail; open tail row groups are rewritten as above |
 | `rmow-a-split`, `rmow-b-split`, `rmow-c-split` | as `rmow-*`, but each version's regions go to a new object, and its footer to a footer-only object naming the objects its row groups live in (`file_path`) | the same row-group copy-on-write; no append, so standard S3 and GCS can run them, and whole objects become deletable as versions expire ([docs/DESIGN.md](docs/DESIGN.md#regions-in-separate-objects-split-files)) |
 
 The tail policies (`TailPolicy`) are:
@@ -191,10 +190,9 @@ data files. TailCoW against MoR-v3 isolates the tail-merge policy. RMoW against 
 isolates append: the same policy, footer and reads, with history kept inside one object or spread
 over objects that can be deleted.
 
-The `-dv` arms are outside the goal, because their readers apply deletion vectors. They are kept
-only as an ablation: they measure what RMoW's region rewrites cost compared with deleting by DV.
-`rmow-a-dv` is MoR-v3's update handling inside one appendable object. See
-[docs/DESIGN.md](docs/DESIGN.md) for why a DV stays valid on the stable prefix.
+Hybrid `-dv` arms (RMoW's layout with DVs on sealed row groups) ran in one ablation and were
+removed; [docs/DESIGN.md](docs/DESIGN.md#deletion-vectors-on-an-appendable-file-an-ablation-removed)
+has what they showed.
 
 ### Knobs (`layout` in the config)
 
@@ -242,7 +240,7 @@ parquet-java 1.17.1:
 - a split selects exactly one region, and planned splits read every row once in either order;
 - row-group statistics skip the other regions.
 
-`VersionDumpTest` runs the RMoW arms (with `rmow-c-dv` and the split arms) with compaction, under
+`VersionDumpTest` runs the RMoW arms (the split arms included) with compaction, under
 both footer orders, and dumps every version they write. `analysis/interop_check.py` then reads every version with
 pyarrow 26.0.0 and DuckDB 1.5.6. For each, both readers must list the same row groups, decode the
 same rows (with every payload column checked), number them as Iceberg's `_pos` does, and filter
@@ -254,7 +252,7 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
 
 - **M0 is done.**
 - **M1 is done:**
-  - 12 arms, three tail policies, and the RMoW-DV hybrid;
+  - 12 arms, three tail policies, and the RMoW-DV hybrid (removed after its ablation);
   - compaction, locate-by-scan, footer prefetch, and parallel split reads.
 
   Every arm passes the oracle on the in-memory and local stores: full reads, recent-window
@@ -276,6 +274,9 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
   - time travel and dead bytes, H4
     ([lab/pages/time-travel.md](lab/pages/time-travel.md)), on the uncompacted configurations
     rerun once time travel planned an old version with its own split offsets, as Iceberg plans
-    an old snapshot.
+    an old snapshot;
+  - layout against update handling, the `-dv` ablation, whose runs and arms were deleted once its
+    conclusions were recorded
+    ([docs/DESIGN.md](docs/DESIGN.md#deletion-vectors-on-an-appendable-file-an-ablation-removed)).
 - **Next:** S3 Express (M3), starting with `configs/s3x-calibration.json`, which needs credentials,
   a directory bucket and an instance in its zone. Split files can also run on standard S3.

@@ -153,7 +153,7 @@ class S3ExpressTest {
     cfg.reads.every = 4;
     cfg.reads.travelBack = 4;
     cfg.arms =
-        List.of("mor-v2-file", "mor-v3", "cow", "tailcow-c", "rmow-b", "rmow-c", "rmow-c-dv",
+        List.of("mor-v2-file", "mor-v3", "cow", "tailcow-c", "rmow-b", "rmow-c",
             "rmow-c-split");
     new Runner(cfg, dir, "t").run();
 

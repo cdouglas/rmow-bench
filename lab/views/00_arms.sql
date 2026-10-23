@@ -11,9 +11,6 @@ SELECT * FROM (VALUES
     (7, 'rmow-a', 'rmow', 'circle', 'RMoW-A', false),
     (8, 'rmow-b', 'rmow', 'square', 'RMoW-B', true),
     (9, 'rmow-c', 'rmow', 'triangle-up', 'RMoW-C', true),
-    (10, 'rmow-a-dv', 'rmowdv', 'circle', 'RMoW-A-dv', false),
-    (11, 'rmow-b-dv', 'rmowdv', 'square', 'RMoW-B-dv', false),
-    (12, 'rmow-c-dv', 'rmowdv', 'triangle-up', 'RMoW-C-dv', false),
     (13, 'rmow-a-split', 'rmowsplit', 'circle', 'RMoW-A-split', false),
     (14, 'rmow-b-split', 'rmowsplit', 'square', 'RMoW-B-split', true),
     (15, 'rmow-c-split', 'rmowsplit', 'triangle-up', 'RMoW-C-split', true)
