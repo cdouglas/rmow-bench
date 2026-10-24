@@ -1,0 +1,29 @@
+{
+  "description": "The scale campaign rerun on the build that samples foreign load per second and holds writer footers for one transaction: the same four configurations, so that P3-P5 can be decided on clean phases (docs/HYPOTHESES.md, 2026-10-24).",
+  "flags": [
+    "--log-requests"
+  ],
+  "cores_per_job": 10,
+  "jobs": [
+    {
+      "config": "configs/scale-recency-rg128m.json",
+      "heap": "32g",
+      "store_gib": 40
+    },
+    {
+      "config": "configs/scale-recency-rg64m.json",
+      "heap": "16g",
+      "store_gib": 20
+    },
+    {
+      "config": "configs/scale-recency-rg16m.json",
+      "heap": "8g",
+      "store_gib": 6
+    },
+    {
+      "config": "configs/scale-recency-rg4m.json",
+      "heap": "8g",
+      "store_gib": 2
+    }
+  ]
+}

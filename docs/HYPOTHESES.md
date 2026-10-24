@@ -320,3 +320,45 @@ summed over arms) will not hold. P6 stands as registered and will be reported ag
   over arms under 40 GiB.
 
 The campaign's store estimates follow the pilot (`docker/campaigns/scale.json`).
+
+## Added 2026-10-24, before rerunning the scale campaign on clean phases
+
+**Why.** The first scale campaign decided P1, P2 and P6, but not P3–P5: other users' threads ran
+on the cores of three of its four jobs (lab/pages/scale.md). Since then two things have changed:
+- **Monitoring:** the runner samples each job's foreign load every second, and every phase records
+  when it started, so the lab can tell which phases foreign load touched (`phase_load`).
+- **Writer footers:** every arm's writer holds a footer for one batch or compaction only (README,
+  I/O parity rule 6). Before, RMoW's writer kept its footers across batches, so RMoW's batch
+  requests were undercounted.
+
+**Setup.** The same four configurations, `configs/scale-recency-rg{4,16,64,128}m.json` (their
+only change is the knob's new name), on the new build, as `docker/campaigns/scale-rerun.json` on
+havoc. P3–P5 as registered on 2026-10-23 are decided on this rerun. P1, P2 and P6 stand as the
+first campaign decided them; the rerun reports its own values beside them.
+
+**Which CPU counts.** A phase's CPU counts only if the phase is clean: no load sample
+overlapping it reached 0.25 CPUs of foreign load (`phase_load.clean`).
+- **P3** sums CPU and MiB over clean phases only: full reads under `cached` and batches, at 4
+  and at 128 MiB.
+- **P4** compares full reads at batch 60 under `cached`, and decides each comparison only if
+  both arms' reads are clean. Its batch part uses the mean over clean batches.
+- **P5** does the same for `cached-p8` (its split tasks run inside the phase).
+- **Undecided cases.** A prediction is not decided by this rerun if a batch-60 read it needs is
+  not clean, or if fewer than half of a run's batches are. Its run is then repeated.
+
+**Controls**, which check the code change and the rule, not the format:
+- **C1: the footer change touches only writers.**
+  - Every probe's requests and bytes, under every reader, equal the first campaign's exactly.
+  - So do MoR-v3's batches: it opens each file once per batch.
+  - TailCoW-C's batches take at most the first campaign's requests: its merge read can reuse a
+    footer its locate scan read.
+- **C2: RMoW's writer now reads its footers every batch.**
+  - RMoW-B's and RMoW-C's batches take 3–4 more requests than in the first campaign: two live
+    files, each footer read as parquet-java reads it (two requests), or fetched whole while the
+    file is at most 1 MiB (one).
+  - Their split variants take 2 more: two footer-only objects, each fetched whole.
+  - Bytes written do not change.
+- **C3: clean means clean.** In clean probes, each split arm's full-read CPU under `cached` is
+  within 3% of its appendable twin's. The two read the same bytes, and in the first campaign's
+  4 MiB job, before its foreign load, they agreed within 1%. If they do not agree, the noise is
+  not foreign load, and P3–P5 stay undecided.
