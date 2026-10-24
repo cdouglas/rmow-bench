@@ -238,6 +238,17 @@ result (`lab/annotations.toml`).
 
 All are local runs: requests and bytes are exact, latency is not measured.
 
+**Every run so far undercounts RMoW's batch requests.** Before 2026-10-24, RMoW's writer kept its
+footers from one batch to the next (`writerCachesFooters`), which an Iceberg writer cannot, and
+no MoR-family writer did. Writers now hold a footer for one batch or compaction, in every arm (I/O
+parity rule 6, `writerFooters`). At 4 MiB under recency updates, a batch then takes:
+- 9.5 requests instead of 6.0 for RMoW-C;
+- 7.1 instead of 3.6 for RMoW-B;
+- the same 45.3 for MoR-v3.
+
+The ratios below that compare RMoW's batch requests with MoR-v3's are low by that much (RMoW-C:
+0.21× MoR-v3's, not 0.13×). Their bytes, their reads and every other arm are unaffected.
+
 - **Uniform updates (m1, H2).** RMoW writes what copy-on-write writes: 37.5 MB per batch, against
   CoW's 37.6 and MoR-v3's 0.46.
 - **Row-group size (rg-sweep).** The balance for this workload is near 2–4 MiB. No size changes
@@ -378,3 +389,5 @@ All are local runs: requests and bytes are exact, latency is not measured.
     per row group, and under `stock` read the version's footer once per object instead of once
     per split. Their split arms' parallel reads are slow for that reason alone, and their stock
     reads take fewer GETs than a rerun would;
+  - runs before 2026-10-24 let RMoW's writer keep its footers across batches (above), so their
+    RMoW batches take 3–4 requests fewer than a rerun would;

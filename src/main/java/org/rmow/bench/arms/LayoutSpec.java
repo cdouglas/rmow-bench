@@ -24,11 +24,15 @@ public final class LayoutSpec {
   /** Sort the rows each write produces by {@code ts} (data files, merged regions). */
   public boolean sortWrites = true;
   /**
-   * Writers keep the footers they wrote: a writer's own reads (RMoW reading back the row groups a
-   * batch touches) take the footer from memory instead of two GETs. MoR's writers read no data
-   * files, so this changes only RMoW; readers (the probes) always read footers from storage.
+   * What every arm's writer holds of the footers it reads ({@code WriterFooters}, I/O parity rule
+   * 6). A batch or a compaction is a transaction, and nothing carries over from one to the next:
+   * an Iceberg writer starts each from storage. {@code transaction}: within one, a writer reads a
+   * file version's footer once, on its first use, and reuses it (RMoW's locate, row-group reads
+   * and new footer; MoR-family locate scans and merge reads). {@code open}: every open reads it
+   * again, as parquet-java does. A file of at most 1 MiB is fetched whole on every open either
+   * way. Readers (the probes) follow their reader model.
    */
-  public boolean writerCachesFooters = true;
+  public String writerFooters = "transaction";
   /**
    * Tail merging (RMoW policies B and C, TailCoW): an open tail unit is sealed at this many
    * compressed bytes (under C, once {@code tierFanout} units of its size would pass it). Units

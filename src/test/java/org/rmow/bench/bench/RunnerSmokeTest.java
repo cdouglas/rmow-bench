@@ -220,7 +220,7 @@ class RunnerSmokeTest {
     cfg.workload.keyDist = WorkloadSpec.KeyDist.UNIFORM;
     // every arm finds its rows by scanning, checked against the index, footers from storage
     cfg.layout.locate = "scan";
-    cfg.layout.writerCachesFooters = false;
+    cfg.layout.writerFooters = "open";
     cfg.layout.footerPrefetchBytes = 64 << 10;
     Files.createDirectories(dir.resolve("out"));
     List<JsonNode> recs = run(cfg, dir.resolve("out"));

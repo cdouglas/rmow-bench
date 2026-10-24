@@ -25,6 +25,7 @@ public final class CowArm extends MorArm {
 
   @Override
   public void apply(OpLog.Batch b) throws IOException {
+    footers.begin();
     long seq = batchSeq(b);
     locate(b);
     Map<Integer, Map<Long, Integer>> touched = new TreeMap<>(); // file -> id -> new version, or -1

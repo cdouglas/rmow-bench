@@ -21,7 +21,7 @@
     "rowGroupBytes": 4194304,
     "targetFileBytes": 33554432,
     "sortWrites": true,
-    "writerCachesFooters": true,
+    "writerFooters": "transaction",
     "tailSealBytes": 4194304,
     "tierFanout": 4,
     "maxRowGroupsPerFile": 128,

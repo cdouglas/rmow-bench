@@ -129,6 +129,81 @@ class RequestLogTest {
     assertThat(parts).isPositive();
   }
 
+  /** Footer reads per arm, step and object in batches: a stock read aborts its 8-byte probe. */
+  private static Map<String, Long> footerReads(List<JsonNode> log) {
+    Map<String, Long> out = new HashMap<>();
+    for (JsonNode e : log) {
+      if (e.get("phase").asText().equals("batch") && e.get("kind").asText().equals("abort")) {
+        out.merge(e.get("arm").asText() + " " + e.get("step") + " " + e.get("object").asText(),
+            1L, Long::sum);
+      }
+    }
+    return out;
+  }
+
+  @Test
+  void writersReadEachFooterOncePerTransaction(@TempDir Path dir) throws IOException {
+    // I/O parity rule 6: under `transaction` every arm's writer reads a file version's footer at
+    // most once per batch and reuses it there, and nothing carries over to the next batch; under
+    // `open` (the control) every open reads it again. Files of over 1 MiB, whose footers are read
+    // as parquet-java reads them: probe the last 8 bytes, abort, read the footer
+    Map<String, List<JsonNode>> steps = new HashMap<>();
+    Map<String, Map<String, Long>> reads = new HashMap<>();
+    long largestBatchFile = 0;
+    for (String scope : List.of("transaction", "open")) {
+      BenchConfig cfg = config(dir);
+      cfg.workload.initialRows = 80_000;
+      cfg.workload.opsPerBatch = 40_000;
+      cfg.workload.batches = 4;
+      cfg.layout.compactEvery = 0;
+      cfg.layout.writerFooters = scope;
+      cfg.arms = List.of("mor-v3", "tailcow-c", "rmow-c", "rmow-c-split");
+      Path out = dir.resolve(scope);
+      Files.createDirectories(out);
+      steps.put(scope, run(cfg, out));
+      List<JsonNode> log = lines(out.resolve("requests.jsonl"));
+      reads.put(scope, footerReads(log));
+      for (JsonNode e : log) {
+        if (e.get("kind").asText().equals("put") && e.get("object").asText().contains("/data/batch-")) {
+          largestBatchFile = Math.max(largestBatchFile, e.get("length").asLong());
+        }
+      }
+    }
+    assertThat(largestBatchFile).as("MoR-v3's batch files exceed 1 MiB").isGreaterThan(1L << 20);
+
+    // at most once per batch, and the control re-reads
+    assertThat(reads.get("transaction").values()).allMatch(n -> n == 1);
+    assertThat(reads.get("open")).anySatisfy((k, n) -> assertThat(n).as(k).isGreaterThan(1));
+    // nothing carries over: every batch of RMoW-C reads its files' footers again
+    for (int step = 1; step <= 4; step++) {
+      String prefix = "rmow-c " + step + " ";
+      assertThat(reads.get("transaction").keySet()).as(prefix).anyMatch(k -> k.startsWith(prefix));
+    }
+    // MoR-v3 opens each file once per batch, so the scope changes none of its requests or bytes;
+    // no arm's batch is dearer for holding a footer
+    Map<String, JsonNode> open = new HashMap<>();
+    for (JsonNode s : steps.get("open")) {
+      if (s.get("phase").asText().equals("batch")) {
+        open.put(key(s), s);
+      }
+    }
+    int mor = 0;
+    for (JsonNode s : steps.get("transaction")) {
+      if (!s.get("phase").asText().equals("batch")) {
+        continue;
+      }
+      JsonNode o = open.get(key(s));
+      assertThat(s.get("requests").asLong()).as(key(s)).isLessThanOrEqualTo(o.get("requests").asLong());
+      if (s.get("arm").asText().equals("mor-v3")) {
+        assertThat(s.get("requests").asLong()).as(key(s)).isEqualTo(o.get("requests").asLong());
+        assertThat(s.get("bytes_read").asLong()).as(key(s)).isEqualTo(o.get("bytes_read").asLong());
+        mor++;
+      }
+    }
+    assertThat(mor).isEqualTo(4);
+    assertThat(reads.get("transaction").keySet()).anyMatch(k -> k.startsWith("mor-v3 "));
+  }
+
   @Test
   void splitFilesArePlannedPerRowGroup(@TempDir Path dir) throws IOException {
     // a split file's objects are planned as an appendable file's version is: on their own split

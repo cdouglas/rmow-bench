@@ -134,6 +134,13 @@ Each rule guards against a bias found in Iceberg's code:
    offsets of the version read. A footer-cache reader reads a file of at most 1 MiB in one task,
    since Iceberg fetches such a file whole and each split would fetch it again. A split file's
    objects are planned the same way, each on its own footer's offsets.
+6. **Writers hold a footer for one transaction, in every arm.** A batch or a compaction is a
+   transaction, and an Iceberg writer starts each from storage: no footer carries over to the
+   next. Within one, a writer reads a file version's footer once, on its first use, and reuses it
+   (`writerFooters`), whether it is RMoW finding and rewriting row groups or a MoR-family arm
+   scanning and merging files. A file of at most 1 MiB is fetched whole on every open. Runs
+   before 2026-10-24 let RMoW's writer keep its footers across batches (`writerCachesFooters`),
+   which no MoR-family writer did; at 4 MiB that left out 3.5 of RMoW-C's 9.5 requests per batch.
 
 ## The S3 store
 
@@ -225,7 +232,7 @@ has what they showed.
 | `tierFanout` | How many units of one level merge into one (policy C). |
 | `maxRowGroupsPerFile` | The RMoW tail rolls over at this many row groups. Footers cost about 1.2 KB and 30 µs per row group. |
 | `footerOrder` | Where RMoW lists a row group that replaces another. `logical` (the default) puts it in the replaced one's place, so footer order, which is row order, stays id order and a sorted file stays sorted. `offset` lists it last, keeping the footer in file-offset order. The Parquet spec requires neither, and the I/O is the same ([docs/DESIGN.md](docs/DESIGN.md#footer-order)). |
-| `writerCachesFooters` | Writers keep the footers they wrote. This affects RMoW's reads of touched row groups and its footer statistics. |
+| `writerFooters` | What every arm's writer holds of the footers it reads (I/O parity rule 6). `transaction` (the default): a file version's footer is read once per batch or compaction and reused within it. `open`: every open reads it again, as parquet-java does. Nothing carries over from one transaction to the next. It replaces `writerCachesFooters`, under which RMoW's writer kept its footers across batches. |
 | `footerPrefetchBytes` | Every reader prefetches this tail on its first footer probe, so a footer costs 1 request instead of 2. 0 means stock parquet-java. |
 | `locate` | `oracle` (the default) takes row positions from an in-memory index, at no cost. `scan` finds them the way a MERGE would, in a timed `locate` phase checked against the index. MoR scans `id` and `_pos` of every file whose `id` bounds may hold a target; RMoW looks the ids up in its footers' row-group statistics. |
 | `reads.readers` | The reader models every probe runs under, on the same table state. The first is primary. `one-footer` (the default) opens each file at one version and reads that version's one footer once, in one request (a 64 KiB prefetch), then only the row groups it needs. `stock` is stock Iceberg today: one split per row group (`FileScanTask.split`), each split re-reading the footer with two requests. Each model also sets `splitTargetBytes` and `parallelism`, the threads a read's split tasks run on. |

@@ -86,6 +86,7 @@ public final class RmowArm implements Arm {
   private final int[] posInRg; // a row's position within its row group
   private double bytesPerRow = 40; // running estimate, for planning merges
   private long packBytes; // compaction's row-group target: a full row group of the initial load
+  private final WriterFooters footers; // what the writer has read in this batch or compaction
 
   public RmowArm(ArmContext ctx, TailPolicy.Kind kind) {
     this(ctx, kind, false);
@@ -104,6 +105,7 @@ public final class RmowArm implements Arm {
               throw new IllegalArgumentException("Unknown footer order: " + ctx.layout().footerOrder);
         };
     this.packBytes = ctx.layout().rowGroupBytes;
+    this.footers = new WriterFooters(ctx);
     this.rgOfId = new long[(int) ctx.log().totalIds()];
     this.posInRg = new int[(int) ctx.log().totalIds()];
     Arrays.fill(rgOfId, -1);
@@ -215,6 +217,7 @@ public final class RmowArm implements Arm {
 
   @Override
   public void apply(OpLog.Batch b) throws IOException {
+    footers.begin();
     if ("scan".equals(ctx.layout().locate)) {
       ctx.phases().run("locate", () -> locateByStats(b));
     }
@@ -283,19 +286,28 @@ public final class RmowArm implements Arm {
   }
 
   /**
-   * The footer a writer's read of {@code src} uses: the cached one, or, without the cache, none
-   * (the stock reader reads it), or for a footer-only version the object's view of the footer
-   * read from storage again (the view is derived from it, in memory).
+   * The footer a writer's read of {@code src} opens it with: the one the writer holds, or none
+   * (the open reads it: a file of at most 1 MiB whole) on its first use in the transaction, or on
+   * every use under {@code open}. For a footer-only version, the object's view of the version's
+   * footer, derived in memory once that is read.
    */
   private byte[] footerFor(LogicalFile f, LogicalFile.RowGroupSource src) throws IOException {
-    if (ctx.layout().writerCachesFooters) {
+    if (f.current().footerOnly()) {
+      footer(f);
       return src.tail();
     }
-    if (!f.current().footerOnly()) {
+    if (f.length() <= Scans.EAGER_BYTES || footers.mustRead(f.location(), f.length())) {
       return null;
     }
-    Scans.readFooterObject(ctx, Reader.writer(ctx.layout()), f.location(), f.length());
     return src.tail();
+  }
+
+  /**
+   * {@code f}'s current footer as the writer has it: read from storage on its first use in the
+   * transaction, or on every use under {@code open} ({@link WriterFooters}).
+   */
+  private FileMetaData footer(LogicalFile f) throws IOException {
+    return footers.mustRead(f.location(), f.length()) ? readFooter(f) : f.footer();
   }
 
   private Pending pending(Map<Integer, Pending> pending, int k) {
@@ -370,9 +382,11 @@ public final class RmowArm implements Arm {
       files.add(create(p));
       tail = k;
     } else {
+      footer(p.file); // the new footer lists the old one's row groups
       p.file.commit(
           ctx.io(), ctx.io(), p.regions, p.drop, p.newRgIds, inPlace ? p.inPlaceOf : null);
     }
+    footers.wrote(files.get(k).location(), files.get(k).length());
     if (inPlace && outOfOrder(files.get(k)) > 0) {
       throw new IllegalStateException(
           "Footer of " + files.get(k).location() + " lists row groups out of id order");
@@ -423,9 +437,9 @@ public final class RmowArm implements Arm {
   /**
    * Finds the row group of each updated and deleted row from the footers' {@code id} statistics:
    * updates rewrite rows within their row group and inserts take new ids, so row-group id ranges
-   * stay disjoint and a range lookup is exact. Footers come from the writer's cache, or from
-   * storage (two requests per file, as parquet-java reads them) without it. Checks every row
-   * group found against the index.
+   * stay disjoint and a range lookup is exact. Each file's footer is read from storage on its
+   * first use in the batch ({@link WriterFooters}). Checks every row group found against the
+   * index.
    */
   private void locateByStats(OpLog.Batch b) throws IOException {
     List<long[]> ranges = new ArrayList<>(); // {min id, max id, row group id}
@@ -433,7 +447,7 @@ public final class RmowArm implements Arm {
       if (f.liveRows() == 0) {
         continue;
       }
-      FileMetaData footer = ctx.layout().writerCachesFooters ? f.footer() : readFooter(f);
+      FileMetaData footer = footer(f);
       List<Long> ids = f.rgIds();
       for (int i = 0; i < footer.getRow_groupsSize(); i++) {
         Statistics st =
@@ -460,15 +474,12 @@ public final class RmowArm implements Arm {
   }
 
   /**
-   * Reads a file's current footer from storage the way parquet-java does: tail, then footer (a
-   * footer object of up to 1 MiB in one request).
+   * Reads a file's current footer from storage as an open does: tail, then footer, as
+   * parquet-java reads it, or a version of up to 1 MiB whole, as Iceberg fetches it.
    */
   private FileMetaData readFooter(LogicalFile f) throws IOException {
-    Reader writer = Reader.writer(ctx.layout());
     byte[] tail =
-        f.current().footerOnly()
-            ? Scans.readFooterObject(ctx, writer, f.location(), f.length())
-            : Scans.readTail(ctx, writer, f.location(), f.length());
+        Scans.readFooterObject(ctx, Reader.writer(ctx.layout()), f.location(), f.length());
     return FooterCodec.read(tail, 0, tail.length - 8);
   }
 
@@ -559,12 +570,14 @@ public final class RmowArm implements Arm {
    */
   @Override
   public void compact() throws IOException {
+    footers.begin();
     LayoutSpec layout = ctx.layout();
     for (int i = 0; i < files.size(); i++) {
       LogicalFile f = files.get(i);
       if (f.liveRows() == 0) {
         continue;
       }
+      footer(f); // planning needs its row groups' sizes, and its garbage
       List<List<Long>> packs = packs(f);
       if (split) {
         Set<Long> evacuate = evacuees((SplitFile) f);
@@ -696,7 +709,7 @@ public final class RmowArm implements Arm {
         r -> byRg.computeIfAbsent(rgOfId[((Long) r.get(Rows.ID)).intValue()], k -> new ArrayList<>()).add(r);
     Reader writer = Reader.writer(ctx.layout());
     if (f.current().footerOnly()) {
-      FileMetaData footer = ctx.layout().writerCachesFooters ? f.footer() : readFooter(f);
+      FileMetaData footer = footer(f);
       for (SplitFile.ObjectView v : SplitFile.views(f.location(), footer)) {
         Scans.scan(ctx, writer, Scans.version(v.location(), v.length(), v.rows()),
             NO_DELETES, Rows.SCHEMA, Expressions.alwaysTrue(), v.tail(), -1, -1, group);
@@ -709,7 +722,9 @@ public final class RmowArm implements Arm {
           NO_DELETES,
           Rows.SCHEMA,
           Expressions.alwaysTrue(),
-          ctx.layout().writerCachesFooters ? f.tail() : null,
+          f.length() <= Scans.EAGER_BYTES || footers.mustRead(f.location(), f.length())
+              ? null
+              : f.tail(),
           -1,
           -1,
           group);
@@ -738,6 +753,7 @@ public final class RmowArm implements Arm {
     }
     addRegion(p, packed, idsOfNewRg, null);
     LogicalFile compacted = create(p);
+    footers.wrote(compacted.location(), compacted.length());
     compacted.dataFile();
     for (long rg : f.rgIds()) {
       fileOfRg.remove(rg);

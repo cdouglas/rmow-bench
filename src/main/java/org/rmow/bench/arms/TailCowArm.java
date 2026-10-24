@@ -32,6 +32,7 @@ public final class TailCowArm extends MorArm {
 
   @Override
   public void apply(OpLog.Batch b) throws IOException {
+    footers.begin();
     long seq = batchSeq(b);
     locate(b);
     TailPolicy.Plan plan =

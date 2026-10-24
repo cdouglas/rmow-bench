@@ -462,9 +462,11 @@ table(stored.assign(arm=stored.arm.map(labels)).pivot(index="arm", columns="R", 
 
 - **No CPU verdict.** P3–P5 need a run whose cores stay clean. Requests and bytes are
   unaffected, since they depend only on the op log, config and code.
-- **MoR-v3's locate pays footer reads that RMoW's writer does not.** Its MERGE-style scan reads
-  each touched file's footer through the stock reader. RMoW's writer uses the footers it cached
-  when it wrote them (`writerCachesFooters`). Above 1 MiB, that is two requests per touched file
-  per batch for MoR-v3.
+- **RMoW's batch requests are undercounted.** In these runs RMoW's writer kept its footers from
+  one batch to the next (`writerCachesFooters`), which no Iceberg writer can, while MoR-v3's
+  locate scan read each touched file's footer every batch, as it should. Writers now hold a
+  footer for one batch only, in every arm (README, I/O parity rule 6). That adds a footer read
+  per live file to each RMoW batch, about 4 requests at these sizes; MoR-v3's requests do not
+  change. The rerun measures it.
 - **One workload, uncompacted.** Recency-skewed updates only, and no compaction, so stored bytes
   grow without bound.

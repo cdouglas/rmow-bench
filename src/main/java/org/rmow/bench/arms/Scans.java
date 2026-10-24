@@ -140,11 +140,11 @@ final class Scans {
 
 
   /** Iceberg fetches Parquet files up to this size whole ({@code Parquet.ReadBuilder}). */
-  private static final long EAGER_BYTES = 1L << 20;
+  static final long EAGER_BYTES = 1L << 20;
 
   /**
    * A file's tail, read the way parquet-java reads a footer: the last 8 bytes, then the footer
-   * (one request, if the footer-prefetch knob covers it).
+   * alone (one request, if the footer-prefetch knob covers it).
    */
   static byte[] readTail(ArmContext ctx, Reader reader, String location, long length)
       throws IOException {
@@ -161,7 +161,8 @@ final class Scans {
       int footerLength = ByteBuffer.wrap(probe, 0, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
       byte[] tail = new byte[footerLength + 8];
       in.seek(length - tail.length);
-      IOUtil.readFully(in, tail, 0, tail.length);
+      IOUtil.readFully(in, tail, 0, footerLength);
+      System.arraycopy(probe, 0, tail, footerLength, 8);
       return tail;
     }
   }
@@ -262,8 +263,9 @@ final class Scans {
   }
 
   /**
-   * A footer object's footer, length and magic: fetched whole when it is at most 1 MiB, as
-   * Iceberg fetches small files (one request); otherwise read as a footer.
+   * A file version's tail (footer, length, magic), read as an open reads it: fetched whole when it
+   * is at most 1 MiB, as Iceberg fetches small files (one request); otherwise read as
+   * parquet-java reads a footer. Footer-only objects ({@link SplitFile}) are read this way too.
    */
   static byte[] readFooterObject(ArmContext ctx, Reader reader, String location, long length)
       throws IOException {
@@ -275,7 +277,8 @@ final class Scans {
         new VersionedInputFile(ctx.io().newInputFile(location, length), length).newStream()) {
       ((RangeReadable) in).readFully(0, all, 0, all.length);
     }
-    return Arrays.copyOfRange(all, FooterCodec.MAGIC.length, all.length);
+    int footer = ByteBuffer.wrap(all, all.length - 8, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
+    return Arrays.copyOfRange(all, all.length - footer - 8, all.length);
   }
 
   /**

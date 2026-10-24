@@ -58,9 +58,12 @@ public abstract class MorArm implements Arm {
   protected final int[] posOfId;
   private final List<Integer> removedRows = new ArrayList<>(); // per file: rows deleted or moved
   private int lastBatch = -1;
+  /** The footers this arm's writer has read in the current transaction (a batch, a compaction). */
+  protected final WriterFooters footers;
 
   protected MorArm(ArmContext ctx) {
     this.ctx = ctx;
+    this.footers = new WriterFooters(ctx);
     this.fileOfId = new int[(int) ctx.log().totalIds()];
     this.posOfId = new int[(int) ctx.log().totalIds()];
     Arrays.fill(fileOfId, -1);
@@ -196,6 +199,7 @@ public abstract class MorArm implements Arm {
 
   @Override
   public void apply(OpLog.Batch b) throws IOException {
+    footers.begin();
     long seq = batchSeq(b);
     locate(b);
     // the old locations of updated and deleted rows, before the updates move them
@@ -343,6 +347,7 @@ public abstract class MorArm implements Arm {
     if (lastBatch < 0) {
       return;
     }
+    footers.begin();
     LayoutSpec layout = ctx.layout();
     long seq = 2L * (lastBatch + 1) + 1;
     List<List<Integer>> groups = new ArrayList<>();
@@ -428,7 +433,10 @@ public abstract class MorArm implements Arm {
     return Scans.readAll(ctx, reader, toRead, filter);
   }
 
-  /** Reads one data file as Iceberg's generic reader does: its deletes and the filter applied. */
+  /**
+   * Reads one data file as Iceberg's generic reader does, its deletes and the filter applied, with
+   * the footer this transaction's writer holds of it, if any.
+   */
   private void scan(
       DataFile df, long seq, List<Delete> liveDeletes, Expression filter, Consumer<Record> rows)
       throws IOException {
@@ -450,7 +458,7 @@ public abstract class MorArm implements Arm {
         deletesFor(df, seq, liveDeletes),
         projection,
         filter,
-        null,
+        footers.tail(df.location(), df.fileSizeInBytes()),
         -1,
         -1,
         rows);
