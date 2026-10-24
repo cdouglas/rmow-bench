@@ -333,6 +333,7 @@ public final class Runner {
   private void emitPhases(BufferedWriter out, ArmRun a, int step) throws IOException {
     for (Phases.Measured p : a.phases().drain()) {
       Map<String, Object> m = base(a, step, p.phase());
+      m.put("start_ms", p.startMs());
       m.put("wall_ns", p.wallNs());
       m.put("cpu_ns", p.cpuNs());
       m.put("process_cpu_ns", p.processCpuNs());

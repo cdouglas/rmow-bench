@@ -76,6 +76,18 @@ mode = "table"
 only_finished = true
 options = { ignore_errors = true }
 
+# The container runner's foreign-load samples (docker/campaign.py), added to a run when it ends:
+# one per second, each over the wall-clock interval [t0, t1] in epoch seconds, with the job's own
+# CPUs, the foreign load on its cores and the busy time of its idle SMT siblings. Matched to
+# phases by their start_ms in the view phase_load (views/50_containers.sql).
+[[facts]]
+name = "load"
+runs = "bench"
+file = "load.jsonl"
+format = "jsonl"
+mode = "table"
+options = { ignore_errors = true }
+
 [[facts]]
 name = "version_dump"
 runs = "bench"

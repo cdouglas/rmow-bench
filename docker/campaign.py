@@ -17,15 +17,22 @@ node with the most free cores, on its quietest cores, and no two jobs share a co
 jobs go first, as listed. A job starts only when its heap and its store fit in what is free.
 
 **Measurement hygiene.** CPU is part of every simulated latency (lab/pages/store-latency.md), so a
-job's cores are watched while it runs: every few seconds, the busy time of its cores (siblings
-included) less its own CPU time is foreign load, recorded with the job. The JVM sees only its
-CPUs, and sizes its GC and JIT threads to them.
+job's cores are watched while it runs, as shield's interference monitor watches a cell
+(~/work/shield/shield-rs/analysis/shieldlib/interference.py). Every second, the busy time of its
+cores (siblings included) less its own CPU time is foreign load, and the busy time of its idle
+siblings, which it cannot run on, is foreign by construction. Leaving siblings idle does not keep
+other users' threads off them: the scheduler places threads on idle CPUs. The samples carry wall-
+clock times, as each phase of a run does (`start_ms`), so the lab can tell which phases foreign
+load touched (`phase_load`). A job is flagged `interfered` when at least `threshold_cpus` of
+foreign load persisted for at least `sustained_frac` of its samples; it is kept either way. The
+JVM sees only its CPUs, and sizes its GC and JIT threads to them.
 
 **Records.** `<results>/campaigns/<name>/` holds `progress.json` (rewritten as jobs change),
-`<job>.log` (each run's console) and `<job>.json` (placement, run directory, exit status and
-foreign load, once the job ends). Runs go where bin/run.sh puts them,
-`<results>/<label>-<config hash>/<UTC start>/`, with the host, the image and the placement in
-their manifests. Each job's objects go under `<store>/<name>/<job>/`, deleted when the run ends.
+`<job>.log` (each run's console), `<job>.load.jsonl` (the samples, as they are taken) and
+`<job>.json` (placement, run directory, exit status and the load's summary, once the job ends).
+Runs go where bin/run.sh puts them, `<results>/<label>-<config hash>/<UTC start>/`, with the host,
+the image and the placement in their manifests; the runner adds the samples as `load.jsonl` when
+the run ends. Each job's objects go under `<store>/<name>/<job>/`, deleted when the run ends.
 
 **Resuming.** Running a campaign again skips each job whose run finished (its manifest has
 `finished`), and runs the rest again from the start. An interrupted job's run directory is left
@@ -45,7 +52,9 @@ from pathlib import Path
 
 APP = Path("/app")
 TICK = os.sysconf("SC_CLK_TCK")
-WATCH_S = 5.0
+WATCH_S = 1.0
+#: shield's defaults for the `interfered` flag; a campaign may override them under "interference"
+INTERFERENCE = {"threshold_cpus": 0.5, "sustained_frac": 0.25}
 
 
 def expand(spec):
@@ -125,6 +134,67 @@ def proc_jiffies(pid):
         return None
 
 
+def busy_jiffies(cpus):
+    """{cpu: busy jiffies} for `cpus`: everything but idle and iowait."""
+    return {c: total - idle for c, (total, idle) in cpu_times().items() if c in cpus}
+
+
+class Monitor:
+    """Foreign load on one job's cores, sampled every WATCH_S seconds into a JSONL file.
+
+    Each sample covers the wall-clock interval [t0, t1] (epoch seconds) and gives, in CPUs:
+    `own_cpus`, the job's CPU time; `foreign_cpus`, the busy time of every CPU it owns less its
+    own (kernel work on its behalf lands here too, so the floor is small but not zero); and
+    `sibling_busy_cpus`, the busy time of the owned CPUs it may not run on, foreign by
+    construction."""
+
+    def __init__(self, pid, run_cpus, owned_cpus, path):
+        self.pid = pid
+        self.owned = set(owned_cpus) | set(run_cpus)
+        self.idle = self.owned - set(run_cpus)
+        self.path = Path(path)
+        self.path.write_text("")
+        self.samples = []  # (t0, t1, own, foreign, sibling)
+        self.last = self.read()
+
+    def read(self):
+        return time.time(), time.monotonic(), busy_jiffies(self.owned), proc_jiffies(self.pid)
+
+    def sample(self):
+        now = self.read()
+        (t0, m0, busy0, own0), (t1, m1, busy1, own1) = self.last, now
+        if own1 is None:  # the job has exited
+            return
+        self.last = now
+        dt = m1 - m0
+        if dt <= 0 or own0 is None:
+            return
+        d = {c: busy1.get(c, 0) - busy0.get(c, 0) for c in self.owned}
+        own = max(0, own1 - own0) / TICK / dt
+        foreign = max(0.0, sum(d.values()) / TICK / dt - own)
+        sibling = sum(d[c] for c in self.idle) / TICK / dt
+        self.samples.append((t0, t1, own, foreign, sibling))
+        with self.path.open("a") as f:
+            f.write(json.dumps({"t0": round(t0, 3), "t1": round(t1, 3), "own_cpus": round(own, 3),
+                                "foreign_cpus": round(foreign, 3),
+                                "sibling_busy_cpus": round(sibling, 3)}) + "\n")
+
+    def summary(self, threshold_cpus, sustained_frac):
+        n = len(self.samples)
+        fs = [s[3] for s in self.samples]
+        over = sum(1 for f in fs if f >= threshold_cpus)
+        return {
+            "watch_samples": n,
+            "foreign_cpu_s": round(sum((s[1] - s[0]) * s[3] for s in self.samples), 1),
+            "foreign_max_cpus": round(max(fs, default=0.0), 2),
+            "foreign_mean_cpus": round(sum(fs) / n, 3) if n else 0.0,
+            "sibling_busy_mean_cpus": round(sum(s[4] for s in self.samples) / n, 3) if n else 0.0,
+            "sustained_frac": round(over / n, 3) if n else 0.0,
+            "threshold_cpus": threshold_cpus,
+            "interfered": bool(n) and over / n >= sustained_frac,
+        }
+
+
 def mem_available():
     for line in Path("/proc/meminfo").read_text().splitlines():
         if line.startswith("MemAvailable:"):
@@ -162,6 +232,7 @@ class Job:
         self.label = label_of(self.config)
         self.record = out / f"{self.name}.json"
         self.log = out / f"{self.name}.log"
+        self.load = out / f"{self.name}.load.jsonl"
         prior = json.loads(self.record.read_text()) if self.record.exists() else {}
         self.state = "done" if prior.get("run_dir") and finished(prior["run_dir"]) else "pending"
         self.prior = prior
@@ -171,11 +242,9 @@ class Job:
         self.node = None
         self.run_dir = prior.get("run_dir") if self.state == "done" else None
         self.started = self.ended = None
-        self.foreign_jiffies = 0
-        self.foreign_max = 0.0
-        self.samples = 0
+        self.monitor = None
+        self.interference = INTERFERENCE
         self.before = set()
-        self.last = None
 
     def owned(self):
         return [c for core in self.cores for c in core]
@@ -183,6 +252,7 @@ class Job:
     def summary(self):
         if self.state == "done" and self.prior and not self.proc:
             return self.prior
+        load = self.monitor.summary(**self.interference) if self.monitor else {}
         return {
             "config": self.config,
             "state": self.state,
@@ -194,9 +264,7 @@ class Job:
             "started": self.started,
             "ended": self.ended,
             "exit": None if self.proc is None else self.proc.returncode,
-            "foreign_cpu_s": round(self.foreign_jiffies / TICK, 1),
-            "foreign_max_cpus": round(self.foreign_max, 2),
-            "watch_samples": self.samples,
+            **load,
         }
 
 
@@ -225,6 +293,8 @@ def run(campaign_file):
         sys.exit(f"no NUMA node has {per} whole cores in {compress(allowed)}: lower CORES_PER_JOB")
 
     jobs = [Job(j, out) for j in spec["jobs"]]
+    for job in jobs:
+        job.interference = {**INTERFERENCE, **spec.get("interference", {})}
     flags = spec.get("flags", [])
     jar = next(p for p in glob(str(APP / "target/rmow-bench-*.jar")) if "-tests" not in p)
     classpath = f"{jar}:{APP}/target/lib/*"
@@ -297,7 +367,7 @@ def run(campaign_file):
         log.close()
         job.state = "running"
         job.started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        job.last = (cpu_times(), proc_jiffies(job.proc.pid))
+        job.monitor = Monitor(job.proc.pid, job.cpus, job.owned(), job.load)
         print(f"start {job.name}: node {job.node}, cpus {compress(job.cpus)}, heap {job.heap}",
               flush=True)
 
@@ -306,27 +376,27 @@ def run(campaign_file):
         if new:
             job.run_dir = str(Path(new[-1]).parent)
 
+    def end(job):
+        """Records a job that has stopped, and gives its run the load samples."""
+        job.ended = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        find_run_dir(job)
+        if job.run_dir and job.load.exists():
+            shutil.copyfile(job.load, Path(job.run_dir) / "load.jsonl")
+        job.record.write_text(json.dumps(job.summary(), indent=2) + "\n")
+
     def watch():
+        ticks = 0
         while not stopping.wait(WATCH_S):
             with lock:
-                now = cpu_times()
                 for job in jobs:
-                    if job.state != "running" or job.last is None:
+                    if job.state != "running" or job.monitor is None:
                         continue
-                    then, own0 = job.last
-                    own1 = proc_jiffies(job.proc.pid)
-                    if own1 is None or own0 is None:
-                        continue
-                    busy_j = sum((now[c][0] - now[c][1]) - (then[c][0] - then[c][1])
-                                 for c in job.owned() if c in now and c in then)
-                    foreign = max(0, busy_j - (own1 - own0))
-                    job.foreign_jiffies += foreign
-                    job.foreign_max = max(job.foreign_max, foreign / TICK / WATCH_S)
-                    job.samples += 1
-                    job.last = (now, own1)
+                    job.monitor.sample()
                     if job.run_dir is None:
                         find_run_dir(job)
-                write_progress()
+                ticks += 1
+                if ticks % 5 == 0:
+                    write_progress()
 
     def stop(signum, _frame):
         stopping.set()
@@ -356,14 +426,16 @@ def run(campaign_file):
             for job in running:
                 if job.proc.poll() is None:
                     continue
-                job.ended = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                 find_run_dir(job)
                 ok = job.proc.returncode == 0 and job.run_dir and finished(job.run_dir)
                 job.state = "done" if ok else "failed"
-                job.record.write_text(json.dumps(job.summary(), indent=2) + "\n")
+                end(job)
                 job.prior = job.summary()
+                load = job.prior
                 print(f"{job.state} {job.name}: exit {job.proc.returncode}, {job.run_dir}, "
-                      f"foreign load {job.foreign_jiffies / TICK:.1f} CPU-s", flush=True)
+                      f"foreign load {load.get('foreign_cpu_s', 0)} CPU-s, mean "
+                      f"{load.get('foreign_mean_cpus', 0)} CPUs"
+                      f"{' (interfered)' if load.get('interfered') else ''}", flush=True)
             pending = [j for j in jobs if j.state == "pending"]
             running = [j for j in jobs if j.state == "running"]
             if not pending and not running:
@@ -387,9 +459,7 @@ def run(campaign_file):
         for job in jobs:
             if job.state == "interrupted":
                 job.proc.wait()
-                job.ended = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-                find_run_dir(job)
-                job.record.write_text(json.dumps(job.summary(), indent=2) + "\n")
+                end(job)
         write_progress()
     failed = [j.name for j in jobs if j.state != "done"]
     print("campaign done" if not failed else f"not finished: {', '.join(failed)}", flush=True)
@@ -423,6 +493,9 @@ def status(campaign_dir):
                 pass
         if j.get("foreign_cpu_s"):
             line += f"  foreign {j['foreign_cpu_s']} CPU-s (max {j['foreign_max_cpus']} CPUs)"
+        if "sustained_frac" in j:
+            line += (f", {100 * j['sustained_frac']:.0f}% of samples at {j['threshold_cpus']}+"
+                     f"{' INTERFERED' if j.get('interfered') else ''}")
         print(line)
         if run_dir and j.get("state") in ("failed", "interrupted"):
             print(f"  {'':32} unfinished run (delete it): {run_dir}")

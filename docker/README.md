@@ -45,7 +45,7 @@ docker/run.sh logs scale                     # the runner's output; each run's i
 `start` detaches. Under rootless Docker the daemon is a systemd user service, so without
 lingering, logging out stops the campaign; `start` says when that applies (`loginctl
 enable-linger`, once). Running `start` again resumes: jobs whose run finished are skipped, and
-the rest start over.
+the rest start over. To rerun finished jobs, give the rerun a campaign of its own name.
 
 | env | |
 |---|---|
@@ -65,15 +65,26 @@ Runs go where `bin/run.sh` puts them, `RESULTS/<label>-<config hash>/<UTC start>
 - the job's placement (`host.placement`: node, the CPUs it ran on, the cores it owned);
 - the image (`versions.build_snapshot`) and its commit.
 
+Each phase record in `steps.jsonl` has its start on the wall clock (`start_ms`), and the run gets
+`load.jsonl` from the runner when it ends: the foreign-load samples below.
+
 `RESULTS/campaigns/<name>/` holds the runner's records:
 - `progress.json`;
 - `<job>.log`, each run's console;
-- `<job>.json`: placement, exit, run directory, and **foreign load**, the busy time of the job's
-  cores (siblings included) less its own CPU time.
+- `<job>.load.jsonl`, one sample a second while the job runs: over `[t0, t1]` (epoch seconds),
+  the job's own CPUs, its **foreign load** (the busy time of its cores, siblings included, less
+  its own CPU time) and the busy time of its idle siblings (foreign by construction);
+- `<job>.json`: placement, exit, run directory, and the load's summary. As in shield, the job is
+  flagged `interfered` when 0.5 CPUs of foreign load lasted for a quarter of its samples (a
+  campaign's `"interference": {"threshold_cpus": ..., "sustained_frac": ...}` changes that), and
+  kept either way.
 
-A job with foreign load decides nothing about CPU. Idle siblings do not keep other users' work
-off a job's cores: the scheduler places threads on idle CPUs. The scale campaign's three longer
-jobs saw 1.6–2.9 CPUs of it on average (lab/pages/scale.md).
+Idle siblings do not keep other users' work off a job's cores: the scheduler places threads on
+idle CPUs. The scale campaign's three longer jobs saw 1.6–2.9 CPUs of it on average
+(lab/pages/scale.md). So CPU is judged per phase: the lab's `phase_load` matches each phase to
+the samples it overlaps, and only a `clean` phase (under 0.25 CPUs of foreign load throughout)
+decides anything about CPU. Runs from before the samples (the first scale campaign) have none,
+and decide nothing about CPU if their job had foreign load.
 
 ## Bringing results back
 

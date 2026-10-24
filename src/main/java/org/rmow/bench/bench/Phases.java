@@ -27,12 +27,14 @@ import org.rmow.bench.io.S3Recorder;
 public final class Phases {
 
   /**
-   * One phase's measurements: thread CPU of the arm's thread, and process CPU (which also counts
-   * read-pool threads, and the JVM's own GC and JIT threads). {@code extra} holds phase-specific
-   * values (e.g. rows read); {@code events}, the logged requests of an outermost phase.
+   * One phase's measurements: when it started (epoch milliseconds, the clock a campaign's load
+   * samples use), thread CPU of the arm's thread, and process CPU (which also counts read-pool
+   * threads, and the JVM's own GC and JIT threads). {@code extra} holds phase-specific values
+   * (e.g. rows read); {@code events}, the logged requests of an outermost phase.
    */
   public record Measured(
       String phase,
+      long startMs,
       long wallNs,
       long cpuNs,
       long processCpuNs,
@@ -87,6 +89,7 @@ public final class Phases {
     S3Recorder.Counts sdk0 = recorder == null ? null : recorder.snapshot();
     long proc0 = OS.getProcessCpuTime();
     long cpu0 = MX.getCurrentThreadCpuTime();
+    long startMs = System.currentTimeMillis();
     long t0 = System.nanoTime();
     T result;
     try {
@@ -102,7 +105,8 @@ public final class Phases {
     }
     List<IoTrace.Event> events = outermost && trace.logging() ? trace.drainEvents() : List.of();
     measured.add(
-        new Measured(phase, wall, cpu, proc, trace.snapshot().minus(before), extra, events));
+        new Measured(
+            phase, startMs, wall, cpu, proc, trace.snapshot().minus(before), extra, events));
     return result;
   }
 

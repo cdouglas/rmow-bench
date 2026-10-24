@@ -96,6 +96,40 @@ class RequestLogTest {
   }
 
   @Test
+  void phasesCarryTheirStartTime(@TempDir Path dir) throws IOException {
+    // a campaign's load samples are matched to phases by time (docker/campaign.py, the lab's
+    // phase_load): every timed phase says when it started on the wall clock, within the run, and
+    // a batch's parts lie inside the batch
+    long before = System.currentTimeMillis();
+    List<JsonNode> steps = run(config(dir), dir);
+    long after = System.currentTimeMillis();
+    Map<String, JsonNode> batches = new HashMap<>();
+    for (JsonNode s : steps) {
+      if (s.get("phase").asText().equals("batch")) {
+        batches.put(s.get("arm").asText() + " " + s.get("step"), s);
+      }
+    }
+    int parts = 0;
+    for (JsonNode s : steps) {
+      if (!s.hasNonNull("wall_ns")) {
+        continue; // state records are not timed
+      }
+      long start = s.get("start_ms").asLong();
+      double end = start + s.get("wall_ns").asLong() / 1e6;
+      assertThat(start).as(key(s)).isBetween(before, after);
+      assertThat(end).as(key(s)).isLessThanOrEqualTo(after + 1);
+      JsonNode batch = batches.get(s.get("arm").asText() + " " + s.get("step"));
+      if (List.of("locate", "merge-read", "write", "delete-write").contains(s.get("phase").asText())) {
+        long b0 = batch.get("start_ms").asLong();
+        assertThat(start).as(key(s)).isGreaterThanOrEqualTo(b0);
+        assertThat(end).as(key(s)).isLessThanOrEqualTo(b0 + batch.get("wall_ns").asLong() / 1e6 + 1);
+        parts++;
+      }
+    }
+    assertThat(parts).isPositive();
+  }
+
+  @Test
   void splitFilesArePlannedPerRowGroup(@TempDir Path dir) throws IOException {
     // a split file's objects are planned as an appendable file's version is: on their own split
     // offsets, one task per live row group, except that a footer-cache reader reads an object of

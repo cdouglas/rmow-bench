@@ -359,8 +359,9 @@ All are local runs: requests and bytes are exact, latency is not measured.
   harness's and costs about 70% of a read's CPU.
 - **The scale campaign's CPU half, on clean cores.** Its requests, bytes and storage are decided
   (lab/pages/scale.md); P3–P5 need CPU from cores no other work reached. Idle SMT siblings did
-  not keep other users' threads off havoc's cores, and the runner records foreign load only as a
-  total per job, so a rerun cannot yet tell which phases it touched.
+  not keep other users' threads off havoc's cores. The runner now samples foreign load every
+  second and each phase records its start, so a rerun's phases can be judged one by one
+  (`phase_load`); the rerun needs a campaign name of its own, since `start` skips finished jobs.
 - **S3 Express (milestone M3)**, only to check the simulation's parameters.
   - It starts with `configs/s3x-calibration.json` and the S4 spike, which need credentials, a
     directory bucket and an instance in its zone.

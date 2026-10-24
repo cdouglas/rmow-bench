@@ -46,7 +46,8 @@ bin/matrix.sh --build configs/local-compact-*.json   # several, from a build sna
   container: `docker/run.sh build`, then `start <campaign>` ([docker/README.md](docker/README.md)).
   They are the user's runs. A session prepares the campaign (configs, `docker/campaigns/*.json`,
   hypotheses) and reads the results once they are copied back into `results/`. Each job has
-  whole idle cores, and records its foreign load in `results/campaigns/<name>/`.
+  whole idle cores, and its foreign load is sampled every second; only phases it did not touch
+  decide CPU (`phase_load` in the lab, docker/README.md).
 - **Simulation runs turn `verifyRows` off.** The payload check costs about 70% of a read's CPU,
   and CPU counts toward simulated latency. The id-and-version oracle stays on.
 - **Duration:** a `local-*` configuration has taken 8–34 minutes, longest with all 9 arms
