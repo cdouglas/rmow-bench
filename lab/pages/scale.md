@@ -227,7 +227,8 @@ N = {
 Do the 4 MiB recency setting's requests, bytes, CPU and simulated latency hold at Iceberg's
 defaults, 128 MiB row groups and 512 MiB files? This page reads the scale campaign: four runs on
 havoc, one per row-group size R of 4, 16, 64 and 128 MiB. It decides P1–P6 (docs/HYPOTHESES.md,
-2026-10-23) where the runs can decide them.
+2026-10-23) where the runs can decide them. A rerun judged CPU per phase
+([below](#scale-rerun)).
 
 ## Setup
 
@@ -402,9 +403,281 @@ judge anything.
 table(face)
 ```
 
+(scale-rerun)=
+## The rerun, judged per phase
+
+```{code-cell} ipython3
+:tags: [remove-cell]
+
+# The rerun (docker/campaigns/scale-rerun.json), from 247f054: the same configurations, with
+# foreign load sampled every second and writer footers held for one transaction (docs/HYPOTHESES.md,
+# 2026-10-24)
+RERUN = {
+    4: "scale-recency-rg4m-5cc727c1e4af/20261024T082757Z",
+    16: "scale-recency-rg16m-daece520dd8e/20261024T082756Z",
+    64: "scale-recency-rg64m-34a1c89f1cfa/20261024T082755Z",
+    128: "scale-recency-rg128m-fe22e4558e59/20261024T082754Z",
+}
+RIDS = list(RERUN.values())
+R2_OF = {v: k for k, v in RERUN.items()}
+
+load2 = q("""
+    SELECT l.run_id, any_value(c.node) AS node, any_value(c.cpus) AS cpus, count(*) AS samples,
+           avg(l.foreign_cpus) AS foreign_mean, max(l.foreign_cpus) AS foreign_max,
+           avg(CASE WHEN l.foreign_cpus >= 0.25 THEN 1 ELSE 0 END) AS share_over
+    FROM load l JOIN container_jobs c USING (run_id)
+    WHERE list_contains($ids, l.run_id) GROUP BY ALL""", ids=RIDS)
+clean2 = q("""
+    SELECT run_id,
+           avg(CASE WHEN clean THEN 1 ELSE 0 END) FILTER (WHERE phase = 'batch') AS clean_batches,
+           count(*) FILTER (WHERE phase = 'read_full' AND step = 60 AND clean) AS clean60,
+           count(*) FILTER (WHERE phase = 'read_full' AND step = 60) AS reads60
+    FROM phase_load WHERE list_contains($ids, run_id) GROUP BY ALL""", ids=RIDS)
+jobs2 = load2.merge(clean2, on="run_id")
+jobs2["R"] = jobs2.run_id.map(R2_OF)
+jobs2 = jobs2.sort_values("R")
+J2 = jobs2.set_index("R")
+at60 = q("""
+    SELECT arm, reader, clean, foreign_max_cpus FROM phase_load
+    WHERE run_id = $r AND phase = 'read_full' AND step = 60""", r=RERUN[128]).set_index(["reader", "arm"])
+
+# C1: each record against the first campaign's (steps_diff)
+c1 = []
+for r in RUNS:
+    d = q("SELECT * FROM steps_diff($a, $b)", a=RUNS[r], b=RERUN[r])
+    d["what"] = np.where(d.phase.str.startswith("read"), "probes", d.phase)
+    d = d[d.what.isin(["probes", "batch"])]
+    d["differs_any"] = d.one_run_only | (d.differs.map(len) > 0)
+    for (arm, what), g in d.groupby(["arm", "what"]):
+        c1.append((labels[arm], what, r, int(g.differs_any.sum()), len(g)))
+c1 = pd.DataFrame(c1, columns=["arm_label", "what", "R", "differ", "records"])
+tc = q("""
+    SELECT n.run_id, n.step, n.requests - o.requests AS dreq
+    FROM steps o JOIN steps n USING (arm, step, phase)
+    WHERE o.arm = 'tailcow-c' AND o.phase = 'batch' AND list_contains($pairs, [o.run_id, n.run_id])""",
+          pairs=[[RUNS[r], RERUN[r]] for r in RUNS])
+
+# C2: each RMoW batch's extra requests against the files live at its start
+c2 = q("""
+    SELECT n.run_id, n.arm, n.step, n.requests - o.requests AS extra,
+           n.bytes_written - o.bytes_written AS dwritten, st.data_files
+    FROM steps o JOIN steps n USING (arm, step, phase)
+    JOIN steps st ON st.run_id = o.run_id AND st.arm = o.arm AND st.phase = 'state' AND st.step = o.step - 1
+    WHERE o.arm LIKE 'rmow%' AND o.phase = 'batch' AND list_contains($pairs, [o.run_id, n.run_id])""",
+          pairs=[[RUNS[r], RERUN[r]] for r in RUNS])
+c2["R"] = c2.run_id.map(R2_OF)
+c2["split"] = c2.arm.str.endswith("split")
+c2["per_file"] = c2.extra / c2.data_files
+c2["as_registered"] = np.where(c2.split, c2.extra == 2, c2.extra.between(3, 4))
+c2_table = (c2.assign(arm_label=c2.arm.map(labels))
+            .groupby(["arm_label", "R"])
+            .agg(files_lo=("data_files", "min"), files_hi=("data_files", "max"),
+                 extra_lo=("extra", "min"), extra_hi=("extra", "max"),
+                 as_registered=("as_registered", "mean"))
+            .reset_index())
+
+# C3: the twins' read CPU under cached, clean or not
+tw = q("""
+    WITH s AS (SELECT run_id, arm, step, cpu_ns, process_cpu_ns, clean, foreign_max_cpus
+               FROM phase_load
+               WHERE list_contains($ids, run_id) AND phase = 'read_full' AND reader = 'cached')
+    SELECT a.run_id, b.arm, a.step, a.cpu_ns / b.cpu_ns AS cpu_ratio, a.clean AND b.clean AS clean,
+           (a.process_cpu_ns - a.cpu_ns) / 1e9 AS other_split_s,
+           (b.process_cpu_ns - b.cpu_ns) / 1e9 AS other_twin_s
+    FROM s a JOIN s b ON b.run_id = a.run_id AND b.step = a.step AND b.arm = replace(a.arm, '-split', '')
+    WHERE a.arm LIKE '%-split'""", ids=RIDS)
+tw["R"] = tw.run_id.map(R2_OF)
+tw["pair"] = tw.arm.map(lambda a: f"{labels[a + '-split']} ÷ {labels[a]}")
+tw["phase load"] = np.where(tw.clean, "clean", "foreign load")
+cl = tw[tw.clean]
+off = tw[(tw.cpu_ratio - 1).abs() > 0.03]
+# the dearer read of a disagreeing pair: did more of the JVM's other CPU run during it?
+dearer_more_other = ((off.cpu_ratio > 1) == (off.other_split_s > off.other_twin_s)).sum()
+
+# P3-P5 at face value, over clean phases
+cpu2 = q("""
+    SELECT run_id, arm,
+           sum(cpu_ns) FILTER (WHERE phase = 'read_full' AND reader = 'cached' AND step > 0 AND clean) / 1e6
+             / (sum(bytes_read) FILTER (WHERE phase = 'read_full' AND reader = 'cached' AND step > 0 AND clean) / 2 ^ 20)
+             AS rd,
+           sum(cpu_ns) FILTER (WHERE phase = 'batch' AND clean) / 1e6
+             / (sum(bytes_written) FILTER (WHERE phase = 'batch' AND clean) / 2 ^ 20) AS wr
+    FROM phase_load WHERE list_contains($ids, run_id) GROUP BY ALL""", ids=RIDS)
+cpu2["R"] = cpu2.run_id.map(R2_OF)
+C2CPU = cpu2.set_index(["R", "arm"])
+lat2 = q("""
+    SELECT l.arm, l.profile,
+           avg(l.cpu_ms + l.request_ms + l.transfer_ms) FILTER (WHERE l.phase = 'batch' AND l.step > 0 AND p.clean) AS batch_ms,
+           max(l.cpu_ms + l.request_ms + l.transfer_ms)
+               FILTER (WHERE l.phase = 'read_full' AND l.reader = 'cached' AND l.step = 60) AS read60
+    FROM phase_latency l JOIN phase_load p
+      ON p.run_id = l.run_id AND p.arm = l.arm AND p.step = l.step AND p.phase = l.phase
+     AND p.reader IS NOT DISTINCT FROM l.reader
+    WHERE l.run_id = $r GROUP BY ALL""", r=RERUN[128]).set_index(["profile", "arm"])
+rp2 = fig.replay(RERUN[128], s3x)
+rp2 = rp2[(rp2.phase == "read_full") & (rp2.step == 60) & (rp2.reader == "cached-p8")].set_index("arm")
+p8_2 = rp2.simulated_ms / rp2.simulated_ms["mor-v3"]
+batch2 = {p: lat2.loc[(p, "rmow-c"), "batch_ms"] / lat2.loc[(p, "mor-v3"), "batch_ms"]
+          for p in batch_profiles}
+
+
+def span(values):
+    return f"{min(values):.2f}–{max(values):.2f}"
+
+
+face2 = pd.DataFrame([
+    ("P3", "read CPU per MiB, cached, 128 ÷ 4 MiB (range over arms)", "within 30%",
+     span([C2CPU.loc[(128, a), "rd"] / C2CPU.loc[(4, a), "rd"] for a in ARMS]), "clean reads"),
+    ("P3", "write CPU per MiB, 128 ÷ 4 MiB (range over arms)", "within 30%",
+     span([C2CPU.loc[(128, a), "wr"] / C2CPU.loc[(4, a), "wr"] for a in ARMS]), "clean batches"),
+    ("P4", "RMoW-C ÷ MoR-v3, full read at batch 60, cached, S3 Express", "0.9–1.1",
+     f"{lat2.loc[('s3x', 'rmow-c'), 'read60'] / lat2.loc[('s3x', 'mor-v3'), 'read60']:.2f}",
+     "neither read clean"),
+    ("P4", "the same, Azure Blob", "at most 0.9",
+     f"{lat2.loc[('azure', 'rmow-c'), 'read60'] / lat2.loc[('azure', 'mor-v3'), 'read60']:.2f}",
+     "neither read clean"),
+    ("P4", "RMoW-C ÷ MoR-v3, a batch (range over the profiles it can run on)", "above 1",
+     span(batch2.values()), "clean batches"),
+    ("P5", "every arm ÷ MoR-v3, full read at batch 60, cached-p8, S3 Express", "0.75–1.25",
+     span(p8_2), "all reads clean"),
+], columns=["prediction", "measure (128 MiB)", "predicted", "as measured", "phases"])
+
+N2 = {
+    "mean_lo": f"{jobs2.foreign_mean.min():.2f}",
+    "mean_hi": f"{jobs2.foreign_mean.max():.2f}",
+    "clean_b_lo": f"{100 * jobs2.clean_batches.min():.0f}%",
+    "clean_b_hi": f"{100 * jobs2.clean_batches.max():.0f}%",
+    "clean60_128": f"{J2.loc[128, 'clean60']}",
+    "reads60_128": f"{J2.loc[128, 'reads60']}",
+    "fm_mor": f"{at60.loc[('cached', 'mor-v3'), 'foreign_max_cpus']:.2f}",
+    "fm_rc": f"{at60.loc[('cached', 'rmow-c'), 'foreign_max_cpus']:.2f}",
+    "c1_probes": f"{c1[c1.what == 'probes'].records.sum():,}",
+    "c1_probes_bad": f"{c1[c1.what == 'probes'].differ.sum()}",
+    "c1_mor_bad": f"{c1[(c1.what == 'batch') & (c1.arm_label == labels['mor-v3'])].differ.sum()}",
+    "tc_fewer": f"{(tc.dreq < 0).sum()}",
+    "tc_more": f"{(tc.dreq > 0).sum()}",
+    "c2_batches": f"{len(c2)}",
+    "c2_reg": f"{c2.as_registered.sum()}",
+    "c2_written": f"{(c2.dwritten != 0).sum()}",
+    "c3_lo": f"{cl.cpu_ratio.min():.3f}",
+    "c3_hi": f"{cl.cpu_ratio.max():.3f}",
+    "c3_n": f"{len(cl)}",
+    "c3_out": f"{((cl.cpu_ratio - 1).abs() > 0.03).sum()}",
+    "c3_dev": f"{100 * (cl.cpu_ratio - 1).abs().max():.0f}%",
+    "fl16_lo": f"{tw[(tw.R == 16) & ~tw.clean].cpu_ratio.min():.3f}",
+    "fl16_hi": f"{tw[(tw.R == 16) & ~tw.clean].cpu_ratio.max():.3f}",
+    "off_n": f"{len(off)}",
+    "off_other": f"{dearer_more_other}",
+    "p4_s3x": f"{lat2.loc[('s3x', 'rmow-c'), 'read60'] / lat2.loc[('s3x', 'mor-v3'), 'read60']:.2f}",
+}
+```
+
+The rerun ran the same four configurations on the build that samples foreign load every second
+and holds writer footers for one transaction (docs/HYPOTHESES.md, 2026-10-24). The page pins
+its runs by id (`RERUN`). It was to decide P3–P5 on clean phases: those that no load sample
+overlapping them found at 0.25 CPUs of foreign load or more.
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(jobs2[["R", "node", "cpus", "foreign_mean", "foreign_max", "share_over", "clean_batches",
+             "clean60", "reads60"]]
+      .rename(columns={"R": "R (MiB)", "foreign_mean": "foreign load, mean (CPUs)",
+                       "foreign_max": "largest sample (CPUs)",
+                       "share_over": "samples at 0.25+", "clean_batches": "batches clean",
+                       "clean60": "batch-60 reads clean", "reads60": "of"})
+      .round(3).reset_index(drop=True))
+```
+
+Foreign load was lighter this time, {eval}`N2["mean_lo"]`–{eval}`N2["mean_hi"]` CPUs on average,
+and {eval}`N2["clean_b_lo"]`–{eval}`N2["clean_b_hi"]` of each run's batches were clean. At 128
+MiB, {eval}`N2["clean60_128"]` of the {eval}`N2["reads60_128"]` full reads at batch 60 were clean.
+Every `cached-p8` read was clean. The `cached` reads that P4 compares were not: MoR-v3's peaked at
+{eval}`N2["fm_mor"]` foreign CPUs and RMoW-C's at {eval}`N2["fm_rc"]`.
+
+**C1: the footer change touches only writers.** Every one of the {eval}`N2["c1_probes"]` probe
+records matches the first campaign's in every request and byte column, under every reader
+({eval}`N2["c1_probes_bad"]` differ). So does every MoR-v3 batch ({eval}`N2["c1_mor_bad"]`
+differ). TailCoW-C's batches take fewer requests in {eval}`N2["tc_fewer"]` batches and more in
+{eval}`N2["tc_more"]`: its merge read reuses a footer its locate scan read.
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(c1.pivot_table(index=["what", "arm_label"], columns="R", values="differ").reset_index())
+```
+
+**C2: RMoW's writer reads its footers every batch.** Every RMoW batch takes one footer read
+more per file live at its start: two requests for an appendable file over 1 MiB, one for a
+footer-only object or a file of at most 1 MiB, two for a split file's first version (a plain
+Parquet object). Bytes written are unchanged ({eval}`N2["c2_written"]` batches differ). The
+counts registered (3–4 more, 2 for split files) assumed two live files throughout, as at 4 MiB.
+From 16 MiB up, one file holds the table until batch 10, so only {eval}`N2["c2_reg"]` of the
+{eval}`N2["c2_batches"]` batches match them.
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(c2_table.rename(columns={"R": "R (MiB)", "files_lo": "live files, fewest",
+                               "files_hi": "most", "extra_lo": "extra requests, fewest",
+                               "extra_hi": "most", "as_registered": "batches as registered"})
+      .round(2))
+```
+
+**C3: clean is not clean enough.** A split arm reads the same bytes as its appendable twin, so
+in clean probes their read CPU should agree within 3%.
+
+```{code-cell} ipython3
+:label: scale-rerun-twins
+:tags: [remove-input]
+:class: col-page-right
+
+band3 = alt.Chart().mark_rect(opacity=0.12, color="#888").encode(y=alt.datum(0.97), y2=alt.datum(1.03))
+pts3 = (alt.Chart().mark_point(size=70, filled=True)
+        .encode(x=alt.X("step:Q", title="batch", scale=alt.Scale(domain=[0, 60])),
+                y=alt.Y("cpu_ratio:Q", title="read CPU, split ÷ appendable",
+                        scale=alt.Scale(domain=[0.85, 1.15], zero=False, clamp=True)),
+                color=alt.Color("phase load:N", title=None),
+                shape=alt.Shape("pair:N", title=None),
+                tooltip=["R", "pair", "step", "phase load", alt.Tooltip("cpu_ratio:Q", format=".3f"),
+                         alt.Tooltip("other_split_s:Q", format=".2f"),
+                         alt.Tooltip("other_twin_s:Q", format=".2f")]))
+(alt.layer(band3, pts3, data=tw).properties(width=170, height=160)
+ .facet(column=alt.Column("R:O", title="row group R (MiB)")))
+```
+
+Each point is one probe's full read under `cached`, the split arm's thread CPU over its twin's.
+The gray band is C3's ±3%; a point beyond the axis is drawn at its edge. In the
+{eval}`N2["c3_n"]` clean pairs the ratio runs from {eval}`N2["c3_lo"]` to {eval}`N2["c3_hi"]`,
+and {eval}`N2["c3_out"]` fall outside the band. Foreign load on the job's cores does not account
+for it: at 16 MiB, every pair with foreign load stays within the band
+({eval}`N2["fl16_lo"]`–{eval}`N2["fl16_hi"]`). The JVM's own work is a candidate: in {eval}`N2["off_other"]` of the
+{eval}`N2["off_n"]` pairs that disagree by more than 3%, the read with more CPU also had more of
+the process's other CPU (collection, compilation) running during it. Work on the rest of the
+socket, which the monitor does not watch, is another.
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(tw.pivot_table(index=["R", "pair", "phase load"], columns="step", values="cpu_ratio")
+      .round(3).reset_index())
+```
+
+As registered, C3's failure leaves P3–P5 undecided. At face value, over clean phases:
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(face2)
+```
+
+P3 and P5 would hold with room to spare. P4's read half would fail again
+({eval}`N2["p4_s3x"]` on S3 Express against 0.9–1.1), but its reads were not clean, and the
+twins show noise near its 10% margin.
+
 ## P1–P6 (docs/HYPOTHESES.md)
 
-**Mostly contradicted where decided; P3–P5 not decided.**
+**Mostly contradicted where decided; P3–P5 not decided, in either campaign.**
 
 - **P1, structure does not depend on scale: contradicted for MoR-v3 and TailCoW-C from 64 MiB.**
   - MoR-v3's requests per batch are {eval}`N["mor_batch_64"]`× and {eval}`N["mor_batch_128"]`×
@@ -422,15 +695,26 @@ table(face)
     larger on disk.
   - Every other arm's batches are within 25% (RMoW-B {eval}`N["rb_bytes_128"]`× at 128 MiB).
     Full reads are within {eval}`N["read_bytes_dev"]` everywhere.
-- **P3, CPU scales with bytes: not decided** (foreign load).
-- **P4, on one thread requests stop mattering: not decided** (foreign load).
-- **P5, on eight threads the largest row group bounds a read: not decided** (foreign load).
+- **P3, CPU scales with bytes: not decided.** Foreign load in the first campaign; in the rerun,
+  C3 failed.
+- **P4, on one thread requests stop mattering: not decided.** The same, and in the rerun the
+  batch-60 reads it compares were not clean.
+- **P5, on eight threads the largest row group bounds a read: not decided.** The same.
 - **P6, it fits in 24 GiB: contradicted, as the pilot foresaw.** Each arm's largest
   `stored_bytes` at 128 MiB sums to {eval}`N["st_sum"]` GiB.
 - **P6 revised (each RMoW arm under 8 GiB, the sum under 40 GiB): contradicted for RMoW-B, held
   for the sum.**
   - RMoW-B and RMoW-B-split store {eval}`N["st_rb"]` GiB each, just over 8 GiB.
   - RMoW-C stores {eval}`N["st_rc"]` GiB and MoR-v3 {eval}`N["st_mor"]` GiB.
+
+The rerun's controls (docs/HYPOTHESES.md, 2026-10-24):
+- **C1, the footer change touches only writers: held.** Every probe, and every MoR-v3 batch,
+  matches the first campaign's exactly; TailCoW-C's batches take no more requests.
+- **C2, RMoW's writer reads its footers every batch: contradicted as stated, held in substance.**
+  Each batch reads one footer per live file, exactly, but the registered counts assumed two
+  live files, which only the 4 MiB run had throughout.
+- **C3, clean means clean: contradicted.** In clean probes, a split arm's read CPU runs from
+  {eval}`N2["c3_lo"]` to {eval}`N2["c3_hi"]` times its twin's.
 
 ```{code-cell} ipython3
 :tags: [remove-input]
@@ -454,14 +738,19 @@ table(stored.assign(arm=stored.arm.map(labels)).pivot(index="arm", columns="R", 
 - **Uncompacted, RMoW-C stores {eval}`N["rc_stored_x"]`× its live bytes at 128 MiB.** It keeps
   {eval}`N["live_rc_128"]` GiB live in {eval}`N["st_rc"]` GiB. Every batch appends a merged
   region, and nothing reclaims the dead ones in this campaign.
+- **Thread CPU on havoc is noisy beyond foreign load.** With no foreign load on its cores, one
+  full read's CPU can differ from its twin's by {eval}`N2["c3_dev"]`, near P4's 10% margin. Reads
+  where more of the JVM's other work ran took more. A single phase's CPU cannot decide a
+  10% question here; sums over many phases (P3) or a margin of 25% (P5) are less exposed.
 - **A shared machine's idle CPUs are not reserved.** Leaving each job's SMT siblings idle invited
   other users' threads onto its cores. Twin arms doing the same work then differed by up to a
   fifth in CPU.
 
 ## Limits
 
-- **No CPU verdict.** P3–P5 need a run whose cores stay clean. Requests and bytes are
-  unaffected, since they depend only on the op log, config and code.
+- **No CPU verdict.** P3–P5 need a CPU measure whose noise is known to be under their margins:
+  clean cores were not enough. Requests and bytes are unaffected, since they depend only on the
+  op log, config and code.
 - **RMoW's batch requests are undercounted.** In these runs RMoW's writer kept its footers from
   one batch to the next (`writerCachesFooters`), which no Iceberg writer can, while MoR-v3's
   locate scan read each touched file's footer every batch, as it should. Writers now hold a

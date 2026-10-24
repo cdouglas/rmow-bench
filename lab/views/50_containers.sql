@@ -24,9 +24,11 @@ CREATE TABLE IF NOT EXISTS load (run_id VARCHAR, t0 DOUBLE, t1 DOUBLE, own_cpus 
 -- interval overlaps the phase's. A phase is clean when no overlapping sample reached 0.25 CPUs
 -- of foreign load, which half a CPU taken from the job's own (0.5) or a busy sibling (1) exceed;
 -- only a clean phase's CPU decides anything (docs/HYPOTHESES.md). Nested phases are matched on
--- their own intervals.
+-- their own intervals. The phase's own CPU, bytes and requests come along; to join another view
+-- by phase, match reader with IS NOT DISTINCT FROM, since batches and compactions have none.
 CREATE VIEW phase_load AS
-SELECT s.run_id, s.arm, s.step, s.phase, s.reader, s.start_ms, s.wall_ns,
+SELECT s.run_id, s.arm, s.step, s.phase, s.reader, s.start_ms, s.wall_ns, s.cpu_ns,
+       s.process_cpu_ns, s.requests, s.bytes_read, s.bytes_written,
        count(*) AS samples,
        max(l.foreign_cpus) AS foreign_max_cpus,
        max(l.sibling_busy_cpus) AS sibling_max_cpus,
