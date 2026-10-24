@@ -300,9 +300,10 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
   - layout against update handling, the `-dv` ablation, whose runs and arms were deleted once its
     conclusions were recorded
     ([docs/DESIGN.md](docs/DESIGN.md#deletion-vectors-on-an-appendable-file-an-ablation-removed)).
-- **Prepared:** the scale campaign, the 4 MiB recency setting scaled to Iceberg's defaults (128 MiB
-  row groups, 512 MiB files), to run on havoc in a container (`docker/campaigns/scale.json`,
-  [docker/README.md](docker/README.md)).
+- **Done on havoc:** the scale campaign, the 4 MiB recency setting scaled to Iceberg's defaults
+  (128 MiB row groups, 512 MiB files), in a container (`docker/campaigns/scale.json`,
+  [docker/README.md](docker/README.md); [lab/pages/scale.md](lab/pages/scale.md)). Requests,
+  bytes and storage are decided; CPU is not, as other work reached the jobs' cores.
 - **Next:** S3 Express (M3), only to check the simulation's parameters. It starts with
   `configs/s3x-calibration.json`, which needs credentials, a directory bucket and an instance in
   its zone. Split files can also run on standard S3.

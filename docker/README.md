@@ -71,7 +71,9 @@ Runs go where `bin/run.sh` puts them, `RESULTS/<label>-<config hash>/<UTC start>
 - `<job>.json`: placement, exit, run directory, and **foreign load**, the busy time of the job's
   cores (siblings included) less its own CPU time.
 
-A job with foreign load decides nothing about CPU.
+A job with foreign load decides nothing about CPU. Idle siblings do not keep other users' work
+off a job's cores: the scheduler places threads on idle CPUs. The scale campaign's three longer
+jobs saw 1.6–2.9 CPUs of it on average (lab/pages/scale.md).
 
 ## Bringing results back
 
@@ -82,8 +84,9 @@ rsync -av havoc:rmow-bench/results/campaigns/ results/campaigns/
 lab ingest
 ```
 
-The lab skips `results/campaigns/`. `runs.host` and `runs.cpu_model` tell havoc's runs from the
-laptop's. Compare CPU only between runs of one host.
+The lab reads the runner's records into `container_jobs` (one row per job and run, with its
+foreign load). `runs.host` and `runs.cpu_model` tell havoc's runs from the laptop's. Compare CPU
+only between runs of one host.
 
 ## Notes
 

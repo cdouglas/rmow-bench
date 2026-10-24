@@ -91,6 +91,7 @@ the local experiments repeats a run, so the Repetitions page has nothing to comp
 | **time travel** (reruns) | H4: does an old version read like the current one, and do dead bytes cost reads? | the 7 uncompacted configurations that read old versions, rerun 2026-10-22/23 with the split-offset fix: each time-travel read against the full read of the same state | all that ran | 7 of the above, rerun | [lab/pages/time-travel.md](../lab/pages/time-travel.md) |
 | **store latency** (`configs/sim-*`, and the existing runs) | What would each arm take on a given store? Latency simulated from what each phase records: CPU, requests and bytes. | endive's store profiles (S3 Express, S3, Azure), and a sweep of request latency × throughput; a validation run with latency injected; a 4 MiB recency run with its requests logged | MoR-v3, TailCoW-C, RMoW-B and -C, both layouts | 3 (and the 4 MiB recency and uniform runs) | [lab/pages/store-latency.md](../lab/pages/store-latency.md) |
 | **s3x calibration, local twin** (`configs/s3x-calibration-local.json`) | The requests and bytes the first S3 Express run must reproduce exactly, and its runtime. | the S3 Express calibration's settings (200k rows, 20 batches, 1 MiB row groups) on the local store, with a JIT warmup and three readers (one-footer on 1 and 8 threads, stock) | MoR-v2-file, MoR-v3, TailCoW-C, RMoW-A, -B and -C | 1 | None: a baseline. 1.8 minutes, 10,446 requests. |
+| **scale** (`configs/scale-recency-*`, on havoc) | Do the 4 MiB recency setting's requests, bytes, CPU and simulated latency hold at Iceberg's defaults (P1–P6)? | row group R = tail seal = 4, 16, 64, 128 MiB, with rows, operations per batch and files scaled by R; recency, no compaction, payload checks off, requests logged | MoR-v3, TailCoW-C, RMoW-B and -C in both layouts | 4 | [lab/pages/scale.md](../lab/pages/scale.md). CPU not decided: foreign load on three of four jobs. |
 | **dv ablation** (`configs/local-dv-*`) | H3's attribution: how much of RMoW against TailCoW is the layout, and how much the update handling (region rewrites against DVs)? | key distribution (recency, uniform); 4 MiB, no compaction | MoR-v3, CoW, TailCoW-B and -C, RMoW-A, -B and -C, RMoW-A-dv, -B-dv and -C-dv | 3, deleted | Conclusions in [DESIGN.md](DESIGN.md#deletion-vectors-on-an-appendable-file-an-ablation-removed); numbers under Retired runs. |
 
 The compaction sweep's threshold levels:
@@ -125,6 +126,10 @@ The compaction sweep's threshold levels:
 | store latency | sim-validate-s3x | recency | 1 MiB | 10 | default | 5 |
 | store latency | sim-recency-4m | recency | 4 MiB | never | — | 6 |
 | store latency | sim-recency-4m-noverify | recency | 4 MiB | never | — | 6 |
+| scale | scale-recency-rg4m | recency | 4 MiB | never | — | 6 |
+| scale | scale-recency-rg16m | recency | 16 MiB | never | — | 6 |
+| scale | scale-recency-rg64m | recency | 64 MiB | never | — | 6 |
+| scale | scale-recency-rg128m | recency | 128 MiB | never | — | 6 |
 
 "Thresholds" are only used when compaction runs, so "—" marks runs that never compact (their
 configurations carry the default values). The lab's Experiments page builds the same table from
@@ -317,6 +322,25 @@ All are local runs: requests and bytes are exact, latency is not measured.
   - Appendable RMoW's GETs hit objects of 24 appended parts on average (up to 47). At an extra
     0.1 ms per part a full read costs 3% more; the S4 spike would measure the real cost.
 
+- **At Iceberg's defaults (the scale campaign, havoc, 2026-10-23).** Four runs at row groups of
+  4, 16, 64 and 128 MiB, everything else scaled with them (lab/pages/scale.md):
+  - **The small settings flattered MoR-v3's requests.** Its per-batch data files (0.16 MiB at
+    4 MiB) cross the 1 MiB whole-file threshold between 16 and 64 MiB, after which each costs
+    three requests in a locate scan and two in a full read. MoR-v3 issues 94 requests per batch at
+    128 MiB against 43 at 4 MiB. RMoW-C stays at 6, and falls from 0.13× to 0.06× of MoR-v3's.
+    TailCoW-C's batches grow 1.5× for the same reason.
+  - **RMoW-C's bytes grow faster than the row group.** It writes 1.30× its scaled 4 MiB bytes per
+    batch at 128 MiB: the same live bytes sit in 10 row groups instead of 13, so each rewritten
+    region is larger. It writes 22× MoR-v3's bytes per batch at 128 MiB (15× at 4 MiB).
+  - **Storage.** Uncompacted, RMoW-C stores 10.8× its live bytes at 128 MiB (7.3 GiB for
+    0.67), RMoW-B 8.1 GiB; 32.6 GiB over the six arms.
+  - **CPU decides nothing.** Other users' threads ran on the three larger jobs' cores (1.6–2.9
+    CPUs on average). Split arms, which read exactly what their appendable twins read, differed
+    from them by 0.85–1.23× in read CPU, against 1% in the 4 MiB job before its last probe.
+  - P1 contradicted (MoR-v3 and TailCoW-C from 64 MiB), P2 contradicted for RMoW-C's batches
+    from 64 MiB, P6 and the revised P6's per-arm bound contradicted (RMoW-B 8.06 GiB), its sum
+    held. P3–P5 not decided.
+
 ## The hypotheses
 
 | | Claim, in short | Status |
@@ -333,10 +357,10 @@ All are local runs: requests and bytes are exact, latency is not measured.
 - **Simulate first.** Latency is simulated (lab/pages/store-latency.md), from endive's store
   measurements, over runs whose requests are logged, with payload checks off: the check is the
   harness's and costs about 70% of a read's CPU.
-- **The scale campaign, on havoc.** The 4 MiB recency setting scaled to Iceberg's defaults
-  (128 MiB row groups, 512 MiB files) through 16 and 64 MiB (`configs/scale-recency-*`,
-  `docker/campaigns/scale.json`). It runs in a container, each configuration on whole idle cores
-  (docker/README.md); hypotheses P1–P6 (docs/HYPOTHESES.md).
+- **The scale campaign's CPU half, on clean cores.** Its requests, bytes and storage are decided
+  (lab/pages/scale.md); P3–P5 need CPU from cores no other work reached. Idle SMT siblings did
+  not keep other users' threads off havoc's cores, and the runner records foreign load only as a
+  total per job, so a rerun cannot yet tell which phases it touched.
 - **S3 Express (milestone M3)**, only to check the simulation's parameters.
   - It starts with `configs/s3x-calibration.json` and the S4 spike, which need credentials, a
     directory bucket and an instance in its zone.

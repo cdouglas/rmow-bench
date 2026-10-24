@@ -38,3 +38,8 @@ select = ["source:micro"]
 select = "smoke-*"
 mark = "excluded"
 note = "in-memory smoke test of the harness"
+
+[[annotate]]
+select = "where:host = 'havoc' AND label = 'sim-validate-s3x'"
+mark = "excluded"
+note = "pipeline check of the havoc container (docker/campaigns/pipeline.json): requests and bytes match the laptop's run in 769 of 779 records, the other 10 being the split arm's stock reads, changed by the split planning"

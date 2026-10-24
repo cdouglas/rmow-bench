@@ -82,6 +82,15 @@ runs = "bench"
 file = "versions/versions.csv"
 format = "csv"
 
+# The container runner's records (docker/campaign.py), one file per job of each campaign plus the
+# campaign's progress.json: placement, run directory and foreign load (the busy time of the job's
+# cores, SMT siblings included, less its own CPU time). Per job and run in container_jobs.
+[[tables]]
+name = "container_records"
+file = "results/campaigns/*/*.json"
+format = "json"
+options = { filename = true, union_by_name = true }
+
 # analysis/plots.py's encoding: hue is the arm's family, shape the variant within it
 [style]
 family = { mor = "#2a78d6", cow = "#eb6834", rmow = "#1baf7a", rmowsplit = "#e87ba4" }
