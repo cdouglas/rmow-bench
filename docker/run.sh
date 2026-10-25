@@ -83,7 +83,9 @@ run_args() {
   user_args
   local host_os
   host_os="$(. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-}")"
-  RUN_ARGS=(--network none "${USER_ARGS[@]}"
+  # CAP_PERFMON lets Docker's seccomp profile pass perf_event_open, for each thread's instruction
+  # counts (ThreadCounters); the host must also allow it (kernel.perf_event_paranoid <= 2)
+  RUN_ARGS=(--network none --cap-add PERFMON "${USER_ARGS[@]}"
     -v "$RESULTS:/results" -v "$STORE:/store"
     -e RMOW_IMAGE="$(docker image inspect -f '{{.Id}}' "$IMAGE")"
     -e RMOW_HOST_NAME="$(hostname)" -e RMOW_HOST_OS="$host_os"

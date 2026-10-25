@@ -102,7 +102,13 @@ bin/matrix.sh --build configs/local-compact-*.json   # several, from a build sna
   needed only to check the simulation's parameters.
 - **Requests and bytes are deterministic** in the op log, config and code. Two runs of one config
   must match exactly (`steps_diff`, or `analysis/compare_runs.py`). A mismatch is a bug, not
-  noise. CPU is noisy: under 2% decides nothing.
+  noise.
+- **CPU is measured in instructions** where the kernel allows counters (`ThreadCounters`;
+  `kernel.perf_event_paranoid` at most 2). Thread CPU time moves with the clock: the same read
+  repeated back to back took up to twice the time on this laptop. A phase's work is its
+  user-mode instructions; its time for simulated latency is that work at its arm's pace
+  (`phase_work.work_ms`, lab/pages/cpu-measure.md). Without counters, thread CPU time under 10%
+  decides nothing for one phase.
 - **The I/O parity rules in the README** guard against biases found in Iceberg's code. A change
   to any arm's read or write path must keep them, and the tests that check them must pass.
 - **Hypotheses come before the runs that decide them.** Add each one to `docs/HYPOTHESES.md` in a

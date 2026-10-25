@@ -11,6 +11,7 @@ project:
     - file: pages/time-travel.md
     - file: pages/store-latency.md
     - file: pages/scale.md
+    - file: pages/cpu-measure.md
     - file: pages/micro.md
     - file: pages/compare.md
   exclude:

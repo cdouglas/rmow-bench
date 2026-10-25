@@ -92,6 +92,7 @@ the local experiments repeats a run, so the Repetitions page has nothing to comp
 | **store latency** (`configs/sim-*`, and the existing runs) | What would each arm take on a given store? Latency simulated from what each phase records: CPU, requests and bytes. | endive's store profiles (S3 Express, S3, Azure), and a sweep of request latency × throughput; a validation run with latency injected; a 4 MiB recency run with its requests logged | MoR-v3, TailCoW-C, RMoW-B and -C, both layouts | 3 (and the 4 MiB recency and uniform runs) | [lab/pages/store-latency.md](../lab/pages/store-latency.md) |
 | **s3x calibration, local twin** (`configs/s3x-calibration-local.json`) | The requests and bytes the first S3 Express run must reproduce exactly, and its runtime. | the S3 Express calibration's settings (200k rows, 20 batches, 1 MiB row groups) on the local store, with a JIT warmup and three readers (one-footer on 1 and 8 threads, stock) | MoR-v2-file, MoR-v3, TailCoW-C, RMoW-A, -B and -C | 1 | None: a baseline. 1.8 minutes, 10,446 requests. |
 | **scale** (`configs/scale-recency-*`, on havoc) | Do the 4 MiB recency setting's requests, bytes, CPU and simulated latency hold at Iceberg's defaults (P1–P6)? | row group R = tail seal = 4, 16, 64, 128 MiB, with rows, operations per batch and files scaled by R; recency, no compaction, payload checks off, requests logged | MoR-v3, TailCoW-C, RMoW-B and -C in both layouts | 4, and 4 in the rerun | [lab/pages/scale.md](../lab/pages/scale.md). CPU not decided: foreign load on three of four jobs, and in the rerun (judged per phase) noise beyond it. |
+| **cpu measure** (`configs/cal-cpu-recency-4m.json`) | How to measure CPU so that one phase can decide a 10% question (M1–M4)? | the measure: thread CPU time against each thread's user-mode instructions and cycles (`perf_event_open`); the 4 MiB scale setting, all six arms, `cached` and `cached-p8`, run twice | all six of the scale campaign | 2 | [lab/pages/cpu-measure.md](../lab/pages/cpu-measure.md) |
 | **dv ablation** (`configs/local-dv-*`) | H3's attribution: how much of RMoW against TailCoW is the layout, and how much the update handling (region rewrites against DVs)? | key distribution (recency, uniform); 4 MiB, no compaction | MoR-v3, CoW, TailCoW-B and -C, RMoW-A, -B and -C, RMoW-A-dv, -B-dv and -C-dv | 3, deleted | Conclusions in [DESIGN.md](DESIGN.md#deletion-vectors-on-an-appendable-file-an-ablation-removed); numbers under Retired runs. |
 
 The compaction sweep's threshold levels:
@@ -131,6 +132,7 @@ The compaction sweep's threshold levels:
 | scale | scale-recency-rg64m | recency | 64 MiB | never | — | 6 |
 | scale | scale-recency-rg128m | recency | 128 MiB | never | — | 6 |
 | scale rerun | scale-recency-rg{4,16,64,128}m, from 247f054 | recency | 4–128 MiB | never | — | 6 |
+| cpu measure | cal-cpu-recency-4m (twice) | recency | 4 MiB | never | — | 6 |
 
 "Thresholds" are only used when compaction runs, so "—" marks runs that never compact (their
 configurations carry the default values). The lab's Experiments page builds the same table from
@@ -365,6 +367,20 @@ The ratios below that compare RMoW's batch requests with MoR-v3's are low by tha
     RMoW-C's batches from 64 MiB. P6, and the revised P6's per-arm bound, contradicted (RMoW-B
     8.06 GiB); its sum held. P3–P5 not decided.
 
+- **Measuring CPU (`cal-cpu-recency-4m`, twice, 2026-10-25).** Thread CPU time is not a measure
+  of work on this laptop. The same read repeated back to back took up to twice the time, and
+  twin reads differed by up to 19% (lab/pages/cpu-measure.md).
+  - **Instructions are.** Each thread's user-mode instructions put twin reads within 0.17% and
+    twin batches within a 0.14% standard deviation (M1 held). The same phase in two runs counts
+    within 1.3% (M2 held).
+  - **Time needs a pace, and pace is noisy.** Modeled time (instructions × the arm's median
+    cycles per instruction ÷ the clock) put twins up to 3.9% apart (M3, 2%, contradicted). Read
+    CPI varies by 3–7% across probes (M4, 5%, contradicted).
+  - **Pace differs by arm where the code differs.** RMoW-C's batches run at 1.12–1.13× MoR-v3's
+    cycles per instruction, so one pace for all arms would not do.
+  - **Already ruled out** in scratch: a heap collection before each phase (worse), the cheapest
+    of three runs, a pre-touched heap, user-mode time.
+
 ## The hypotheses
 
 | | Claim, in short | Status |
@@ -381,10 +397,10 @@ The ratios below that compare RMoW's batch requests with MoR-v3's are low by tha
 - **Simulate first.** Latency is simulated (lab/pages/store-latency.md), from endive's store
   measurements, over runs whose requests are logged, with payload checks off: the check is the
   harness's and costs about 70% of a read's CPU.
-- **A CPU measure fit for P3–P5.** Clean cores were not enough: one read's thread CPU still
-  varies by up to 9% between identical twins on havoc (lab/pages/scale.md, the rerun). P3–P5
-  need a measure whose noise is known to be under their margins, checked by the same twin
-  control, before another run.
+- **P3–P5 on the instruction measure.** Work is steady to a fraction of a percent and pace to a
+  few percent (lab/pages/cpu-measure.md), enough for P3 (in work alone) and P5's 25%, and for
+  P4's 10% only away from its threshold. The scale campaign needs a host whose kernel allows
+  counters: havoc's `perf_event_paranoid` is 4 (an admin can set it to 2), or this laptop.
 - **S3 Express (milestone M3)**, only to check the simulation's parameters.
   - It starts with `configs/s3x-calibration.json` and the S4 spike, which need credentials, a
     directory bucket and an instance in its zone.

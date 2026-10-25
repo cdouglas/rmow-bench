@@ -362,3 +362,41 @@ overlapping it reached 0.25 CPUs of foreign load (`phase_load.clean`).
   within 3% of its appendable twin's. The two read the same bytes, and in the first campaign's
   4 MiB job, before its foreign load, they agreed within 1%. If they do not agree, the noise is
   not foreign load, and P3–P5 stay undecided.
+
+## Added 2026-10-24, before calibrating the CPU measure
+
+**Why.** The scale rerun left P3–P5 undecided. In clean phases, twin reads' thread CPU still
+differed by up to 9% (lab/pages/scale.md). Exploratory runs on this laptop, kept in scratch,
+traced the noise to the clock:
+- **The same read, back to back:** three runs of one read took a median 4–11% apart in thread
+  CPU time, and once twice as long.
+- **Nothing in the JVM helped.** A heap collection before each phase made the twins agree less
+  (standard deviation 22%, against 5–7%). Keeping the cheapest of three runs, a fixed pre-touched
+  heap, and user-mode time each left them 3–8% apart.
+- **Instructions did not move.** A thread's user-mode instructions put the twins within 0.6%.
+  Its cycles, 5% apart, still move with what the core shares.
+
+So the measure becomes:
+- **Work:** a phase's user-mode instructions, its thread's and its read pool's (`ThreadCounters`,
+  through `perf_event_open`).
+- **Time,** for simulated latency: work × the median cycles per instruction of that arm's phases
+  of that kind (and reader) in the run, ÷ the run's median clock (`phase_work.work_ms`).
+- **Left out:** kernel time, 1–6% of thread CPU, which is mostly the local store's reads.
+
+**Setup.** `configs/cal-cpu-recency-4m.json` is the scale campaign's 4 MiB setting with:
+- all six arms;
+- the readers `cached` and `cached-p8`;
+- a probe every 5 batches, and requests logged.
+
+It runs twice on this laptop, one run after the other.
+
+**Predictions.** Their thresholds come from the scratch runs; these runs check them.
+- **M1: twins agree in work.** At every probe, each split arm's full-read instructions are
+  within 1% of its appendable twin's, under both readers. Across batches, the ratio of a split
+  arm's batch instructions to its twin's has a standard deviation under 0.5%.
+- **M2: work repeats across runs.** From batch 10 on, every full read and batch counts within 2%
+  of the same phase's instructions in the other run.
+- **M3: modeled time is steady enough to decide.** Twins' `work_ms` for full reads under `cached`
+  are within 2% at every probe: the rerun's C3, on the new measure.
+- **M4: pace is steady.** Each arm's cycles per instruction for full reads under `cached` varies
+  by under 5% across a run's probes (coefficient of variation).

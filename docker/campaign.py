@@ -7,8 +7,11 @@
 A campaign (docker/campaigns/*.json) names its jobs, one configuration each, with the heap each
 needs, plus flags for every run and how many physical cores a job gets:
 
-  {"description": "...", "flags": ["--log-requests"], "cores_per_job": 10,
+  {"description": "...", "flags": ["--log-requests"], "cores_per_job": 10, "counters": true,
    "jobs": [{"config": "configs/x.json", "heap": "32g", "store_gib": 20}, ...]}
+
+`counters` says the runs need each thread's instruction counts (ThreadCounters, the CPU measure):
+the campaign does not start unless the host allows perf_event_open (perf_event_paranoid <= 2).
 
 **Placement.** A job owns `cores_per_job` whole physical cores inside one NUMA node, every SMT
 sibling of each, and runs on the first `threads_per_core` threads of each (1 by default: the
@@ -292,6 +295,12 @@ def run(campaign_file):
     if not any(len(c) >= per for c in nodes.values()):
         sys.exit(f"no NUMA node has {per} whole cores in {compress(allowed)}: lower CORES_PER_JOB")
 
+    if spec.get("counters"):
+        paranoid = read("/proc/sys/kernel/perf_event_paranoid", "?")
+        if not paranoid.lstrip("-").isdigit() or int(paranoid) > 2:
+            sys.exit(f"this campaign needs instruction counters, and kernel.perf_event_paranoid is "
+                     f"{paranoid}: an admin can allow them with "
+                     f"`sysctl -w kernel.perf_event_paranoid=2`")
     jobs = [Job(j, out) for j in spec["jobs"]]
     for job in jobs:
         job.interference = {**INTERFERENCE, **spec.get("interference", {})}

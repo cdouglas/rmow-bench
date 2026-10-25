@@ -30,6 +30,10 @@ select = ["where:label LIKE 'scale-%' AND git_sha LIKE '525be1c%'"]
 title = "The scale campaign rerun, foreign load per phase and writer footers per transaction (docker/campaigns/scale-rerun.json)"
 select = ["where:label LIKE 'scale-%' AND git_sha LIKE '247f054%'"]
 
+[campaigns.cpu-measure]
+title = "Calibration of the CPU measure: instructions and pace (lab/pages/cpu-measure.md)"
+select = ["cal-cpu-*"]
+
 [campaigns.s3x]
 title = "S3 Express: the calibration run and its local twin (configs/s3x-calibration*.json)"
 select = ["s3x-*"]

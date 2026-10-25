@@ -54,23 +54,41 @@ def _expected(median_ms, sigma):
     return median_ms * np.exp(sigma ** 2 / 2)
 
 
-def replay(run_id, profile, parallelism=None):
+def replay(run_id, profile, parallelism=None, cpu="time"):
     """Simulated latency (ms) of each outermost phase of `run_id` on the store `profile` (a dict
     or row with store_profiles' columns, plus an optional part_ms). `parallelism` overrides the
-    threads of every reader model that ran on a pool. Returns arm, step, phase, reader, the
-    phase's measured wall and CPU (ms), and its simulated latency: NaN for a phase that appends
-    on a store without append (a NULL append_ms)."""
+    threads of every reader model that ran on a pool. `cpu` is "time" (each thread's measured
+    CPU) or "work" (its instructions at its arm's pace, as phase_work times a phase; needs a run
+    with counts). Returns arm, step, phase, reader, the phase's measured wall and CPU (ms), and
+    its simulated latency: NaN for a phase that appends on a store without append (a NULL
+    append_ms)."""
     import heapq
 
     ev = q("""
         SELECT arm, step, phase, coalesce(reader, '') AS reader, seq, task, kind, object,
-               "offset", length, cpu_ns
+               "offset", length, cpu_ns, instructions
         FROM requests WHERE run_id = $r ORDER BY arm, seq""", r=run_id)
     steps = q("""
-        SELECT arm, step, phase, coalesce(reader, '') AS reader, wall_ns / 1e6 AS wall_ms,
-               cpu_ns / 1e6 AS cpu_ms
-        FROM steps WHERE run_id = $r
-          AND phase IN ('batch', 'compact', 'read_full', 'read_recent', 'read_old')""", r=run_id)
+        SELECT s.arm, s.step, s.phase, coalesce(s.reader, '') AS reader, s.wall_ns / 1e6 AS wall_ms,
+               s.cpu_ns / 1e6 AS cpu_ms, s.instructions, w.cpi, w.ghz
+        FROM steps s LEFT JOIN phase_work w
+          ON w.run_id = s.run_id AND w.arm = s.arm AND w.step = s.step AND w.phase = s.phase
+         AND w.reader IS NOT DISTINCT FROM s.reader
+        WHERE s.run_id = $r
+          AND s.phase IN ('batch', 'compact', 'read_full', 'read_recent', 'read_old')""", r=run_id)
+    if cpu == "work":
+        if steps.instructions.isna().all():
+            raise ValueError(f"{run_id} has no instruction counts")
+        # a thread's work at its phase's pace: instructions x cpi / clock, in ms
+        pace = steps.set_index(["arm", "step", "phase", "reader"])
+        ms_per_instruction = (pace.cpi / pace.ghz / 1e6).rename("ms_per_instruction")
+        ev = ev.merge(ms_per_instruction.reset_index(), on=["arm", "step", "phase", "reader"],
+                      how="left")
+        ev["cpu_ns"] = np.where(ev.kind == "task", ev.instructions * ev.ms_per_instruction * 1e6,
+                                ev.cpu_ns)
+        steps["cpu_ms"] = steps.instructions * steps.cpi / steps.ghz / 1e6
+    elif cpu != "time":
+        raise ValueError(f"cpu is time or work, not {cpu}")
     threads = dict(q("SELECT reader, parallelism FROM run_readers WHERE run_id = $r",
                      r=run_id).itertuples(index=False))
     pr = dict(profile)

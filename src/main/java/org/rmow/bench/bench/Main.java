@@ -160,6 +160,9 @@ public final class Main {
     h.put("cpu_model", procField("/proc/cpuinfo", "model name"));
     h.put("cpus", Runtime.getRuntime().availableProcessors());
     h.put("cpus_allowed", procField("/proc/self/status", "Cpus_allowed_list"));
+    // whether phases carry instructions and cycles, and if not, why
+    h.put("thread_counters",
+        ThreadCounters.unavailable() == null ? "available" : ThreadCounters.unavailable());
     h.put("max_heap_bytes", Runtime.getRuntime().maxMemory());
     if (System.getProperty("rmow.placement") != null) {
       h.put("container", true);

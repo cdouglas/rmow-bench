@@ -35,6 +35,7 @@ import org.apache.iceberg.io.IOUtil;
 import org.apache.iceberg.io.RangeReadable;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.parquet.format.FileMetaData;
+import org.rmow.bench.bench.ThreadCounters;
 import org.rmow.bench.io.IoTrace;
 import org.rmow.bench.oracle.TableHash;
 import org.rmow.bench.rmow.FooterCodec;
@@ -282,28 +283,47 @@ final class Scans {
   }
 
   /**
-   * Runs a read's tasks on the reader's pool, or one after another without one. When the trace
-   * logs requests, each task's requests carry its number, and its end its thread CPU.
+   * Runs a read's tasks on the reader's pool, or one after another without one. A task on the
+   * pool adds its thread CPU to the trace's pool CPU (the arm's thread counts the others itself).
+   * When the trace logs requests, each task's requests carry its number, and its end its thread
+   * CPU.
    */
   private static TableHash run(ArmContext ctx, Reader reader, List<Callable<TableHash>> tasks)
       throws IOException {
     IoTrace trace = ctx.io().trace();
-    if (trace.logging()) {
-      boolean inline = reader.pool() == null;
-      int group = trace.nextTasks(tasks.size());
+    boolean inline = reader.pool() == null;
+    boolean logging = trace.logging();
+    if (logging || !inline) {
+      int group = logging ? trace.nextTasks(tasks.size()) : 0;
       List<Callable<TableHash>> tagged = new ArrayList<>(tasks.size());
       for (int i = 0; i < tasks.size(); i++) {
         int id = group + i;
         Callable<TableHash> t = tasks.get(i);
         tagged.add(
             () -> {
-              IoTrace.enterTask(id);
+              if (logging) {
+                IoTrace.enterTask(id);
+              }
               long cpu0 = MX.getCurrentThreadCpuTime();
+              long user0 = MX.getCurrentThreadUserTime();
+              ThreadCounters.Sample counts0 = ThreadCounters.now();
               try {
                 return t.call();
               } finally {
-                trace.taskDone(id, group, MX.getCurrentThreadCpuTime() - cpu0, inline);
-                IoTrace.exitTask();
+                long cpu = MX.getCurrentThreadCpuTime() - cpu0;
+                ThreadCounters.Sample d =
+                    counts0 == null ? null : ThreadCounters.now().minus(counts0);
+                if (!inline) {
+                  trace.addPoolCpu(cpu, MX.getCurrentThreadUserTime() - user0);
+                  if (d != null) {
+                    trace.addPoolCounts(d.instructions(), d.cycles());
+                  }
+                }
+                if (logging) {
+                  trace.taskDone(id, group, cpu, d == null ? -1 : d.instructions(),
+                      d == null ? -1 : d.cycles(), inline);
+                  IoTrace.exitTask();
+                }
               }
             });
       }

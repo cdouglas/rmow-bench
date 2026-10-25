@@ -30,15 +30,18 @@ WHERE key = 'reads.readers';
 
 -- One row per run, arm, step, phase, reader and profile: the phase's simulated latency in ms,
 -- split into CPU, requests and transfer. Only phases on one thread: batches, compactions, and
--- probes under a reader model with parallelism 1.
+-- probes under a reader model with parallelism 1. cpu_ms is the phase's thread CPU; work_ms, for
+-- runs with instruction counts, its work at its arm's pace (phase_work), the steadier measure.
 CREATE VIEW phase_latency AS
 WITH s AS (
-    SELECT s.*, coalesce(rr.parallelism, 1) AS parallelism
+    SELECT s.*, coalesce(rr.parallelism, 1) AS parallelism, w.work_ms
     FROM steps s LEFT JOIN run_readers rr ON rr.run_id = s.run_id AND rr.reader = s.reader
+    LEFT JOIN phase_work w ON w.run_id = s.run_id AND w.arm = s.arm AND w.step = s.step
+                          AND w.phase = s.phase AND w.reader IS NOT DISTINCT FROM s.reader
     WHERE s.phase IN ('batch', 'compact', 'read_full', 'read_recent', 'read_old')
 )
 SELECT s.run_id, s.arm, s.step, s.phase, s.reader, p.profile,
-       s.cpu_ns / 1e6 AS cpu_ms,
+       s.cpu_ns / 1e6 AS cpu_ms, s.work_ms,
        (s.gets + s.heads) * p.get_ms * exp(p.get_sigma ^ 2 / 2)
          + (s.puts + s.deletes) * p.put_ms * exp(p.put_sigma ^ 2 / 2)
          + CASE WHEN s.appends = 0 THEN 0

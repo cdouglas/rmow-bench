@@ -28,16 +28,24 @@ public final class Phases {
 
   /**
    * One phase's measurements: when it started (epoch milliseconds, the clock a campaign's load
-   * samples use), thread CPU of the arm's thread, and process CPU (which also counts read-pool
-   * threads, and the JVM's own GC and JIT threads). {@code extra} holds phase-specific values
-   * (e.g. rows read); {@code events}, the logged requests of an outermost phase.
+   * samples use), thread CPU of the arm's thread, the thread CPU of its split tasks that ran on a
+   * read pool, the user-mode part of each (without the kernel's: page faults, the local store's
+   * reads), and process CPU (which also counts the JVM's own GC and JIT threads). {@code counts}
+   * and {@code poolCounts} are the same threads' user-mode instructions and cycles ({@link
+   * ThreadCounters}), null without counters. {@code extra} holds phase-specific values (e.g. rows
+   * read); {@code events}, the logged requests of an outermost phase.
    */
   public record Measured(
       String phase,
       long startMs,
       long wallNs,
       long cpuNs,
+      long poolCpuNs,
+      long userNs,
+      long poolUserNs,
       long processCpuNs,
+      ThreadCounters.Sample counts,
+      ThreadCounters.Sample poolCounts,
       IoTrace.Counters io,
       Map<String, Object> extra,
       List<IoTrace.Event> events) {}
@@ -88,6 +96,12 @@ public final class Phases {
     IoTrace.Counters before = trace.snapshot();
     S3Recorder.Counts sdk0 = recorder == null ? null : recorder.snapshot();
     long proc0 = OS.getProcessCpuTime();
+    long pool0 = trace.poolCpuNs();
+    long poolUser0 = trace.poolUserNs();
+    long user0 = MX.getCurrentThreadUserTime();
+    ThreadCounters.Sample pc0 =
+        new ThreadCounters.Sample(trace.poolInstructions(), trace.poolCycles());
+    ThreadCounters.Sample counts0 = ThreadCounters.now();
     long cpu0 = MX.getCurrentThreadCpuTime();
     long startMs = System.currentTimeMillis();
     long t0 = System.nanoTime();
@@ -99,6 +113,14 @@ public final class Phases {
     }
     long wall = System.nanoTime() - t0;
     long cpu = MX.getCurrentThreadCpuTime() - cpu0;
+    long user = MX.getCurrentThreadUserTime() - user0;
+    long pool = trace.poolCpuNs() - pool0;
+    long poolUser = trace.poolUserNs() - poolUser0;
+    ThreadCounters.Sample counts = counts0 == null ? null : ThreadCounters.now().minus(counts0);
+    ThreadCounters.Sample poolCounts =
+        counts0 == null
+            ? null
+            : new ThreadCounters.Sample(trace.poolInstructions(), trace.poolCycles()).minus(pc0);
     long proc = OS.getProcessCpuTime() - proc0;
     if (recorder != null) {
       extra.putAll(recorder.snapshot().minus(sdk0).fields());
@@ -106,7 +128,8 @@ public final class Phases {
     List<IoTrace.Event> events = outermost && trace.logging() ? trace.drainEvents() : List.of();
     measured.add(
         new Measured(
-            phase, startMs, wall, cpu, proc, trace.snapshot().minus(before), extra, events));
+            phase, startMs, wall, cpu, pool, user, poolUser, proc, counts, poolCounts,
+            trace.snapshot().minus(before), extra, events));
     return result;
   }
 

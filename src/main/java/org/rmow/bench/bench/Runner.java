@@ -336,6 +336,15 @@ public final class Runner {
       m.put("start_ms", p.startMs());
       m.put("wall_ns", p.wallNs());
       m.put("cpu_ns", p.cpuNs());
+      m.put("pool_cpu_ns", p.poolCpuNs());
+      m.put("user_ns", p.userNs());
+      m.put("pool_user_ns", p.poolUserNs());
+      if (p.counts() != null) {
+        m.put("instructions", p.counts().instructions());
+        m.put("cycles", p.counts().cycles());
+        m.put("pool_instructions", p.poolCounts().instructions());
+        m.put("pool_cycles", p.poolCounts().cycles());
+      }
       m.put("process_cpu_ns", p.processCpuNs());
       IoTrace.Counters c = p.io();
       m.put("requests", c.requests());
@@ -375,6 +384,10 @@ public final class Runner {
       m.put("offset", e.offset());
       m.put("length", e.length());
       m.put("cpu_ns", e.cpuNs());
+      if (e.instructions() >= 0) {
+        m.put("instructions", e.instructions());
+        m.put("cycles", e.cycles());
+      }
       requestsOut.write(json.writeValueAsString(m));
       requestsOut.newLine();
     }

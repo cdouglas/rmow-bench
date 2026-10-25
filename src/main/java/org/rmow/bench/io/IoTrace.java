@@ -17,12 +17,21 @@ public final class IoTrace {
    * One storage operation, kept only when event logging is on (tests, parity assertions and the
    * request log). {@code seq} orders an arm's events, and {@code task} is the split task the
    * request ran in ({@link #enterTask}), or -1 outside one. A {@link Kind#TASK} event closes a
-   * task: {@code cpuNs} is its thread CPU, {@code offset} its group (the first task id of the
-   * tasks scheduled together), and {@code length} is 1 if it ran on the phase's own thread, 0 on
-   * a read pool's.
+   * task: {@code cpuNs} is its thread CPU, {@code instructions} and {@code cycles} its user-mode
+   * counts ({@code ThreadCounters}; -1 without counters), {@code offset} its group (the first
+   * task id of the tasks scheduled together), and {@code length} is 1 if it ran on the phase's own
+   * thread, 0 on a read pool's.
    */
   public record Event(
-      long seq, int task, Kind kind, String path, long offset, long length, long cpuNs) {}
+      long seq,
+      int task,
+      Kind kind,
+      String path,
+      long offset,
+      long length,
+      long cpuNs,
+      long instructions,
+      long cycles) {}
 
   public enum Kind {
     GET_RANGE, // a bounded ranged GET (RangeReadable.readFully/readTail/readVectored)
@@ -61,6 +70,10 @@ public final class IoTrace {
   private final LongAdder appendBytes = new LongAdder();
   private final LongAdder deletes = new LongAdder();
   private final List<Event> events = Collections.synchronizedList(new ArrayList<>());
+  private final LongAdder poolCpu = new LongAdder();
+  private final LongAdder poolUser = new LongAdder();
+  private final LongAdder poolInstructions = new LongAdder();
+  private final LongAdder poolCycles = new LongAdder();
   private final AtomicLong seq = new AtomicLong();
   private final AtomicLong taskIds = new AtomicLong();
   private volatile boolean logEvents = false;
@@ -82,19 +95,54 @@ public final class IoTrace {
     }
   }
 
+  /**
+   * Adds the thread CPU of a split task that ran on a read pool, not the arm's own thread, and
+   * the part of it spent in user mode.
+   */
+  public void addPoolCpu(long cpuNs, long userNs) {
+    poolCpu.add(cpuNs);
+    poolUser.add(userNs);
+  }
+
+  /** The thread CPU of every split task that has run on a read pool. */
+  public long poolCpuNs() {
+    return poolCpu.sum();
+  }
+
+  /** The user-mode part of {@link #poolCpuNs}. */
+  public long poolUserNs() {
+    return poolUser.sum();
+  }
+
+  /** Adds a pool task's user-mode instructions and cycles (ThreadCounters). */
+  public void addPoolCounts(long instructions, long cycles) {
+    poolInstructions.add(instructions);
+    poolCycles.add(cycles);
+  }
+
+  public long poolInstructions() {
+    return poolInstructions.sum();
+  }
+
+  public long poolCycles() {
+    return poolCycles.sum();
+  }
+
   /** Reserves {@code n} task ids, unique in this trace; returns the first. */
   public int nextTasks(int n) {
     return (int) taskIds.getAndAdd(n);
   }
 
   /**
-   * Logs the end of split task {@code task} of {@code group}: its thread CPU, and whether it ran
-   * inline.
+   * Logs the end of split task {@code task} of {@code group}: its thread CPU and user-mode
+   * instructions and cycles (-1 without counters), and whether it ran inline.
    */
-  public void taskDone(int task, int group, long cpuNs, boolean inline) {
+  public void taskDone(
+      int task, int group, long cpuNs, long instructions, long cycles, boolean inline) {
     if (logEvents) {
       events.add(
-          new Event(seq.getAndIncrement(), task, Kind.TASK, "", group, inline ? 1 : 0, cpuNs));
+          new Event(seq.getAndIncrement(), task, Kind.TASK, "", group, inline ? 1 : 0, cpuNs,
+              instructions, cycles));
     }
   }
 
@@ -130,7 +178,9 @@ public final class IoTrace {
       default -> throw new IllegalArgumentException("Not a request: " + kind);
     }
     if (logEvents) {
-      events.add(new Event(seq.getAndIncrement(), CURRENT_TASK.get(), kind, path, offset, length, 0));
+      events.add(
+          new Event(seq.getAndIncrement(), CURRENT_TASK.get(), kind, path, offset, length, 0, -1,
+              -1));
     }
   }
 
@@ -139,7 +189,8 @@ public final class IoTrace {
     getStreamBytes.add(n);
     if (logEvents) {
       events.add(
-          new Event(seq.getAndIncrement(), CURRENT_TASK.get(), Kind.STREAM_BYTES, path, -1, n, 0));
+          new Event(seq.getAndIncrement(), CURRENT_TASK.get(), Kind.STREAM_BYTES, path, -1, n, 0,
+              -1, -1));
     }
   }
 

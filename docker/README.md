@@ -104,6 +104,12 @@ only between runs of one host.
 - **The build is part of the record.** The image is a commit: `build` sends `git archive HEAD`,
   and `start` warns when the checkout has moved on since. Rebuild after pulling.
 - **No network.** Runs use the local store (`--network none`); only the build downloads.
+- **Instruction counts need the host's leave.** The CPU measure counts each thread's user-mode
+  instructions (`ThreadCounters`, through `perf_event_open`). The container gets `CAP_PERFMON`,
+  which Docker's seccomp profile asks for, but the host must also allow unprivileged counting:
+  `kernel.perf_event_paranoid` at most 2 (an admin: `sysctl -w kernel.perf_event_paranoid=2`).
+  havoc's is 4. A campaign with `"counters": true` will not start without it, and each run's
+  manifest says whether it had counts (`host.thread_counters`).
 - **Interrupted runs** leave a run directory without `finished` in its manifest. `status` lists
   it, and the lab ignores it; delete it by hand. A job's leftover objects are deleted when it
   starts again.

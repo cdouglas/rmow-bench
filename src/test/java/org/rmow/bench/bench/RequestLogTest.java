@@ -1,6 +1,7 @@
 package org.rmow.bench.bench;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -202,6 +203,48 @@ class RequestLogTest {
     }
     assertThat(mor).isEqualTo(4);
     assertThat(reads.get("transaction").keySet()).anyMatch(k -> k.startsWith("mor-v3 "));
+  }
+
+  @Test
+  void phasesCountTheirInstructions(@TempDir Path dir) throws IOException {
+    // ThreadCounters: every timed phase counts its thread's user-mode instructions and cycles, a
+    // read on a pool also its tasks'; the request log's split tasks carry theirs, and a pool's add
+    // up to its phase's pool counts exactly. Needs perf_event_open (perf_event_paranoid <= 2)
+    assumeTrue(ThreadCounters.unavailable() == null, "no counters: " + ThreadCounters.unavailable());
+    BenchConfig cfg = config(dir);
+    BenchConfig.ReaderSpec pooled = BenchConfig.ReaderSpec.cached();
+    pooled.name = "cached-p4";
+    pooled.parallelism = 4;
+    cfg.reads.readers = List.of(BenchConfig.ReaderSpec.cached(), pooled);
+    List<JsonNode> steps = run(cfg, dir);
+    Map<String, Long> taskInstructions = new HashMap<>();
+    for (JsonNode e : lines(dir.resolve("requests.jsonl"))) {
+      if (e.get("kind").asText().equals("task")) {
+        assertThat(e.get("instructions").asLong()).as(key(e)).isPositive();
+        assertThat(e.get("cycles").asLong()).as(key(e)).isPositive();
+        if (e.get("length").asLong() == 0) { // ran on the pool
+          taskInstructions.merge(key(e), e.get("instructions").asLong(), Long::sum);
+        }
+      }
+    }
+    int pooledReads = 0;
+    for (JsonNode s : steps) {
+      if (!s.hasNonNull("wall_ns")) {
+        continue;
+      }
+      String at = key(s);
+      assertThat(s.get("instructions").asLong()).as(at).isPositive();
+      assertThat(s.get("cycles").asLong()).as(at).isPositive();
+      boolean pool = s.hasNonNull("reader") && s.get("reader").asText().equals("cached-p4");
+      if (pool && s.get("gets").asLong() > 0) {
+        assertThat(s.get("pool_instructions").asLong()).as(at).isPositive()
+            .isEqualTo(taskInstructions.get(at));
+        pooledReads++;
+      } else {
+        assertThat(s.get("pool_instructions").asLong()).as(at).isZero();
+      }
+    }
+    assertThat(pooledReads).isPositive();
   }
 
   @Test
