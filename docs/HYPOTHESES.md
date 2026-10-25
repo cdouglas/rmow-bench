@@ -400,3 +400,42 @@ It runs twice on this laptop, one run after the other.
   are within 2% at every probe: the rerun's C3, on the new measure.
 - **M4: pace is steady.** Each arm's cycles per instruction for full reads under `cached` varies
   by under 5% across a run's probes (coefficient of variation).
+
+## Added 2026-10-25, before the scale campaign on the instruction measure, on this laptop
+
+**Setup.** The four scale configurations, `configs/scale-recency-rg{4,16,64,128}m.json`, run one
+after another on this laptop, from a build snapshot of `dafdc1a`. havoc's kernel does not allow
+counters (`perf_event_paranoid` 4). CPU is measured as in lab/pages/cpu-measure.md:
+- **work:** a phase's user-mode instructions;
+- **modeled time:** work at its arm's own pace (`work_ms`).
+
+The laptop has no foreign-load monitor. Instructions do not depend on foreign load, and the
+noise floors below absorb what it does to pace.
+
+**Noise floors.** Each run gives its own, from its twins, which do the same work:
+- **F_read:** the largest |split ÷ appendable − 1| of modeled time for full reads under
+  `cached`, over the run's probes and both pairs;
+- **F_batch:** the same for the mean modeled batch time over the run's batches;
+- **F_p8:** the same for full reads under `cached-p8`, in the replay on S3 Express
+  (`figures.replay(cpu="work")`).
+
+A comparison against a threshold decides only if the measured value lies further from the
+threshold than the floor. Within the floor, it is undecided.
+
+**How P3–P5 (2026-10-23) are decided:**
+- **P3, in work.** Instructions per MiB read (full reads under `cached`, every probe after the
+  initial load) and per MiB written (batches) at 128 MiB are within 30% of the 4 MiB point's. A
+  phase's pace may change with scale too, so modeled time per MiB is reported beside it, but
+  does not decide.
+- **P4, in modeled time,** in `phase_latency` with `work_ms` in place of `cpu_ms`, at 128 MiB:
+  - RMoW-C's full read at batch 60 under `cached` is within 10% of MoR-v3's on S3 Express, and
+    at most 0.9× on Azure Blob, each against F_read.
+  - RMoW-C's mean batch time is above MoR-v3's on every profile it can run on, against F_batch.
+- **P5, in the replay with `cpu="work"`,** at 128 MiB: every arm's full read at batch 60 under
+  `cached-p8` is within 25% of MoR-v3's on S3 Express, against F_p8.
+
+**Controls:**
+- **C1: the measure changes no I/O.** Every probe and batch matches the scale rerun's requests
+  and bytes exactly (`steps_diff`).
+- **C2: every phase is counted.** Every timed phase of the four runs has instructions, and every
+  manifest says counters were available.
