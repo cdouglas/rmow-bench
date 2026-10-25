@@ -310,8 +310,9 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
 - **Done on havoc:** the scale campaign, the 4 MiB recency setting scaled to Iceberg's defaults
   (128 MiB row groups, 512 MiB files), in a container (`docker/campaigns/scale.json`,
   [docker/README.md](docker/README.md); [lab/pages/scale.md](lab/pages/scale.md)). Requests,
-  bytes and storage are decided. CPU is not: other work reached the jobs' cores, and a rerun
-  judged per phase still found one read's CPU varying by up to 9% between identical twins.
+  bytes and storage were decided there. Thread CPU time could not decide anything: one read's
+  CPU varied by up to 9% between identical twins. CPU was then measured in instructions on this
+  laptop ([lab/pages/cpu-measure.md](lab/pages/cpu-measure.md)), which decided P3–P5.
 - **Next:** S3 Express (M3), only to check the simulation's parameters. It starts with
   `configs/s3x-calibration.json`, which needs credentials, a directory bucket and an instance in
   its zone. Split files can also run on standard S3.

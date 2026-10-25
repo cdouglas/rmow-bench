@@ -228,7 +228,8 @@ Do the 4 MiB recency setting's requests, bytes, CPU and simulated latency hold a
 defaults, 128 MiB row groups and 512 MiB files? This page reads the scale campaign: four runs on
 havoc, one per row-group size R of 4, 16, 64 and 128 MiB. It decides P1–P6 (docs/HYPOTHESES.md,
 2026-10-23) where the runs can decide them. A rerun judged CPU per phase
-([below](#scale-rerun)).
+([below](#scale-rerun)), and a third campaign measured it in instructions on this laptop
+([below](#scale-laptop)), which decided P3–P5.
 
 ## Setup
 
@@ -675,9 +676,225 @@ P3 and P5 would hold with room to spare. P4's read half would fail again
 ({eval}`N2["p4_s3x"]` on S3 Express against 0.9–1.1), but its reads were not clean, and the
 twins show noise near its 10% margin.
 
+(scale-laptop)=
+## On the instruction measure
+
+```{code-cell} ipython3
+:tags: [remove-cell]
+
+# The scale campaign on the instruction measure (docs/HYPOTHESES.md, 2026-10-25): the same four
+# configurations on the laptop, from a build snapshot of 9f868af (dirty with a held docs draft)
+LAPTOP = {
+    4: "scale-recency-rg4m-5cc727c1e4af/20261025T015547Z",
+    16: "scale-recency-rg16m-daece520dd8e/20261025T015850Z",
+    64: "scale-recency-rg64m-34a1c89f1cfa/20261025T020856Z",
+    128: "scale-recency-rg128m-fe22e4558e59/20261025T025418Z",
+}
+L_OF = {v: k for k, v in LAPTOP.items()}
+LIDS = list(LAPTOP.values())
+
+# C1 and C2
+c1l = []
+for r in LAPTOP:
+    d = q("SELECT * FROM steps_diff($a, $b)", a=RERUN[r], b=LAPTOP[r])
+    c1l.append((r, len(d), int((d.one_run_only | (d.differs.map(len) > 0)).sum())))
+c1l = pd.DataFrame(c1l, columns=["R", "records", "differ"])
+c2l = q("""
+    SELECT s.run_id, count(*) AS timed,
+           count(*) FILTER (WHERE s.instructions IS NULL OR s.instructions <= 0) AS uncounted,
+           any_value(r.manifest -> 'host' ->> 'thread_counters') AS counters,
+           any_value(r.elapsed_s) / 60 AS minutes
+    FROM steps s JOIN runs r USING (run_id)
+    WHERE list_contains($ids, s.run_id) AND s.wall_ns IS NOT NULL GROUP BY ALL""", ids=LIDS)
+c2l["R"] = c2l.run_id.map(L_OF)
+checks = c1l.merge(c2l[["R", "timed", "uncounted", "counters", "minutes"]], on="R").sort_values("R")
+
+# the noise floors, from each run's twins
+floor_rows, replays = [], {}
+for r, run in LAPTOP.items():
+    w = q("""SELECT arm, step, phase, reader, work_ms FROM phase_work
+             WHERE run_id = $r AND phase IN ('read_full', 'batch')""", r=run)
+    rd = w[(w.phase == "read_full") & (w.reader == "cached")].set_index(["arm", "step"]).work_ms
+    steps_r = rd.index.get_level_values(1).unique()
+    f_read = max(abs(rd[(a + "-split", s)] / rd[(a, s)] - 1) for a in ("rmow-b", "rmow-c") for s in steps_r)
+    bm = w[w.phase == "batch"].groupby("arm").work_ms.mean()
+    f_batch = max(abs(bm[a + "-split"] / bm[a] - 1) for a in ("rmow-b", "rmow-c"))
+    rp = fig.replay(run, s3x, cpu="work")
+    replays[r] = rp
+    p8r = rp[(rp.phase == "read_full") & (rp.reader == "cached-p8")].set_index(["arm", "step"]).simulated_ms
+    f_p8 = max(abs(p8r[(a + "-split", s)] / p8r[(a, s)] - 1) for a in ("rmow-b", "rmow-c") for s in steps_r)
+    floor_rows.append((r, f_read, f_batch, f_p8))
+floors = pd.DataFrame(floor_rows, columns=["R", "F_read", "F_batch", "F_p8"]).sort_values("R")
+F = floors.set_index("R").loc[128]
+
+# P3 in work, with modeled time per MiB beside it
+p3w = q("""
+    SELECT run_id, arm,
+           sum(instructions) FILTER (WHERE phase = 'read_full' AND reader = 'cached' AND step > 0)
+             / (sum(bytes_read) FILTER (WHERE phase = 'read_full' AND reader = 'cached' AND step > 0) / 2 ^ 20)
+             AS ins_read,
+           sum(instructions) FILTER (WHERE phase = 'batch')
+             / (sum(bytes_written) FILTER (WHERE phase = 'batch') / 2 ^ 20) AS ins_written,
+           sum(work_ms) FILTER (WHERE phase = 'read_full' AND reader = 'cached' AND step > 0)
+             / (sum(bytes_read) FILTER (WHERE phase = 'read_full' AND reader = 'cached' AND step > 0) / 2 ^ 20)
+             AS ms_read,
+           sum(work_ms) FILTER (WHERE phase = 'batch')
+             / (sum(bytes_written) FILTER (WHERE phase = 'batch') / 2 ^ 20) AS ms_written
+    FROM (SELECT w.*, s.bytes_read, s.bytes_written FROM phase_work w JOIN steps s
+            ON s.run_id = w.run_id AND s.arm = w.arm AND s.step = w.step AND s.phase = w.phase
+           AND s.reader IS NOT DISTINCT FROM w.reader
+          WHERE list_contains($ids, w.run_id))
+    GROUP BY ALL""", ids=LIDS)
+p3w["R"] = p3w.run_id.map(L_OF)
+p3w["arm_label"] = p3w.arm.map(labels)
+W = p3w.set_index(["R", "arm"])
+p3_table = pd.DataFrame([
+    (labels[a],
+     W.loc[(128, a), "ins_read"] / W.loc[(4, a), "ins_read"],
+     W.loc[(128, a), "ins_written"] / W.loc[(4, a), "ins_written"],
+     W.loc[(128, a), "ms_read"] / W.loc[(4, a), "ms_read"],
+     W.loc[(128, a), "ms_written"] / W.loc[(4, a), "ms_written"]) for a in ARMS],
+    columns=["arm", "instructions per MiB read", "instructions per MiB written",
+             "modeled ms per MiB read", "modeled ms per MiB written"])
+
+# P4 in modeled time, P5 in the replay
+latw = q("""
+    SELECT arm, profile,
+           avg(work_ms + request_ms + transfer_ms) FILTER (WHERE phase = 'batch' AND step > 0) AS batch_ms,
+           max(work_ms + request_ms + transfer_ms)
+               FILTER (WHERE phase = 'read_full' AND reader = 'cached' AND step = 60) AS read60
+    FROM phase_latency WHERE run_id = $r GROUP BY ALL""", r=LAPTOP[128]).set_index(["profile", "arm"])
+
+
+def band(x, lo, hi, f):
+    if lo + f <= x <= hi - f:
+        return "held"
+    return "contradicted" if x < lo - f or x > hi + f else "undecided"
+
+
+def at_most(x, hi, f):
+    return "held" if x <= hi - f else "contradicted" if x > hi + f else "undecided"
+
+
+p4_s3x = latw.loc[("s3x", "rmow-c"), "read60"] / latw.loc[("s3x", "mor-v3"), "read60"]
+p4_az = latw.loc[("azure", "rmow-c"), "read60"] / latw.loc[("azure", "mor-v3"), "read60"]
+p4_batch = {p: latw.loc[(p, "rmow-c"), "batch_ms"] / latw.loc[(p, "mor-v3"), "batch_ms"]
+            for p in batch_profiles}
+rp128 = replays[128]
+p8_128 = rp128[(rp128.phase == "read_full") & (rp128.reader == "cached-p8") & (rp128.step == 60)].set_index("arm").simulated_ms
+p5 = p8_128 / p8_128["mor-v3"]
+decided = pd.DataFrame(
+    [("P4", "RMoW-C ÷ MoR-v3, full read at batch 60, cached, S3 Express", "0.9–1.1", p4_s3x, F.F_read,
+      band(p4_s3x, 0.9, 1.1, F.F_read)),
+     ("P4", "the same, Azure Blob", "at most 0.9", p4_az, F.F_read, at_most(p4_az, 0.9, F.F_read))]
+    + [("P4", f"RMoW-C ÷ MoR-v3, a batch, {p}", "above 1", x, F.F_batch,
+        "held" if x > 1 + F.F_batch else "contradicted" if x < 1 - F.F_batch else "undecided")
+       for p, x in p4_batch.items()]
+    + [("P5", f"{labels[a]} ÷ MoR-v3, full read at batch 60, cached-p8, S3 Express", "0.75–1.25", x,
+        F.F_p8, band(x, 0.75, 1.25, F.F_p8)) for a, x in p5.items() if a != "mor-v3"],
+    columns=["prediction", "measure (128 MiB)", "predicted", "measured", "floor", "verdict"])
+
+N3 = {
+    "minutes": f"{checks.minutes.sum():.0f}",
+    "c1_records": f"{checks.records.sum():,}",
+    "c1_differ": f"{checks.differ.sum()}",
+    "uncounted": f"{checks.uncounted.sum()}",
+    "f_read": f"{100 * F.F_read:.1f}%",
+    "f_batch": f"{100 * F.F_batch:.1f}%",
+    "f_p8": f"{100 * F.F_p8:.1f}%",
+    "fr_lo": f"{100 * floors.F_read.min():.1f}%",
+    "fr_hi": f"{100 * floors.F_read.max():.1f}%",
+    "p3_read": f"{p3_table['instructions per MiB read'].min():.2f}–{p3_table['instructions per MiB read'].max():.2f}",
+    "p3_written": f"{p3_table['instructions per MiB written'].min():.2f}–{p3_table['instructions per MiB written'].max():.2f}",
+    "p3_ms_written": f"{p3_table['modeled ms per MiB written'].min():.2f}–{p3_table['modeled ms per MiB written'].max():.2f}",
+    "rc_written": f"{W.loc[(128, 'rmow-c'), 'ins_written'] / W.loc[(4, 'rmow-c'), 'ins_written']:.2f}",
+    "p4_s3x": f"{p4_s3x:.2f}",
+    "p4_az": f"{p4_az:.2f}",
+    "p4_b_lo": f"{min(p4_batch.values()):.1f}",
+    "p4_b_hi": f"{max(p4_batch.values()):.1f}",
+    "p5_lo": f"{p5.min():.2f}",
+    "p5_hi": f"{p5.max():.2f}",
+}
+```
+
+The four configurations ran again, one after another, on this laptop, whose kernel allows the
+instruction counters that havoc's does not (docs/HYPOTHESES.md, 2026-10-25). CPU is measured as
+on the page Measuring CPU (lab/pages/cpu-measure.md):
+- **work:** a phase's user-mode instructions;
+- **modeled time:** work at its arm's own pace.
+
+Each comparison is judged against a noise floor taken from the run's own twins. The page pins
+the runs by id (`LAPTOP`); together they took {eval}`N3["minutes"]` minutes.
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(checks.merge(floors, on="R").rename(columns={"R": "R (MiB)", "records": "records against the rerun",
+                                                    "timed": "timed phases"}).round(4))
+```
+
+**The controls held.**
+- **C1:** all {eval}`N3["c1_records"]` records match the rerun's on havoc in every request and
+  byte column ({eval}`N3["c1_differ"]` differ).
+- **C2:** every timed phase counted its instructions ({eval}`N3["uncounted"]` without).
+
+The floors at 128 MiB are {eval}`N3["f_read"]` for full reads, {eval}`N3["f_batch"]` for batch
+means and {eval}`N3["f_p8"]` for eight-thread reads. Across the four runs, F_read is
+{eval}`N3["fr_lo"]`–{eval}`N3["fr_hi"]`.
+
+**P3, in work.** From 4 to 128 MiB, instructions per MiB read change by {eval}`N3["p3_read"]`×.
+Instructions per MiB written change by {eval}`N3["p3_written"]`×, RMoW-C's the most
+({eval}`N3["rc_written"]`×).
+Modeled time per MiB written, which does not decide, changes by {eval}`N3["p3_ms_written"]`×.
+
+```{code-cell} ipython3
+:label: scale-laptop-work
+:tags: [remove-input]
+:class: col-page-right
+
+color, shape = fig.arm_encoding(ARMS)
+wl = p3w.melt(id_vars=["R", "arm", "arm_label"], value_vars=["ins_read", "ins_written"],
+              var_name="measure", value_name="instructions per MiB")
+wl["measure"] = wl.measure.map({"ins_read": "a full read, cached", "ins_written": "a batch"})
+(alt.Chart(wl).mark_line(point=alt.OverlayMarkDef(size=60, filled=True), strokeWidth=2)
+ .encode(x=alt.X("R:Q", title="row group R (MiB)", scale=alt.Scale(type="log", base=2)),
+         y=alt.Y("instructions per MiB:Q", title="instructions per MiB", scale=alt.Scale(zero=False)),
+         color=color, shape=shape,
+         tooltip=["arm_label", "R", "measure", alt.Tooltip("instructions per MiB:Q", format=",.0f")])
+ .properties(width=260, height=180)
+ .facet(column=alt.Column("measure:N", title=None))
+ .resolve_scale(y="independent"))
+```
+
+Each point is an arm's instructions per MiB: summed over its full reads under `cached` (left),
+or over its batches (right), at each row-group size.
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(p3_table.round(3))
+```
+
+**P4 and P5, in modeled time at 128 MiB.**
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(decided.round(3))
+```
+
+- **P4's read on S3 Express is contradicted:** RMoW-C's full read takes {eval}`N3["p4_s3x"]`×
+  MoR-v3's, below 0.9 by more than the floor. On Azure Blob it takes {eval}`N3["p4_az"]`×, as
+  predicted.
+- **P4's batches held:** RMoW-C's take {eval}`N3["p4_b_lo"]`–{eval}`N3["p4_b_hi"]`× MoR-v3's on
+  every store where it can run.
+- **P5 held:** every arm's eight-thread read takes {eval}`N3["p5_lo"]`–{eval}`N3["p5_hi"]`×
+  MoR-v3's.
+
 ## P1–P6 (docs/HYPOTHESES.md)
 
-**Mostly contradicted where decided; P3–P5 not decided, in either campaign.**
+**P1, P2, P4 and P6 contradicted, in part; P3 and P5 held.** P3–P5 were decided on the
+instruction measure, by the third campaign.
 
 - **P1, structure does not depend on scale: contradicted for MoR-v3 and TailCoW-C from 64 MiB.**
   - MoR-v3's requests per batch are {eval}`N["mor_batch_64"]`× and {eval}`N["mor_batch_128"]`×
@@ -695,11 +912,16 @@ twins show noise near its 10% margin.
     larger on disk.
   - Every other arm's batches are within 25% (RMoW-B {eval}`N["rb_bytes_128"]`× at 128 MiB).
     Full reads are within {eval}`N["read_bytes_dev"]` everywhere.
-- **P3, CPU scales with bytes: not decided.** Foreign load in the first campaign; in the rerun,
-  C3 failed.
-- **P4, on one thread requests stop mattering: not decided.** The same, and in the rerun the
-  batch-60 reads it compares were not clean.
-- **P5, on eight threads the largest row group bounds a read: not decided.** The same.
+- **P3, CPU scales with bytes: held, in work.** From 4 to 128 MiB, instructions per MiB read
+  change by {eval}`N3["p3_read"]`× and per MiB written by {eval}`N3["p3_written"]`×. The first
+  campaign (foreign load) and the rerun (C3) could not decide it.
+- **P4, on one thread requests stop mattering: contradicted.**
+  - RMoW-C's full read takes {eval}`N3["p4_s3x"]`× MoR-v3's on S3 Express, not within 10%: it
+    reads fewer bytes and fewer files, and on S3 Express that still shows.
+  - Its other parts held. It takes {eval}`N3["p4_az"]`× on Azure Blob, and RMoW-C's batches are
+    slower everywhere ({eval}`N3["p4_b_lo"]`–{eval}`N3["p4_b_hi"]`×).
+- **P5, on eight threads the largest row group bounds a read: held.** Every arm within
+  {eval}`N3["p5_lo"]`–{eval}`N3["p5_hi"]`× of MoR-v3's on S3 Express.
 - **P6, it fits in 24 GiB: contradicted, as the pilot foresaw.** Each arm's largest
   `stored_bytes` at 128 MiB sums to {eval}`N["st_sum"]` GiB.
 - **P6 revised (each RMoW arm under 8 GiB, the sum under 40 GiB): contradicted for RMoW-B, held
@@ -738,6 +960,10 @@ table(stored.assign(arm=stored.arm.map(labels)).pivot(index="arm", columns="R", 
 - **Uncompacted, RMoW-C stores {eval}`N["rc_stored_x"]`× its live bytes at 128 MiB.** It keeps
   {eval}`N["live_rc_128"]` GiB live in {eval}`N["st_rc"]` GiB. Every batch appends a merged
   region, and nothing reclaims the dead ones in this campaign.
+- **On one thread, RMoW-C's full read stays faster than MoR-v3's at Iceberg's defaults, even on
+  S3 Express.** It takes {eval}`N3["p4_s3x"]`× the simulated time at batch 60. On eight threads
+  the arms come together ({eval}`N3["p5_lo"]`–{eval}`N3["p5_hi"]`×). RMoW-C's batches cost
+  {eval}`N3["p4_b_lo"]`–{eval}`N3["p4_b_hi"]`× MoR-v3's.
 - **Thread CPU on havoc is noisy beyond foreign load.** With no foreign load on its cores, one
   full read's CPU can differ from its twin's by {eval}`N2["c3_dev"]`, near P4's 10% margin. Reads
   where more of the JVM's other work ran took more. A single phase's CPU cannot decide a
@@ -748,9 +974,11 @@ table(stored.assign(arm=stored.arm.map(labels)).pivot(index="arm", columns="R", 
 
 ## Limits
 
-- **No CPU verdict.** P3–P5 need a CPU measure whose noise is known to be under their margins:
-  clean cores were not enough. Requests and bytes are unaffected, since they depend only on the
-  op log, config and code.
+- **CPU is this laptop's.** P3–P5 were decided on the laptop, in instructions and modeled time;
+  havoc's kernel does not allow counters. Requests and bytes are the same on both machines (C1),
+  but a server core's pace is not this laptop's.
+- **Modeled time rests on each arm's pace,** good to a few percent (the floors). It leaves out
+  kernel time, 1–6% of thread CPU, which tilts slightly toward MoR-v3's batches.
 - **RMoW's batch requests are undercounted.** In these runs RMoW's writer kept its footers from
   one batch to the next (`writerCachesFooters`), which no Iceberg writer can, while MoR-v3's
   locate scan read each touched file's footer every batch, as it should. Writers now hold a
