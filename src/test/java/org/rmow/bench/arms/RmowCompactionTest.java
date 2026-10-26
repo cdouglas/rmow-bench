@@ -59,7 +59,8 @@ class RmowCompactionTest {
               true);
       arm = new RmowArm(ctx, TailPolicy.Kind.A, split);
       arm.load(
-          InitialLoad.copy(mem, InitialLoad.write(mem, "mem://t/base", log, layout), ctx.root()));
+          InitialLoad.copy(
+              mem, InitialLoad.write(mem, "mem://t/base", log, layout), ctx.root(), mem));
     }
 
     void batches(int n) throws IOException {

@@ -2,7 +2,6 @@ package org.rmow.bench.rmow;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.OutputStream;
 import java.io.UncheckedIOException;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -53,20 +52,28 @@ public final class RmowFile implements LogicalFile {
     this.location = location;
   }
 
-  /** Writes a new object holding {@code regions} (the first at base 0) as its first version. */
+  /**
+   * Writes a new object holding {@code regions} (the first at base 0) as its first version, in one
+   * request, as the store's appender creates objects it can extend ({@link RegionAppender#create}).
+   */
   public static RmowFile create(
-      FileIO io, String location, List<Region> regions, List<Long> newRgIds) throws IOException {
+      FileIO io,
+      RegionAppender appender,
+      String location,
+      List<Region> regions,
+      List<Long> newRgIds)
+      throws IOException {
     RmowFile f = new RmowFile(location);
     FileMetaData merged =
         FooterCodec.merge(null, Set.of(), footers(regions), 0, 0);
     byte[] tail = FooterCodec.serialize(merged);
     checkContiguous(regions, 0);
-    try (OutputStream out = io.newOutputFile(location).createOrOverwrite()) {
-      for (Region r : regions) {
-        out.write(r.bytes());
-      }
-      out.write(tail);
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    for (Region r : regions) {
+      out.write(r.bytes());
     }
+    out.write(tail);
+    appender.create(io, location, out.toByteArray());
     f.commit(regions.get(regions.size() - 1).end() + tail.length, merged, tail, newRgIds);
     return f;
   }

@@ -46,6 +46,10 @@ select = ["s3x-*"]
 title = "Footer micro-benchmarks (JMH)"
 select = ["source:micro"]
 
+[campaigns.azure-twins]
+title = "Azure: the calibration's Azurite twins, exact and Iceberg's reads (docs/AZURE_RUNBOOK.md)"
+select = ["where:label LIKE 'azure-calibration-%-azurite' AND status = 'finished'"]
+
 [[annotate]]
 select = "smoke-*"
 mark = "excluded"

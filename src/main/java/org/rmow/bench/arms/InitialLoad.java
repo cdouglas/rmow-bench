@@ -12,6 +12,7 @@ import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.IOUtil;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.iceberg.parquet.Parquet;
+import org.rmow.bench.append.RegionAppender;
 import org.rmow.bench.workload.OpLog;
 import org.rmow.bench.workload.Rows;
 
@@ -65,8 +66,13 @@ public final class InitialLoad {
     return files;
   }
 
-  /** Copies the initial files under {@code prefix} (setup I/O: untraced). */
-  public static List<InitialFile> copy(FileIO io, List<InitialFile> files, String prefix)
+  /**
+   * Copies the initial files under {@code prefix} (setup I/O: untraced). An arm that appends to
+   * them passes its store's appender, which creates objects it can extend (on Azure, Append
+   * Blobs); others pass null.
+   */
+  public static List<InitialFile> copy(
+      FileIO io, List<InitialFile> files, String prefix, RegionAppender appender)
       throws IOException {
     List<InitialFile> copies = new ArrayList<>(files.size());
     for (InitialFile f : files) {
@@ -76,8 +82,12 @@ public final class InitialLoad {
       try (SeekableInputStream in = io.newInputFile(f.location(), f.length()).newStream()) {
         IOUtil.readFully(in, bytes, 0, bytes.length);
       }
-      try (OutputStream out = io.newOutputFile(location).createOrOverwrite()) {
-        out.write(bytes);
+      if (appender != null) {
+        appender.create(io, location, bytes);
+      } else {
+        try (OutputStream out = io.newOutputFile(location).createOrOverwrite()) {
+          out.write(bytes);
+        }
       }
       copies.add(
           new InitialFile(

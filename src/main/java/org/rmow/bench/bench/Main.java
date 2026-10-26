@@ -35,8 +35,9 @@ import org.apache.iceberg.IcebergBuild;
  * hash names the experiment, so repeated runs of one configuration share a directory.
  *
  * <ul>
- *   <li>{@code --store-root} puts the run's objects under another root than the config's (where
- *       a local store lives does not change what is measured, so it is not part of the hash);
+ *   <li>{@code --store-root} puts a local store's objects under another root than the config's
+ *       (where a local store lives does not change what is measured, so it is not part of the
+ *       hash); other stores keep their config's root;
  *   <li>{@code --keep-store} keeps the run's objects, which are otherwise deleted at the end;
  *   <li>{@code --dump-versions} writes every version of the appendable objects to {@code
  *       versions/} in the run directory, for {@code analysis/interop_check.py};

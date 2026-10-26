@@ -7,13 +7,22 @@ import java.nio.file.Path;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import com.azure.storage.blob.BlobContainerClient;
+import com.azure.storage.blob.models.BlobItem;
+import com.azure.storage.blob.models.ListBlobsOptions;
 import org.apache.iceberg.aws.s3.S3FileIO;
+import org.apache.iceberg.azure.adlsv2.ADLSFileIO;
 import org.apache.iceberg.io.FileIO;
+import org.rmow.bench.append.AzureAppenders;
 import org.rmow.bench.append.RegionAppender;
 import org.rmow.bench.append.S3Appenders;
+import org.rmow.bench.io.AdlsClients;
+import org.rmow.bench.io.AzureRecorder;
+import org.rmow.bench.io.ExactAdlsFileIO;
 import org.rmow.bench.io.MemFileIO;
 import org.rmow.bench.io.PreadFileIO;
 import org.rmow.bench.io.S3Recorder;
+import org.rmow.bench.io.SdkRecorder;
 import software.amazon.awssdk.auth.credentials.DefaultCredentialsProvider;
 import software.amazon.awssdk.http.apache.ApacheHttpClient;
 import software.amazon.awssdk.regions.Region;
@@ -22,7 +31,7 @@ import software.amazon.awssdk.services.s3.S3ClientBuilder;
 
 /**
  * The store a configuration names: its FileIO, its appender (null for a store without append),
- * and, for S3, the recorder of the requests its client sends.
+ * and, in the cloud, the recorder of the requests its SDK sends.
  *
  * <ul>
  *   <li>{@code mem}: {@link MemFileIO};
@@ -32,27 +41,49 @@ import software.amazon.awssdk.services.s3.S3ClientBuilder;
  *       profile, instance), so none are in the configuration or its manifest. Appends are {@code
  *       express} (S3 Express One Zone), {@code emulated} (for emulators, unmeasured) or {@code
  *       none} (standard S3).
+ *   <li>{@code azure}: Iceberg's {@link ADLSFileIO} on a hierarchical-namespace account, with its
+ *       reads as shipped or exact ({@code adlsReads}), RMoW's files as Append Blobs ({@link
+ *       AzureAppenders}), and an {@link AzureRecorder}. Credentials come from the default chain,
+ *       or, for an emulator ({@code endpoint}), the account key in {@code AZURE_STORAGE_KEY} (or
+ *       the system property {@code azure.storage.key}).
  * </ul>
  */
 final class Store implements AutoCloseable {
 
+  /** Deletes everything under a run's root. */
+  private interface RunDeleter {
+    void delete(String root) throws IOException;
+  }
+
   private final String type;
   private final FileIO io;
   private final RegionAppender appender;
-  private final S3Recorder recorder;
+  private final SdkRecorder recorder;
   private final List<AutoCloseable> owned;
+  private final RunDeleter deleter; // null: by type
 
   private Store(
       String type,
       FileIO io,
       RegionAppender appender,
-      S3Recorder recorder,
+      SdkRecorder recorder,
       List<AutoCloseable> owned) {
+    this(type, io, appender, recorder, owned, null);
+  }
+
+  private Store(
+      String type,
+      FileIO io,
+      RegionAppender appender,
+      SdkRecorder recorder,
+      List<AutoCloseable> owned,
+      RunDeleter deleter) {
     this.type = type;
     this.io = io;
     this.appender = appender;
     this.recorder = recorder;
     this.owned = owned;
+    this.deleter = deleter;
   }
 
   static Store open(BenchConfig.StoreSpec spec) {
@@ -66,6 +97,7 @@ final class Store implements AutoCloseable {
         yield new Store("local", local, local, null, List.of());
       }
       case "s3" -> s3(spec);
+      case "azure" -> azure(spec);
       default -> throw new IllegalArgumentException("Unknown store type: " + spec.type);
     };
   }
@@ -95,6 +127,39 @@ final class Store implements AutoCloseable {
     };
   }
 
+  private static Store azure(BenchConfig.StoreSpec spec) {
+    boolean emulator = !spec.endpoint.isEmpty();
+    String key = System.getProperty("azure.storage.key", System.getenv("AZURE_STORAGE_KEY"));
+    var props = AdlsClients.properties(spec.root, spec.endpoint, emulator ? key : null);
+    AzureRecorder recorder = AzureRecorder.install();
+    ADLSFileIO adls = new ADLSFileIO();
+    adls.initialize(props);
+    AdlsClients clients = new AdlsClients(props);
+    FileIO io =
+        switch (spec.adlsReads) {
+          case "iceberg" -> adls;
+          case "exact" -> new ExactAdlsFileIO(adls, clients);
+          default -> throw new IllegalArgumentException("Unknown adlsReads: " + spec.adlsReads);
+        };
+    RunDeleter deleter;
+    if (emulator) {
+      // an emulator starts empty, and has no Data Lake endpoint for a directory delete
+      BlobContainerClient container = clients.container(spec.root);
+      container.createIfNotExists();
+      deleter =
+          root -> {
+            String prefix = AdlsClients.Location.of(root).path() + "/";
+            for (BlobItem b : container.listBlobs(new ListBlobsOptions().setPrefix(prefix), null)) {
+              container.getBlobClient(b.getName()).delete();
+            }
+          };
+    } else {
+      deleter = adls::deletePrefix; // one recursive directory delete
+    }
+    return new Store(
+        "azure", io, AzureAppenders.appendBlob(clients), recorder, List.of(io, recorder), deleter);
+  }
+
   private static S3Client client(BenchConfig.StoreSpec spec, S3Recorder recorder) {
     String region = !spec.region.isEmpty() ? spec.region : System.getenv("AWS_REGION");
     S3ClientBuilder b =
@@ -121,13 +186,17 @@ final class Store implements AutoCloseable {
     return appender;
   }
 
-  /** Null unless the store is S3. */
-  S3Recorder recorder() {
+  /** Null unless the store is in the cloud. */
+  SdkRecorder recorder() {
     return recorder;
   }
 
   /** Deletes a run's objects: everything under {@code root}, which names that run alone. */
   void deleteRun(String root) throws IOException {
+    if (deleter != null) {
+      deleter.delete(root);
+      return;
+    }
     switch (type) {
       case "local" -> {
         Path dir = Path.of(root.startsWith("file:") ? root.substring(5) : root);

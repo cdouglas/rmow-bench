@@ -268,6 +268,13 @@ What their data showed, against the reruns:
 - **CPU** was thread CPU with the payload check on (off in the noverify run): reads took 3.2–3.5×
   the CPU they take without the check.
 
+**Deleted 2026-10-26: two failed Azurite twins**, `azure-calibration-exact-azurite`
+(`20261026T055119Z`) and `azure-calibration-iceberg-azurite` (`20261026T055158Z`), with their build
+snapshot `20261026T055118Z-9713a7c52d0c-dirty`, which only they used. Each failed before its
+first step and left a manifest and an op log. `bin/matrix.sh`'s `--store-root` had replaced their
+Azure root with a local path, which the runner now applies to local stores only. Their reruns,
+`20261026T055317Z` and `20261026T055554Z`, are the twins docs/AZURE_RUNBOOK.md reads.
+
 ## Findings so far
 
 All are local runs: requests and bytes are exact, latency is not measured.
@@ -460,6 +467,14 @@ would need its own arms and reader checks.
 
   It needs a directory bucket, an instance in its zone, and credentials. Its hypotheses are
   drafted in the runbook, to register with the held H1 draft.
+- **Prepared: Azure**, the other side of RMoW's break-even (docs/AZURE_RUNBOOK.md). Requests
+  dominate there, so the simulation predicts that RMoW wins outright. It runs through Iceberg's
+  ADLS FileIO, whose reads as shipped open every stream with a GET of up to 4 MiB and over-read
+  ranges at offsets. So the calibration runs twice: with exact reads, to check the simulation,
+  and with Iceberg's, to measure what Iceberg on Azure costs today. It needs a hierarchical-
+  namespace account, a VM in its region and a managed identity. Its Azurite twins give the
+  requests each run must send, and its hypotheses are drafted in the runbook, with the S3
+  Express ones.
 - **Optional, to come back to:**
   - a second seed, to show the request and byte findings are not one op log's;
   - a CDC-like workload with late arrivals;

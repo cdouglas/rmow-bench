@@ -9,11 +9,13 @@ public final class BenchConfig {
 
   /** Where objects live (see {@link Store}). */
   public static final class StoreSpec {
-    /** {@code mem} (in-memory), {@code local} (a local filesystem) or {@code s3}. */
+    /** {@code mem} (in-memory), {@code local} (a local filesystem), {@code s3} or {@code azure}. */
     public String type = "mem";
     /**
      * Location prefix: for {@code local}, an absolute directory; for {@code s3}, {@code
-     * s3://bucket/prefix}. Each run puts its objects under its own prefix here.
+     * s3://bucket/prefix}; for {@code azure}, {@code
+     * abfss://container@account.dfs.core.windows.net/prefix}. Each run puts its objects under its
+     * own prefix here.
      */
     public String root = "mem://bench";
     /** For {@code local}: fsync each written object and append. */
@@ -24,8 +26,19 @@ public final class BenchConfig {
      * only (unmeasured). {@code none}: standard S3, where RMoW arms cannot run.
      */
     public String append = "none";
-    /** For {@code s3}: an endpoint to use instead of AWS's (an emulator's). */
+    /**
+     * For {@code s3} and {@code azure}: an endpoint to use instead of the cloud's (an emulator's).
+     * For Azurite, {@code http://127.0.0.1:10000/devstoreaccount1}, with the account's key in
+     * {@code AZURE_STORAGE_KEY}; against Azure, the default credential chain applies.
+     */
     public String endpoint = "";
+    /**
+     * For {@code azure}: how reads reach the store; writes are Iceberg's ADLSFileIO either way.
+     * {@code iceberg}: ADLSFileIO's streams as Iceberg 1.12 ships them, which open with a GET of up
+     * to 4 MiB and fetch up to 4 MiB for a ranged read at an offset. {@code exact}: reads that send
+     * what the request model assumes ({@link org.rmow.bench.io.ExactAdlsFileIO}).
+     */
+    public String adlsReads = "iceberg";
     /** For {@code s3}: the region; empty means {@code AWS_REGION}, or else us-east-1. */
     public String region = "";
     /** For {@code s3}: path-style requests, as emulators need. */

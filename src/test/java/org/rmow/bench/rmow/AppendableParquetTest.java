@@ -83,7 +83,7 @@ class AppendableParquetTest {
 
   private Versions build(String loc, int n0, int n1, boolean inPlace) throws IOException {
     Region r0 = writer.write(loc, 0, rows(0, n0, 0));
-    RmowFile f = RmowFile.create(io, loc, List.of(r0), List.of(0L));
+    RmowFile f = RmowFile.create(io, io, loc, List.of(r0), List.of(0L));
     long len0 = f.length();
 
     Region r1 = writer.write(loc, f.length(), rows(n0, n0 + n1, 0));

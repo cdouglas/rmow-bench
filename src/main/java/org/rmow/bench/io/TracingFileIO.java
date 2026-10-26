@@ -27,7 +27,8 @@ import org.rmow.bench.append.RegionAppender;
  *   <li>{@code getLength()} on an InputFile created without a length is a HEAD (once per file);
  *   <li>{@code OutputFile.create()} is a HEAD, the existence check Iceberg's S3 and ADLS output
  *       files make ({@code createOrOverwrite()} makes none);
- *   <li>an output stream is one PUT on close; an append is one APPEND.
+ *   <li>an output stream is one PUT on close, and so is creating an appendable object; an append
+ *       is one APPEND.
  * </ul>
  *
  * The wrapper keeps the delegate's {@link RangeReadable} capability: dropping it would silently
@@ -103,6 +104,19 @@ public final class TracingFileIO implements FileIO, RegionAppender {
       latency.append(location, bytes.length);
     }
     return appender.append(location, expectedLength, bytes);
+  }
+
+  /** A new appendable object: one PUT, as the output stream it replaces would be. */
+  @Override
+  public void create(FileIO io, String location, byte[] bytes) throws IOException {
+    if (appender == null) {
+      throw new UnsupportedOperationException("This store has no append: " + location);
+    }
+    appender.create(delegate, location, bytes);
+    trace.record(IoTrace.Kind.PUT, location, 0, bytes.length);
+    if (latency != null) {
+      latency.put(location, bytes.length);
+    }
   }
 
   private final class TracingInputFile implements InputFile {

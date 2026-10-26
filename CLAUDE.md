@@ -52,7 +52,8 @@ bin/matrix.sh --build configs/local-compact-*.json   # several, from a build sna
   and CPU counts toward simulated latency. The id-and-version oracle stays on.
 - **Duration:** a `local-*` configuration has taken 8–34 minutes, longest with all 9 arms
   (`elapsed_s` in each manifest). The README's S3 section says what
-  `S3StoreTest` needs (versitygw in Docker; skipped without it).
+  `S3StoreTest` needs (versitygw in Docker; skipped without it), and its Azure section what
+  `AzureStoreTest` needs (Azurite in Docker).
 - **Tests that pin results:** `RunnerSmokeTest` asserts H2 for both layouts.
   `AppendableParquetTest`, `SplitFileTest` and `VersionDumpTest` cover reader compatibility.
 

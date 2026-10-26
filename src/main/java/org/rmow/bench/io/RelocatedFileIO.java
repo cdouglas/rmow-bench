@@ -69,6 +69,15 @@ public final class RelocatedFileIO implements FileIO, RegionAppender {
     return appender.append(physical(location), expectedLength, bytes);
   }
 
+  @Override
+  public void create(FileIO io, String location, byte[] bytes) throws IOException {
+    if (appender == null) {
+      RegionAppender.super.create(this, location, bytes);
+    } else {
+      appender.create(delegate, physical(location), bytes);
+    }
+  }
+
   private record In(InputFile file, String location) implements InputFile {
     @Override
     public long getLength() {

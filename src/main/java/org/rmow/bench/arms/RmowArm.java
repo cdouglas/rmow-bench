@@ -212,7 +212,7 @@ public final class RmowArm implements Arm {
   private LogicalFile create(Pending p) throws IOException {
     return split
         ? SplitFile.create(ctx.io(), p.location, p.regions, p.newRgIds)
-        : RmowFile.create(ctx.io(), p.location, p.regions, p.newRgIds);
+        : RmowFile.create(ctx.io(), ctx.io(), p.location, p.regions, p.newRgIds);
   }
 
   @Override

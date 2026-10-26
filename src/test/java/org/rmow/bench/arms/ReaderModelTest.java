@@ -45,7 +45,7 @@ class ReaderModelTest {
       }
       Region r = writer.write(LOC, f == null ? 0 : f.length(), rows);
       if (f == null) {
-        f = RmowFile.create(mem, LOC, List.of(r), List.of(0L));
+        f = RmowFile.create(mem, mem, LOC, List.of(r), List.of(0L));
       } else {
         f.append(mem, List.of(r), List.of(), List.of((long) region));
       }

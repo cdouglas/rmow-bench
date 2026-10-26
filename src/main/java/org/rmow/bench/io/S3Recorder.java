@@ -23,7 +23,7 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest;
  * these counts check that model against the SDK on a real store (aborts stay modelled only: the
  * SDK does not see a stream being abandoned).
  */
-public final class S3Recorder implements ExecutionInterceptor {
+public final class S3Recorder implements ExecutionInterceptor, SdkRecorder {
 
   /**
    * Requests by operation, transmission attempts (a retry is a second attempt of one request), and
@@ -64,8 +64,8 @@ public final class S3Recorder implements ExecutionInterceptor {
     }
 
     /** As step-record fields, prefixed {@code sdk_}. */
-    public Map<String, Object> fields() {
-      Map<String, Object> m = new LinkedHashMap<>();
+    public Map<String, Long> fields() {
+      Map<String, Long> m = new LinkedHashMap<>();
       m.put("sdk_requests", requests());
       m.put("sdk_gets", gets);
       m.put("sdk_puts", puts);
@@ -107,6 +107,11 @@ public final class S3Recorder implements ExecutionInterceptor {
         attempts.sum(),
         getBytes.sum(),
         putBytes.sum());
+  }
+
+  @Override
+  public Map<String, Long> fields() {
+    return snapshot().fields();
   }
 
   @Override

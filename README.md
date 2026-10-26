@@ -179,6 +179,56 @@ workload and every default arm, from an EC2 instance in the bucket's zone. Its t
 `configs/s3x-calibration-local.json`, differs only in the store. Its requests and bytes are what
 the S3 Express run's model and SDK counts must match exactly, apart from `CreateSession`.
 
+## The Azure store
+
+`store.type` `azure` runs every arm on Iceberg's `ADLSFileIO`, on a hierarchical-namespace account
+(`store.root` `abfss://<container>@<account>.dfs.core.windows.net/<prefix>`). Credentials come from
+the default chain (a VM's managed identity, the environment, the Azure CLI), so none are in a
+configuration or its manifest. For an emulator, `store.endpoint` names it, and the account key is
+in `AZURE_STORAGE_KEY`.
+
+Iceberg 1.12.0's ADLS FileIO writes what the model counts. An output stream is one Put Blob up to
+256 MiB, and `create()` adds its existence check, a HEAD. Its reads do not
+([docs/AZURE_RUNBOOK.md](docs/AZURE_RUNBOOK.md)):
+- every stream opens with a GET of the file's first 4 MiB, before any read;
+- a ranged read at an offset fetches up to a 4 MiB chunk, since it asks for `position + length`
+  bytes.
+
+So `store.adlsReads` picks the reads; writes are ADLSFileIO's in both:
+- `iceberg`: as shipped;
+- `exact`: `ExactAdlsFileIO`, which sends what the model counts, as S3FileIO does. A stream opens
+  nothing until it reads, a ranged read is one GET of its range, and a sequential read is one
+  streamed GET.
+
+`AppendBlock` extends only an Append Blob, and Iceberg writes block blobs. So RMoW's files are
+created by the appender (`AzureAppenders`), as an empty Append Blob and its first version
+appended (`RegionAppender.create`). Each append is one `AppendBlock`, conditioned on the blob's
+length. The model counts the create as one PUT.
+
+The recorder (`AzureRecorder`) counts what the SDK sends through every client in the process,
+Iceberg's included: azure-core adds its policies to every storage pipeline
+(`META-INF/services`). Phases record the counts as `sdk_*` fields, and `sdk_latency` in the lab
+prices them.
+
+`AzureStoreTest` runs the store's contract (`AzureStoreContract`) against Azurite, in Docker
+(skipped without it). Azurite has no Data Lake endpoint, which only a directory delete needs, so
+the store deletes an emulator's runs blob by blob. The contract checks that:
+- Iceberg's write is a HEAD and one Put Blob;
+- its reads behave as above (a canary, should Iceberg or the SDK change);
+- exact reads send one GET per range, and a sequential read one streamed GET;
+- Append Blobs append at their length only (`AppendPositionConditionNotMet` elsewhere), and a file
+  Iceberg wrote cannot be appended to (`InvalidBlobType`);
+- under exact reads, every phase of every arm family sends what the model counts, request for
+  request, with nothing else and no retries; under Iceberg's, its writes do, and its reads send
+  more.
+
+`AzureTest` runs the same contract against Azure when `RMOW_AZURE_ROOT` names a prefix in a
+container. `org.rmow.bench.micro.AzureSpike <abfss://...>` measures latencies: Put Blobs against
+Append Blocks from 64 KiB to 32 MiB, creates and HEADs, GETs of Append Blobs of 1 to 1000 blocks,
+and Iceberg's reads of a 32 MiB file against exact ones. `configs/azure-calibration-exact.json` and
+`-iceberg.json` are the calibration runs, one per read path. Their Azurite twins
+(`-azurite.json`) give the requests each must send.
+
 For latency, a configuration can set more things, and a run can log its requests:
 - **`warmup`** runs a small op log on the in-memory store before the measured run, so the JIT has
   compiled the paths first. It changes no request or byte (`RunnerSmokeTest`).
@@ -245,10 +295,10 @@ has what they showed.
 | `rmow` | The append layer: `OffsetOutputFile` (the stock writer, with positions starting at the object's length), `RegionWriter`, `FooterCodec` (merging Thrift footers), `VersionedInputFile` (one version's view, with the optional footer prefetch), `LogicalFile` with its two layouts `RmowFile` (appendable) and `SplitFile` (an object per version), and `ParquetReads` (the one read path every arm uses). |
 | `arms` | `MorArm` (with the subclasses `MorV2Arm`, `MorV3Arm`, `CowArm` and `TailCowArm`), `RmowArm`, `TailPolicy`, `DataFileWriter` and `InitialLoad`. |
 | `workload`, `oracle` | The seeded op log and the reference model. |
-| `io` | `MemFileIO`, `PreadFileIO`, `TracingFileIO`, `IoTrace`, `RelocatedFileIO` (a run's logical paths on its own prefix), and `S3Recorder` (the SDK's requests). |
-| `append` | `RegionAppender`, and `S3Appenders` (S3 Express at a write offset; emulated). |
-| `bench` | `Runner`, `Phases`, `Store` (mem, local or S3) and `Main`; `arms.VersionDump` and `rmow.VersionDigest` dump every version for the interop check. |
-| `micro` | JMH micro-benchmarks (`FooterBench`). |
+| `io` | `MemFileIO`, `PreadFileIO`, `TracingFileIO`, `IoTrace`, `RelocatedFileIO` (a run's logical paths on its own prefix), the SDK recorders (`SdkRecorder`: `S3Recorder`, `AzureRecorder`), and for Azure `AdlsClients` and `ExactAdlsFileIO`. |
+| `append` | `RegionAppender`, `S3Appenders` (S3 Express at a write offset; emulated) and `AzureAppenders` (Append Blobs). |
+| `bench` | `Runner`, `Phases`, `Store` (mem, local, S3 or Azure) and `Main`; `arms.VersionDump` and `rmow.VersionDigest` dump every version for the interop check. |
+| `micro` | JMH micro-benchmarks (`FooterBench`), and the cloud spikes (`S3ExpressSpike`, `AzureSpike`). |
 | `analysis/` | `interop_check.py` (pyarrow and DuckDB), `summary.py`, `plots.py` (figures and a table twin of each), `sweep.py` (runs that differ in row-group size), `layouts.py` (appendable against split files), `compaction.py` (runs that differ in compaction policy: each arm's cheapest policy per read rate and price model), and `compare_runs.py` (exact repeatability). |
 
 ## Compatibility
@@ -315,6 +365,9 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
   bytes and storage were decided there. Thread CPU time could not decide anything: one read's
   CPU varied by up to 9% between identical twins. CPU was then measured in instructions on this
   laptop ([lab/pages/cpu-measure.md](lab/pages/cpu-measure.md)), which decided P3–P5.
-- **Next:** S3 Express (M3), only to check the simulation's parameters. It starts with
-  `configs/s3x-calibration.json`, which needs credentials, a directory bucket and an instance in
-  its zone. Split files can also run on standard S3.
+- **Next:** the cloud runs, only to check the simulation. Both are prepared, not run:
+  - S3 Express (M3), near RMoW's break-even ([docs/S3X_RUNBOOK.md](docs/S3X_RUNBOOK.md));
+  - Azure (M4), far above it, through Iceberg's ADLS FileIO with its reads as shipped and exact
+    ([docs/AZURE_RUNBOOK.md](docs/AZURE_RUNBOOK.md)).
+
+  Split files can also run on standard S3.

@@ -51,8 +51,8 @@ public final class Runner {
   /**
    * How a run executes, apart from what it measures (not part of the config hash).
    *
-   * @param storeRoot the root the run's objects go under, instead of the config's; null: the
-   *     config's
+   * @param storeRoot the root a local store's objects go under, instead of the config's; null:
+   *     the config's
    * @param keepStore keep the run's objects; by default they are deleted once the run ends
    * @param dumpVersions write every version of the appendable objects to {@code versions/} in
    *     the run directory ({@link VersionDump})
@@ -63,8 +63,9 @@ public final class Runner {
       String storeRoot, boolean keepStore, boolean dumpVersions, boolean logRequests) {
     public static final Options DEFAULT = new Options(null, false, false, false);
 
+    /** Where the run's objects go: {@code storeRoot} moves a local store's, never a cloud's. */
     String storeRoot(BenchConfig cfg) {
-      return storeRoot != null ? storeRoot : cfg.store.root;
+      return storeRoot != null && cfg.store.type.equals("local") ? storeRoot : cfg.store.root;
     }
   }
 
@@ -134,10 +135,15 @@ public final class Runner {
     }
   }
 
+  /** Whether an arm appends to its files: the appendable RMoW arms. */
+  private static boolean appends(String arm) {
+    return arm.startsWith("rmow-") && !arm.endsWith("-split");
+  }
+
   private String run(Store store) throws IOException {
     if (store.appender() == null) {
       for (String arm : cfg.arms) {
-        if (arm.startsWith("rmow-") && !arm.endsWith("-split")) {
+        if (appends(arm)) {
           throw new IllegalArgumentException(
               arm + " appends, and this store cannot (on S3 it needs S3 Express: append express)");
         }
@@ -184,7 +190,7 @@ public final class Runner {
               log,
               cfg.verifyRows);
       Arm arm = create(name, ctx);
-      arm.load(InitialLoad.copy(io, base, ctx.root()));
+      arm.load(InitialLoad.copy(io, base, ctx.root(), appends(name) ? io : null));
       arms.add(new ArmRun(arm, phases, trace));
       trace.logEvents(options.logRequests());
     }

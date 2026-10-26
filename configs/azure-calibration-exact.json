@@ -1,0 +1,67 @@
+{
+  "label": "azure-calibration-exact",
+  "store": {
+    "type": "azure",
+    "root": "abfss://REPLACE-container@REPLACE-account.dfs.core.windows.net/rmow-bench",
+    "adlsReads": "exact"
+  },
+  "warmup": {
+    "batches": 5,
+    "initialRows": 100000
+  },
+  "workload": {
+    "seed": 1,
+    "initialRows": 200000,
+    "batches": 20,
+    "opsPerBatch": 2000,
+    "insertFrac": 0.7,
+    "updateFrac": 0.25,
+    "deleteFrac": 0.05,
+    "keyDist": "RECENCY_EXP",
+    "recencyMeanBatches": 2.0
+  },
+  "layout": {
+    "codec": "zstd",
+    "rowGroupBytes": 1048576,
+    "targetFileBytes": 8388608,
+    "tailSealBytes": 1048576,
+    "locate": "scan"
+  },
+  "arms": [
+    "mor-v2-file",
+    "mor-v3",
+    "tailcow-c",
+    "rmow-a",
+    "rmow-b",
+    "rmow-c"
+  ],
+  "reads": {
+    "every": 5,
+    "recentFraction": 0.01,
+    "travelBack": 10,
+    "readers": [
+      {
+        "name": "one-footer",
+        "footerCache": true,
+        "footerPrefetchBytes": 65536
+      },
+      {
+        "name": "cached",
+        "footerCache": true,
+        "deleteCache": true,
+        "footerPrefetchBytes": 65536
+      },
+      {
+        "name": "cached-p8",
+        "footerCache": true,
+        "deleteCache": true,
+        "footerPrefetchBytes": 65536,
+        "parallelism": 8
+      },
+      {
+        "name": "stock"
+      }
+    ]
+  },
+  "verifyRows": false
+}

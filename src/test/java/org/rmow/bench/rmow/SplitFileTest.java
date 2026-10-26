@@ -62,7 +62,7 @@ class SplitFileTest {
   @Test
   void versionsReadBackAndWholeObjectsBecomeReclaimable() throws IOException {
     List<List<Record>> initial = List.of(rows(0, 100, 0), rows(100, 200, 0), rows(200, 300, 0));
-    RmowFile plain = RmowFile.create(io, LOC, regions(LOC, initial), List.of(0L, 1L, 2L));
+    RmowFile plain = RmowFile.create(io, io, LOC, regions(LOC, initial), List.of(0L, 1L, 2L));
     long id = 10;
     long[] next = {0};
     SplitFile f = SplitFile.adopt(io, LOC, plain.length(), () -> next[0]++);
@@ -132,7 +132,7 @@ class SplitFileTest {
   @Test
   void stockReadersRefuseFooterOnlyVersions() throws IOException {
     RmowFile plain =
-        RmowFile.create(io, LOC, regions(LOC, List.of(rows(0, 100, 0), rows(100, 200, 0))),
+        RmowFile.create(io, io, LOC, regions(LOC, List.of(rows(0, 100, 0), rows(100, 200, 0))),
             Arrays.asList(0L, 1L));
     long[] next = {0};
     SplitFile f = SplitFile.adopt(io, LOC, plain.length(), () -> next[0]++);

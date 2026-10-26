@@ -8,14 +8,14 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.rmow.bench.io.IoTrace;
-import org.rmow.bench.io.S3Recorder;
+import org.rmow.bench.io.SdkRecorder;
 
 /**
  * Times named phases of one arm: wall-clock and thread CPU time, and the requests the arm's
  * {@link IoTrace} saw meanwhile. Arms run one at a time, so a trace delta belongs to the phase.
  *
- * <p>On S3, each phase also records the requests the SDK client sent meanwhile ({@code sdk_*}
- * fields), which check the trace's model of Iceberg's streams.
+ * <p>On S3 and Azure, each phase also records the requests the SDK clients sent meanwhile ({@code
+ * sdk_*} fields), which check the trace's model of Iceberg's streams.
  *
  * <p>Phases nest: the runner times each whole batch as {@code batch}, and arms time their parts
  * inside it ({@code merge-read}, {@code write}, {@code delete-write}). Analysis must not add a
@@ -65,7 +65,7 @@ public final class Phases {
       (com.sun.management.OperatingSystemMXBean) ManagementFactory.getOperatingSystemMXBean();
 
   private final IoTrace trace;
-  private final S3Recorder recorder; // null unless the store is S3
+  private final SdkRecorder recorder; // null unless the store is in the cloud
   private final List<Measured> measured = new ArrayList<>();
   private int depth = 0;
 
@@ -73,7 +73,7 @@ public final class Phases {
     this(trace, null);
   }
 
-  public Phases(IoTrace trace, S3Recorder recorder) {
+  public Phases(IoTrace trace, SdkRecorder recorder) {
     this.trace = trace;
     this.recorder = recorder;
   }
@@ -94,7 +94,7 @@ public final class Phases {
       trace.drainEvents(); // what ran outside every phase is not measured
     }
     IoTrace.Counters before = trace.snapshot();
-    S3Recorder.Counts sdk0 = recorder == null ? null : recorder.snapshot();
+    Map<String, Long> sdk0 = recorder == null ? null : recorder.fields();
     long proc0 = OS.getProcessCpuTime();
     long pool0 = trace.poolCpuNs();
     long poolUser0 = trace.poolUserNs();
@@ -123,7 +123,7 @@ public final class Phases {
             : new ThreadCounters.Sample(trace.poolInstructions(), trace.poolCycles()).minus(pc0);
     long proc = OS.getProcessCpuTime() - proc0;
     if (recorder != null) {
-      extra.putAll(recorder.snapshot().minus(sdk0).fields());
+      recorder.fields().forEach((k, v) -> extra.put(k, v - sdk0.getOrDefault(k, 0L)));
     }
     List<IoTrace.Event> events = outermost && trace.logging() ? trace.drainEvents() : List.of();
     measured.add(
