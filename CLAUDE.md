@@ -15,6 +15,8 @@ records requests, bytes and CPU per arm, step and phase.
   Read it first, and keep it current (see [Adding an experiment](#adding-an-experiment)).
 - **[README.md](README.md)** has build and run, the phases, the I/O parity rules, the arms and
   every config knob (`layout.*`, `reads.*`).
+- **[docs/ROADMAP.md](docs/ROADMAP.md)** is the outstanding work and what was decided about it.
+  Keep it current as items land.
 - **[docs/HYPOTHESES.md](docs/HYPOTHESES.md)** holds H1–H6. **[docs/DESIGN.md](docs/DESIGN.md)**
   holds the format-level findings and the writer's rules. **[docs/PLAN.md](docs/PLAN.md)** is the
   original plan, whose default matrix was not what ran.

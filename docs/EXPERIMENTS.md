@@ -17,6 +17,7 @@ above which RMoW pays, and how the workload moves that latency.
 | [docs/PLAN.md](PLAN.md) | The plan as approved on 2026-10-20, with milestones. Its default matrix is not what ran ([below](#what-every-experiment-shares)). |
 | [docs/DESIGN.md](DESIGN.md) | The format-level findings: writer rules, footer order, split files, compaction. |
 | [docs/HYPOTHESES.md](HYPOTHESES.md) | H1–H6, each written down before the runs that decide it. |
+| [docs/ROADMAP.md](ROADMAP.md) | The outstanding work, and the decisions that shaped it. |
 | `docs/measurements/` | One write-up per experiment. Write-ups from 2026-10-22 on are lab pages (`lab/pages/`), whose tables and numbers are computed from the runs. |
 | `lab/` | The results database and pages (labbook). `lab jupyter` opens them as notebooks and `lab serve` as a site. `lab/pages/experiments.md` regenerates this page's parameter tables from the runs. |
 | `results/` | The raw runs, one directory per configuration (`<label>-<hash>/<start>/`). Not in git. |
@@ -446,6 +447,9 @@ Against the runs they replaced (controls K1–K3):
 | H6 | When to compact | **Mixed** (unchanged on the reruns). The read half held for RMoW-B, not RMoW-C; the space and write-for-read halves held; the costs half held for split RMoW, not for MoR-v3 (its cheapest on S3 Express is every 10 batches, 4%). |
 
 ## What is next
+
+The outstanding work is tracked in [ROADMAP.md](ROADMAP.md), with the decisions of 2026-10-26:
+the five arms, the workload axes, and SAO for every store. The list below is as of 2026-10-25.
 
 The goal is a blog post on appending regions to Parquet: compacting regions, and when an
 appendable object beats Iceberg's merge-on-read. ORC is out of scope (decided 2026-10-25): it
