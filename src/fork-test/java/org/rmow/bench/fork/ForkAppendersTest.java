@@ -22,14 +22,14 @@ class ForkAppendersTest {
     MemAtomicFileIO io = new MemAtomicFileIO();
     RegionAppender appender = ForkAppenders.atomic(io);
     appender.create(io, LOC, bytes("first|"));
-    assertThat(io.lookups).as("the create's check that nothing is there").isEqualTo(1);
+    assertThat(io.lookups).as("a create pins the object's absence without a lookup").isZero();
 
     long length = appender.append(LOC, 6, bytes("second|"));
     length = appender.append(LOC, length, bytes("third"));
 
     assertThat(length).isEqualTo(18);
     assertThat(new String(io.bytes(LOC), StandardCharsets.UTF_8)).isEqualTo("first|second|third");
-    assertThat(io.lookups).as("appends to the snapshots writes returned").isEqualTo(1);
+    assertThat(io.lookups).as("appends to the snapshots writes returned").isZero();
   }
 
   @Test
@@ -73,14 +73,14 @@ class ForkAppendersTest {
   }
 
   @Test
-  void aCreateReplacesWhatItFinds() throws IOException {
+  void aCreateFailsIfTheObjectExists() throws IOException {
     MemAtomicFileIO io = new MemAtomicFileIO();
     RegionAppender appender = ForkAppenders.atomic(io);
     appender.create(io, LOC, bytes("first"));
-    appender.create(io, LOC, bytes("again|"));
-    long length = appender.append(LOC, 6, bytes("more"));
 
-    assertThat(length).isEqualTo(10);
-    assertThat(new String(io.bytes(LOC), StandardCharsets.UTF_8)).isEqualTo("again|more");
+    assertThatThrownBy(() -> ForkAppenders.atomic(io).create(io, LOC, bytes("again")))
+        .isInstanceOf(IOException.class)
+        .hasMessageContaining("CAS");
+    assertThat(new String(io.bytes(LOC), StandardCharsets.UTF_8)).isEqualTo("first");
   }
 }

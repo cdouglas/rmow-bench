@@ -62,8 +62,8 @@ RMOW_S3X_ROOT=$ROOT/test mvn -Pfork test -Dtest=S3ExpressTest
 ```
 
 On the fork, `S3ExpressTest` also runs every arm family with `append fork`. Each append is one
-PutObject at the snapshot's length, conditioned on its ETag. Each new appendable file is a lookup
-and a PutObject.
+PutObject at the snapshot's length, conditioned on its ETag. Each new appendable file is one
+PutObject conditioned on its absence, with no lookup: the fork sends what the model counts.
 
 ## Bringing it back
 

@@ -100,8 +100,9 @@ mvn -Pfork test -Dtest=AzureTest
 ```
 
 On the fork, `AzureTest` also runs every arm family with `append fork`. Each append is one Append
-Block, and each new appendable file a lookup, a staged Append Blob and a rename. Iceberg's own
-reads there send what the model counts.
+Block. Each new appendable file is a staged Append Blob and a rename, with no lookup: one request
+more than the store's own appender, for a create that is all or nothing. Iceberg's own reads there
+send what the model counts.
 
 ## Bringing it back
 

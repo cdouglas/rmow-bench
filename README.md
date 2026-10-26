@@ -239,9 +239,12 @@ length and an ETag, and the appender keeps it, so appends chain:
 - **An append** is one request, at the snapshot's length and conditioned on its ETag: a PutObject
   on S3 Express, an Append Block on ADLS. Of several writers appending to one version, exactly one
   lands.
-- **A new appendable file** is a CAS against what is there, which is looked up first (a HEAD):
-  - on S3, one PutObject;
-  - on ADLS, a temporary Append Blob (created, then one Append Block) renamed onto the file.
+- **A new appendable file** is a CAS from a snapshot that has seen nothing, which assumes the
+  object is absent and sends no lookup (every RMoW file has a name of its own):
+  - on S3, one PutObject with `If-None-Match: *`;
+  - on ADLS, a temporary Append Blob (created, then one Append Block) renamed onto the file with
+    `If-None-Match: *`. An Append Blob is created empty, so only the rename makes the create all or
+    nothing; the store's own appender (`append none`) creates the file in place, in two requests.
 
   The model counts it as one PUT.
 

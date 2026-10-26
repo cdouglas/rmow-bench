@@ -365,9 +365,9 @@ abstract class AzureStoreContract {
   /**
    * The fork appender ({@code append fork}) on the fork's atomic operations, with exact reads. An
    * append is one Append Block, to the snapshot the last write returned, so no lookup. A new
-   * appendable file is a CAS against what is there: its absence looked up (a HEAD), a temporary
-   * Append Blob staged (created, then one Append Block) and renamed onto the file (counted as
-   * other). Azure only, since Azurite does not rename.
+   * appendable file is a CAS against its absence, pinned without a lookup: a temporary Append Blob
+   * staged (created, then one Append Block) and renamed onto the file with {@code If-None-Match: *}
+   * (counted as other). Azure only, since Azurite does not rename.
    */
   @Test
   void everyArmFamilyWithForkAppends(@TempDir Path dir) throws IOException {
@@ -384,7 +384,7 @@ abstract class AzureStoreContract {
       assertThat(n(r, "sdk_puts") + creates).as(at + " PUTs").isEqualTo(n(r, "puts"));
       assertThat(n(r, "sdk_appends")).as(at + " appends").isEqualTo(n(r, "appends") + creates);
       assertThat(n(r, "sdk_other")).as(at + " renames").isEqualTo(creates);
-      assertThat(n(r, "sdk_heads")).as(at + " HEADs").isEqualTo(n(r, "heads") + creates);
+      assertThat(n(r, "sdk_heads")).as(at + " HEADs").isEqualTo(n(r, "heads"));
       assertThat(n(r, "sdk_gets")).as(at + " GETs").isEqualTo(n(r, "gets"));
       assertThat(n(r, "sdk_put_bytes")).as(at + " bytes written").isEqualTo(n(r, "bytes_written"));
       assertThat(n(r, "sdk_retries")).as(at + " retries").isZero();

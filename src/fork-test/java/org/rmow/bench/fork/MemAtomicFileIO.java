@@ -18,9 +18,10 @@ import org.apache.iceberg.io.SupportsAtomicOperations;
 
 /**
  * An in-memory store with the fork's atomic operations, as S3FileIO and ADLSFileIO implement them:
- * a snapshot pins an object's ETag (looked up if it does not carry one), a CAS lands only on the
- * pinned object (or, pinned absent, on none), and an APPEND only at the pinned object's length.
- * It counts {@link #lookups}, what a store answers with a HEAD.
+ * a snapshot pins the ETag of the version it has seen (one a write returned, or a lookup found). A
+ * CAS lands only on that version, or, from a snapshot that has seen none, only if no object exists;
+ * an APPEND lands only at the pinned object's length, and from a snapshot that has seen no version
+ * looks the object up when it writes. It counts {@link #lookups}, what a store answers with a HEAD.
  */
 final class MemAtomicFileIO implements SupportsAtomicOperations {
 
@@ -46,14 +47,13 @@ final class MemAtomicFileIO implements SupportsAtomicOperations {
 
   @Override
   public OutputFile newOutputFile(String path) {
-    return new Out(path, null, false, null);
+    return new Out(path, null, null);
   }
 
   @Override
   public AtomicOutputFile newOutputFile(InputFile replace) {
     In snapshot = (In) replace;
-    String etag = snapshot.etag();
-    return new Out(snapshot.location(), etag, etag == null, etag == null ? null : snapshot.length);
+    return new Out(snapshot.location(), snapshot.etag, snapshot.length);
   }
 
   @Override
@@ -72,29 +72,25 @@ final class MemAtomicFileIO implements SupportsAtomicOperations {
       this.etag = etag;
     }
 
-    String etag() {
-      if (etag == null) {
-        lookups++;
-        Obj o = objects.get(location);
-        if (o != null) {
-          etag = o.etag();
-          if (length == null) {
-            length = (long) o.bytes().length;
-          }
+    /** A lookup the snapshot sees: the version found is the one it pins. */
+    private Obj lookUp() {
+      lookups++;
+      Obj o = objects.get(location);
+      if (o != null && etag == null) {
+        etag = o.etag();
+        if (length == null) {
+          length = (long) o.bytes().length;
         }
       }
-      return etag;
+      return o;
     }
 
     @Override
     public long getLength() {
       if (length == null) {
-        lookups++;
-        Obj o = objects.get(location);
-        if (o == null) {
+        if (lookUp() == null) {
           throw new NotFoundException("No object at %s", location);
         }
-        length = (long) o.bytes().length;
       }
       return length;
     }
@@ -111,8 +107,7 @@ final class MemAtomicFileIO implements SupportsAtomicOperations {
 
     @Override
     public boolean exists() {
-      lookups++;
-      return objects.containsKey(location);
+      return lookUp() != null;
     }
   }
 
@@ -130,14 +125,13 @@ final class MemAtomicFileIO implements SupportsAtomicOperations {
 
   private final class Out implements AtomicOutputFile {
     private final String location;
+    // the version the snapshot saw; null if it saw none
     private final String etag;
-    private final boolean absent;
     private final Long length;
 
-    Out(String location, String etag, boolean absent, Long length) {
+    Out(String location, String etag, Long length) {
       this.location = location;
       this.etag = etag;
-      this.absent = absent;
       this.length = length;
     }
 
@@ -159,10 +153,17 @@ final class MemAtomicFileIO implements SupportsAtomicOperations {
       byte[] bytes = read(source);
       synchronized (objects) {
         Obj current = objects.get(location);
-        boolean pinned = current != null && current.etag().equals(etag);
         String next = "\"v" + ++versions + "\"";
         if (((Token) token).strategy() == Strategy.APPEND) {
-          if (!pinned || length == null || current.bytes().length != length) {
+          // from a snapshot that saw no version, the object's current one, looked up now
+          String base = etag;
+          if (base == null) {
+            lookups++;
+            base = current == null ? null : current.etag();
+          }
+          long at = length != null ? length : current == null ? -1 : current.bytes().length;
+          boolean pinned = current != null && current.etag().equals(base);
+          if (!pinned || current.bytes().length != at) {
             throw new AppendException("Not the pinned object at its length: " + location, null);
           }
           byte[] joined = Arrays.copyOf(current.bytes(), current.bytes().length + bytes.length);
@@ -170,7 +171,8 @@ final class MemAtomicFileIO implements SupportsAtomicOperations {
           objects.put(location, new Obj(joined, next));
           return new In(location, (long) joined.length, next);
         }
-        if (etag != null ? !pinned : absent && current != null) {
+        boolean pinned = current != null && current.etag().equals(etag);
+        if (etag != null ? !pinned : current != null) {
           throw new CASException("Not the pinned object: " + location, null);
         }
         objects.put(location, new Obj(bytes, next));

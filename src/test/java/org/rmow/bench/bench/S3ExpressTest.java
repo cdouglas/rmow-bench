@@ -175,9 +175,10 @@ class S3ExpressTest {
   }
 
   /**
-   * The fork appender ({@code append fork}, a {@code -Pfork} build): an append is one PutObject at
-   * the snapshot's length, conditioned on its ETag, with no HEAD; a new appendable file is a CAS
-   * against what is there, its absence looked up (a HEAD) and then one PutObject.
+   * The fork appender ({@code append fork}, a {@code -Pfork} build) sends what the model counts: an
+   * append is one PutObject at the snapshot's length, conditioned on its ETag, with no HEAD; a new
+   * appendable file is one PutObject conditioned on its absence ({@code If-None-Match: *}), also
+   * with no HEAD.
    */
   @Test
   void everyArmFamilyWithForkAppends(@TempDir Path dir) throws IOException {
@@ -186,11 +187,10 @@ class S3ExpressTest {
     List<JsonNode> phases = phases(dir);
     for (JsonNode r : phases) {
       String at = at(r);
-      long lookups = r.get("sdk_heads").asLong() - r.get("heads").asLong();
       assertThat(r.get("sdk_gets").asLong()).as(at + " GETs").isEqualTo(r.get("gets").asLong());
       assertThat(r.get("sdk_puts").asLong()).as(at + " PUTs").isEqualTo(r.get("puts").asLong());
       assertThat(r.get("sdk_appends").asLong()).as(at + " appends").isEqualTo(r.get("appends").asLong());
-      assertThat(lookups).as(at + " HEADs beyond the model's, one per create").isBetween(0L, r.get("puts").asLong());
+      assertThat(r.get("sdk_heads").asLong()).as(at + " HEADs").isEqualTo(r.get("heads").asLong());
       assertThat(r.get("sdk_put_bytes").asLong()).as(at + " bytes written")
           .isEqualTo(r.get("bytes_written").asLong());
       assertThat(r.get("sdk_lists").asLong() + r.get("sdk_other").asLong()).as(at).isZero();

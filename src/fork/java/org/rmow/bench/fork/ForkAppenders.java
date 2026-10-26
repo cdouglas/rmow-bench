@@ -20,9 +20,10 @@ import org.rmow.bench.append.RegionAppender;
  * and conditioned on its ETag, so of several writers appending to one version exactly one lands.
  * Each write returns the next snapshot, which the appender keeps per object, so appends chain
  * without looking anything up. An append at a length the appender did not write looks the
- * object's ETag up first. A new object is a CAS against what the lookup finds there, an ETag or
- * nothing, so it replaces an object as {@code createOrOverwrite} does, atomically; on ADLS it makes
- * the Append Blob later appends need.
+ * object's ETag up when it writes. A new object is a CAS from a snapshot that has seen nothing,
+ * which assumes the object is absent, so it sends no lookup and fails if an object is there; RMoW's
+ * files, each under a name of its own, never meet one. On ADLS it makes the Append Blob later
+ * appends need.
  */
 public final class ForkAppenders {
 
