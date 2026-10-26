@@ -92,12 +92,11 @@ done
 The configurations' labels stay `azure-calibration-exact` and `azure-calibration-iceberg`. The
 manifests record the root, which is not a secret.
 
-**Optional, the fork's path** (README, On the atomicio fork). It needs the fork's build in the
-VM's local Maven repository: `atomicio`'s, once it has `request-fixes`' commits, and until then
-that branch's.
+**Optional, the fork's path** (README, On the atomicio fork). It needs `atomicio`'s build in the
+VM's local Maven repository (built there, or copied from `~/.m2`).
 
 ```sh
-mvn -Pfork -Diceberg.version=1.12.0-request-fixes-SNAPSHOT test -Dtest=AzureTest
+mvn -Pfork test -Dtest=AzureTest
 ```
 
 On the fork, `AzureTest` also runs every arm family with `append fork`. Each append is one Append

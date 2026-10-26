@@ -54,12 +54,11 @@ bin/run.sh /tmp/s3x-calibration.json --log-requests
 The configuration's label stays `s3x-calibration`. The manifest records the bucket, which is not
 a secret.
 
-**Optional, the fork's path** (README, On the atomicio fork). It needs the fork's build in the
-instance's local Maven repository: `atomicio`'s, once it has `request-fixes`' commits, and until
-then that branch's.
+**Optional, the fork's path** (README, On the atomicio fork). It needs `atomicio`'s build in the
+instance's local Maven repository (built there, or copied from `~/.m2`).
 
 ```sh
-RMOW_S3X_ROOT=$ROOT/test mvn -Pfork -Diceberg.version=1.12.0-request-fixes-SNAPSHOT test -Dtest=S3ExpressTest
+RMOW_S3X_ROOT=$ROOT/test mvn -Pfork test -Dtest=S3ExpressTest
 ```
 
 On the fork, `S3ExpressTest` also runs every arm family with `append fork`. Each append is one

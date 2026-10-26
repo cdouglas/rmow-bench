@@ -250,18 +250,17 @@ That code needs the fork's API, so it is in `src/fork/java`, which only `-Pfork`
 release:
 
 ```bash
-mvn -Pfork -Diceberg.version=1.12.0-request-fixes-SNAPSHOT test
+mvn -Pfork test
 ```
 
-`-Diceberg.version` picks the fork build; by default it is `atomicio`'s, the one fileio-catalog
-uses. `atomicio` has the read fixes: ADLS reads open nothing until they read, and ask for exactly
-their range. They are upstream bugs, also on `core-fixes` (`adls-reads`). The fork's
-`request-fixes` branch adds three commits on top of `atomicio`:
+It builds on `atomicio`'s build (`1.12.0-atomicio-SNAPSHOT`), the one fileio-catalog uses;
+`-Diceberg.version` picks another. `atomicio` has the fixes RMoW needs:
+- ADLS reads open nothing until they read, and ask for exactly their range;
 - S3 and ADLS appends to a snapshot send no lookup;
 - S3's `prepare()` no longer needs commons-io, which Iceberg does not ship.
 
-Until `atomicio` has them, `-Diceberg.version=1.12.0-request-fixes-SNAPSHOT` picks that branch's
-build.
+The two read fixes are upstream performance bugs: the reads fetch more than they need, but return
+the right bytes. So they are on `atomicio`, not `core-fixes`, which holds correctness fixes.
 
 On the fork, Iceberg's own ADLS reads (`adlsReads: iceberg`) send the model's GETs.
 `AzureStoreContract` checks that, and `ForkAppendersTest` checks the appender on an in-memory
