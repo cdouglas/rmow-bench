@@ -15,16 +15,16 @@ import pandas as pd
 from labbook import q, table, theme
 theme()
 
-# The runs this page reads, rerun on 2026-10-22/23 from cfe40b2: the uncompacted rg-sweep runs,
+# The runs this page reads, rerun on 2026-10-25 from b6c2605: the uncompacted rg-sweep runs,
 # the uncompacted split run (its split arms) and the uniform run without compaction.
 RG = {
-    1: "local-rg-sweep-recency-exp-rg1m-ddb0f45ee310/20261023T042220Z",
-    2: "local-rg-sweep-recency-exp-rg2m-9ff075ae2483/20261023T044613Z",
-    4: "local-rg-sweep-recency-exp-rg4m-b2e059145e94/20261023T042224Z",
-    8: "local-rg-sweep-recency-exp-rg8m-4920abe2147d/20261023T044422Z",
+    1: "local-rg-sweep-recency-exp-rg1m-b1da2d63e642/20261025T165105Z",
+    2: "local-rg-sweep-recency-exp-rg2m-17d089aa92d2/20261025T173636Z",
+    4: "local-rg-sweep-recency-exp-rg4m-a9f7b46157c0/20261025T185718Z",
+    8: "local-rg-sweep-recency-exp-rg8m-3bdbc1d7c076/20261025T192231Z",
 }
-SPLIT = "local-split-recency-exp-nocompact-309eabcc0dc5/20261023T045645Z"
-UNIFORM = "local-m1-uniform-nocompact-c7e50a35a7c5/20261023T042229Z"
+SPLIT = "local-split-recency-exp-nocompact-0b250a9fdb41/20261025T203018Z"
+UNIFORM = "local-m1-uniform-nocompact-717579acbd22/20261025T210333Z"
 RUNS = [*RG.values(), SPLIT, UNIFORM]
 ARMS = ["mor-v3", "tailcow-b", "tailcow-c", "rmow-b", "rmow-c", "rmow-b-split", "rmow-c-split"]
 # analysis/compaction.py's PRICES, per request and per GB
@@ -86,6 +86,8 @@ lay1 = recency[(recency.mib == 1) & (recency["diff"] == "layout")]
 pol1b = recency[(recency.mib == 1) & (recency.pol == "B") & (recency["diff"] == "policy")].iloc[0]
 N = {
     "append_req": f"{-d('C', 'append', SPLIT).d_put_class:.2f}",
+    "append_gets": f"{d('C', 'append', SPLIT).d_gets:.2f}",
+    "append_net": f"{d('C', 'append', SPLIT).d_requests:.2f}",
     "append_usd": f"{-cost(d('C', 'append', SPLIT), 1):.1f}",
     "rmow_writes": f"{c4.puts + c4.appends:.2f}",
     "locate": f"{tc.locate_req:.1f}",
@@ -134,10 +136,14 @@ It predicts that on object stores with cheap PUTs the first difference is the sm
 that it matters mostly for read requests. It is decided by comparing the two, request type by
 request type.
 
-This page reads local runs of uncompacted configurations. They were rerun on 2026-10-22/23 for
-the time-travel fix (Time travel and dead bytes, H4). In everything used here (batches, full
-reads, state) the reruns match the earlier runs exactly. The one exception is the uniform run's
-MoR and TailCoW arms, which now count Puffin's HEAD.
+This page reads local runs of uncompacted configurations, rerun on 2026-10-25 on the current
+build (docs/HYPOTHESES.md, 2026-10-25). Against the runs this page first read:
+- MoR-v3's batches and every non-split probe are unchanged;
+- RMoW's batches take one footer read more per live file, which earlier builds left out (README,
+  I/O parity rule 6);
+- TailCoW's and CoW's batches take fewer requests where their merge reads reuse a footer their
+  locate scan read;
+- bytes written are unchanged.
 
 ## Setup
 
@@ -152,12 +158,10 @@ MoR and TailCoW arms, which now count Puffin's HEAD.
 **Workload.** The m1 workload: 1M initial rows, then 60 batches of 10k operations, with 70%
 inserts, 25% updates and 5% deletes. Rows are located by scan.
 
-**Builds.** All are commit cfe40b2, from snapshots in `results/builds/` marked dirty by a patch
-to docs only (`CLAUDE.md`, `docs/EXPERIMENTS.md`, `lab/annotations.toml`):
-- rg-sweep: `20261023T042219Z-cfe40b2f65bf-dirty` (1 and 2 MiB) and
-  `20261023T042224Z-cfe40b2f65bf-dirty` (4 and 8 MiB);
-- split: `20261023T045645Z-cfe40b2f65bf-dirty`;
-- m1 uniform: `20261023T042228Z-cfe40b2f65bf-dirty`.
+**Builds.** All are commit b6c2605, from snapshots in `results/builds/` marked dirty by the
+rerun's configurations (payload check off, four reader models) and documentation:
+- rg-sweep and split: `20261025T165102Z-b6c26055757b-dirty`;
+- m1 uniform: `20261025T204242Z-b6c26055757b-dirty`.
 
 **Pairs.** Each comparison holds the tail policy fixed:
 - layout is RMoW-B against TailCoW-B, and RMoW-C against TailCoW-C;
@@ -352,16 +356,24 @@ WHERE r.label LIKE 'local-rg-sweep-%' OR r.label = 'local-split-recency-exp-noco
     up. One full read saves {eval}`N["lay_read_b"]` or {eval}`N["lay_read_c"]` GETs; a batch's
     writes save {eval}`N["lay_write_b"]` or {eval}`N["lay_write_c"]` requests (4 MiB, B and C).
 - **The single object accounts for little of the layout step.**
-  - **Append buys {eval}`N["append_req"]` requests per batch and nothing else.** RMoW-C against
-    RMoW-C-split isolates the append. It saves {eval}`N["append_req"]` PUT-class requests per
-    batch, with the same GETs, the same bytes and the same reads; the same holds for B.
+  - **The append saves PUTs and costs GETs, and nothing else.** RMoW-C against RMoW-C-split
+    isolates the append.
+    - It saves {eval}`N["append_req"]` PUT-class requests per batch.
+    - It costs {eval}`N["append_gets"]` GETs per batch: the writer reads an appendable file's
+      footer in two requests, where a split file's small footer-only object is fetched whole in
+      one.
+    - On balance the appendable file takes {eval}`N["append_net"]` more requests per batch. On
+      S3 Express, where a PUT costs as much as 38 GETs, it still saves {eval}`N["append_usd"]` µ\$
+      per batch.
+    - Bytes and reads are the same, and the same holds for B.
   - **RMoW issues more data writes than TailCoW.** Against TailCoW, RMoW writes
     {eval}`N["rmow_writes"]` appends per batch (one per changed file) where TailCoW writes 1 new
     data file.
   - **The write requests saved come from how updates are applied.** TailCoW-C locates updated
     rows by scanning ({eval}`N["locate"]` GETs), and writes deletion vectors
-    ({eval}`N["dv_write"]` requests). RMoW does neither: it rewrites the touched row groups in
-    place. Rows stay in id order, so footer statistics place each one.
+    ({eval}`N["dv_write"]` requests). RMoW does neither. It reads each live file's footer once,
+    and rows stay in id order, so footer statistics place each one; then it rewrites the
+    touched row groups in place.
   - **The reads saved come from one footer per logical file and no DVs.** TailCoW-C's full read
     at batch 60 opens {eval}`N["tc_files"]` data files with {eval}`N["tc_dvs"]` DVs, for
     {eval}`N["tc_rgs"]` row groups ({eval}`N["tc_gets"]` GETs). RMoW-C opens
@@ -408,8 +420,9 @@ WHERE r.label LIKE 'local-rg-sweep-%' OR r.label = 'local-split-recency-exp-noco
   - On S3 Express, its cost is mostly write bytes.
   - On S3 Standard, with split RMoW standing in, it is mostly read requests, as predicted.
 - **The layout step is what the single appendable object buys: contradicted.**
-  - The append is worth {eval}`N["append_req"]` requests per batch ({eval}`N["append_usd"]` µ\$
-    on Express) and none of the reads or bytes.
+  - The append saves {eval}`N["append_req"]` PUT-class requests per batch and costs
+    {eval}`N["append_gets"]` GETs ({eval}`N["append_usd"]` µ\$ saved per batch on Express), and
+    none of the reads or bytes.
   - The rest of the step comes from how RMoW applies updates (rewriting the touched row groups
     in place, so no scan and no DVs), and from one footer per logical file.
   - A later ablation isolated the object against TailCoW with hybrid arms that kept TailCoW's DVs
@@ -419,12 +432,14 @@ WHERE r.label LIKE 'local-rg-sweep-%' OR r.label = 'local-split-recency-exp-noco
 
 ## Limits
 
-- **One seed, local.** Requests and bytes are deterministic. The 4 MiB rg-sweep and split runs
-  match exactly, and the reruns matched the earlier runs. There is no latency.
+- **One seed, local.** Requests and bytes are deterministic, and the 4 MiB rg-sweep and split
+  runs match exactly. The reruns of 2026-10-25 match the earlier runs, except where the
+  writer-footer rule changes RMoW's, CoW's and TailCoW's batches (docs/HYPOTHESES.md, controls
+  K1–K3). There is no latency.
 - **No compaction.** Compaction cuts MoR-v3's and TailCoW's read GETs, which shrinks the policy
   step's read savings. See the compaction sweep (H6).
 - **Storage and CPU are left out.**
   - Uncompacted, appendable RMoW keeps {eval}`N["kept_rmow"]`× its live bytes and TailCoW
     {eval}`N["kept_tc"]`×. That is a layout cost (H5, H6).
-  - CPU under 2% decides nothing.
+  - CPU is not priced here (the compaction sweep prices it).
 - **Prices are list prices**, as `analysis/compaction.py` has them.

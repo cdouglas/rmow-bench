@@ -15,12 +15,14 @@ import pandas as pd
 from labbook import figures_module, q, table, theme
 theme()
 
-# The runs this page reads: the logged 4 MiB uncompacted recency run without the payload check
-# (every arm and reader model in one run), and the uniform run, whose batches the check does not
-# touch. WITH_CHECK is the same recency run with the check, for the comparison.
-RECENCY = "sim-recency-4m-noverify-f412f1efff2d/20261023T195501Z"
+# The runs this page reads, rerun 2026-10-25 on b6c2605 (docs/HYPOTHESES.md): the logged 4 MiB
+# uncompacted recency run without the payload check (every arm and reader model in one run), and
+# the uniform run without compaction. Both count instructions, so CPU is modeled time (work_ms).
+RECENCY = "sim-recency-4m-noverify-aae85e9fd620/20261025T222739Z"
+UNIFORM = "local-m1-uniform-nocompact-717579acbd22/20261025T210333Z"
+# The payload check's comparison (below) stays on the pair it was made with, one build, thread CPU
 WITH_CHECK = "sim-recency-4m-55c5aea6ba08/20261023T182633Z"
-UNIFORM = "local-m1-uniform-nocompact-c7e50a35a7c5/20261023T042229Z"
+OLD_NOVERIFY = "sim-recency-4m-noverify-f412f1efff2d/20261023T195501Z"
 READER = "cached"  # one thread, each file's footer and deletes loaded once per read
 ARMS = ["mor-v3", "tailcow-c", "rmow-b", "rmow-c", "rmow-b-split", "rmow-c-split"]
 PROFILES = ["cpu only", "s3x", "azure premium", "s3", "azure"]
@@ -31,15 +33,15 @@ profiles = q("FROM store_profiles")
 def phases(run, arms):
     return q("""
         SELECT p.profile, p.arm, m.arm_label, m.ord,
-               avg(cpu_ms) FILTER (WHERE phase = 'batch' AND step > 0) AS batch_cpu,
+               avg(coalesce(work_ms, cpu_ms)) FILTER (WHERE phase = 'batch' AND step > 0) AS batch_cpu,
                avg(request_ms) FILTER (WHERE phase = 'batch' AND step > 0) AS batch_req,
                avg(transfer_ms) FILTER (WHERE phase = 'batch' AND step > 0) AS batch_xfer,
-               avg(cpu_ms) FILTER (WHERE phase = 'read_full' AND reader = $reader AND step > 0) AS read_cpu,
+               avg(coalesce(work_ms, cpu_ms)) FILTER (WHERE phase = 'read_full' AND reader = $reader AND step > 0) AS read_cpu,
                avg(request_ms) FILTER (WHERE phase = 'read_full' AND reader = $reader AND step > 0) AS read_req,
                avg(transfer_ms) FILTER (WHERE phase = 'read_full' AND reader = $reader AND step > 0) AS read_xfer,
-               max(cpu_ms + request_ms + transfer_ms)
+               max(coalesce(work_ms, cpu_ms) + request_ms + transfer_ms)
                    FILTER (WHERE phase = 'read_full' AND reader = $reader AND step = 60) AS read60,
-               max(cpu_ms + request_ms + transfer_ms)
+               max(coalesce(work_ms, cpu_ms) + request_ms + transfer_ms)
                    FILTER (WHERE phase = 'read_full' AND reader = 'stock' AND step = 60) AS stock60
         FROM phase_latency p JOIN arm_meta m USING (arm)
         WHERE p.run_id = $run AND list_contains($arms, p.arm)
@@ -82,7 +84,11 @@ def crossover(col, mib_per_s):
 
 
 s3x_c, s3x_m = cell(rec, "s3x", "rmow-c", "batch"), cell(rec, "s3x", "mor-v3", "batch")
+batch_req = dict(q("""SELECT arm, avg(requests) FROM steps
+                      WHERE run_id = $r AND phase = 'batch' GROUP BY ALL""", r=RECENCY).itertuples(index=False))
 N = {
+    "req_c": f"{batch_req['rmow-c']:.1f}",
+    "req_m": f"{batch_req['mor-v3']:.0f}",
     "s3x_batch_c": f"{s3x_c:.0f}",
     "s3x_batch_m": f"{s3x_m:.0f}",
     "s3x_batch_cpu_c": f"{cell(rec, 's3x', 'rmow-c', 'batch_cpu'):.0f}",
@@ -120,7 +126,8 @@ model. Where the S3 Express runs come in is to test it.
 
 A phase that issues one request at a time takes about:
 
-- **its thread CPU**, as measured locally;
+- **its CPU**: its instructions at its arm's pace (lab/pages/cpu-measure.md), from runs that
+  count them. Thread CPU time moves with the laptop's clock;
 - **plus, for every request, its expected latency.** That is a lognormal's mean, median ×
   e^(σ²/2), by kind: GET (and HEAD), PUT (and DELETE), or append;
 - **plus its MiB read and written times a rate per MiB.**
@@ -149,12 +156,13 @@ table(profiles.rename(columns={
     "read_ms_per_mib": "read ms/MiB", "write_ms_per_mib": "write ms/MiB"}))
 ```
 
-**Runs.** These are pinned by id:
+**Runs.** These are pinned by id, from the rerun of 2026-10-25 on the current build:
 - the 4 MiB uncompacted recency run without the payload check (`sim-recency-4m-noverify`), with
   every arm and reader model in one run and its requests logged. The check is the harness's, not
   an engine's, and it was most of a read's CPU ([below](#payload-check));
-- the uniform run (`local-m1-uniform-nocompact`), for its batches only, which the check does not
-  touch.
+- the uniform run (`local-m1-uniform-nocompact`), for its batches only.
+
+Both count each thread's instructions, so CPU is modeled time.
 
 **Measures.** A batch is the mean over the 60 batches. A full read is under the `cached` reader
 (one thread, each file's footer and deletes loaded once per read, as an engine with caches
@@ -244,7 +252,8 @@ table(ratio.pivot_table(index="request_ms", columns="mib_per_s", values="full re
 ```{code-cell} ipython3
 :tags: [remove-cell]
 
-VALIDATE = "sim-validate-s3x-30a4ea0533b8/20261023T181430Z"
+# against wall time, so CPU is the thread CPU the phases actually took
+VALIDATE = "sim-validate-s3x-4a6c99b83bb6/20261025T223400Z"
 s3x = profiles[profiles.profile == "s3x"].iloc[0].to_dict() | {"part_ms": 0.0}
 rv = figures_module().replay(VALIDATE, s3x)
 threads = dict(q("SELECT reader, parallelism FROM run_readers WHERE run_id = $r",
@@ -259,7 +268,16 @@ N |= {
     "v_eight": f"{len(eight)}", "v_eight_ok": f"{(eight.error.abs() <= 0.20).sum()}",
     "v_eight_med": f"{100 * eight.error.median():+.1f}%",
     "v_eight_worst": f"{100 * eight.error.abs().max():.1f}%",
+    "v_one_out": f"{(one.error.abs() > 0.10).sum()}",
+    "v_one_under": f"{(one.error < -0.10).sum()}",
+    "v_eight_out": f"{(eight.error.abs() > 0.20).sum()}",
 }
+n_out, n_under = int(N["v_one_out"]), int(N["v_one_under"])
+S1 = ("held" if n_out == 0
+      else f"contradicted as written: {n_out} {'phase' if n_out == 1 else 'phases'} of {N['v_one']} "
+           f"fell outside, {'an underestimate' if n_out == n_under == 1 else 'all underestimates' if n_out == n_under else f'{n_under} of them underestimates'}")
+S2 = ("held" if (eight.error.abs() <= 0.20).all()
+      else f"contradicted as written: {N['v_eight_out']} of {N['v_eight']} fell outside, at {N['v_eight_worst']}")
 ```
 
 `configs/sim-validate-s3x.json` runs the S3 Express profile injected into the in-memory store:
@@ -314,9 +332,8 @@ table(summ.round(3))
 - **Eight threads.** {eval}`N["v_eight_ok"]` of {eval}`N["v_eight"]` full reads replay within 20%
   (median {eval}`N["v_eight_med"]`, worst {eval}`N["v_eight_worst"]`).
 - **Against the registered predictions:**
-  - S1 (every one-thread phase within 10%) is contradicted as written: four phases fell outside,
-    all underestimates.
-  - S2 (8-thread full reads within 20%) held.
+  - S1 (every one-thread phase within 10%): {eval}`S1`.
+  - S2 (8-thread full reads within 20%): {eval}`S2`.
 - **What it checks, and what it does not.** The replay and the injection agree: the model is
   applied consistently, and the critical-path scheduling matches real threads. Whether the
   model's parameters are S3 Express's is a separate question, for the S4 spike.
@@ -327,12 +344,17 @@ table(summ.round(3))
 :tags: [remove-cell]
 
 LOGGED = RECENCY
+rg4 = q("""SELECT run_id FROM canonical_runs WHERE label = 'local-rg-sweep-recency-exp-rg4m'
+           AND git_sha = (SELECT git_sha FROM runs WHERE run_id = $r)""", r=RECENCY).run_id[0]
+rgd = q("SELECT * FROM steps_diff($a, $b) WHERE NOT one_run_only", a=rg4, b=RECENCY)
+N |= {"rg_records": f"{len(rgd):,}", "rg_differ": f"{int((rgd.differs.map(len) > 0).sum())}"}
 fig = figures_module()
-reps, reps_check = [], []
+reps, reps_check, reps_old = [], [], []
 for name in ["s3x", "s3", "azure"]:
     prof = profiles[profiles.profile == name].iloc[0].to_dict() | {"part_ms": 0.0}
-    reps.append(fig.replay(LOGGED, prof).assign(profile=name))
+    reps.append(fig.replay(LOGGED, prof, cpu="work").assign(profile=name))
     reps_check.append(fig.replay(WITH_CHECK, prof).assign(profile=name))
+    reps_old.append(fig.replay(OLD_NOVERIFY, prof).assign(profile=name))
 lg = pd.concat(reps)
 appendable = lg.arm.isin(["rmow-b", "rmow-c"])
 lg = lg[~(appendable & (lg.profile == "s3"))]  # no append on S3 Standard
@@ -340,7 +362,7 @@ full60 = lg[(lg.phase == "read_full") & (lg.step == 60) & lg.reader.isin(["cache
 PART_MS = [0.0, 0.02, 0.05, 0.1, 0.2]
 s3x = profiles[profiles.profile == "s3x"].iloc[0].to_dict()
 parts = pd.concat([
-    fig.replay(LOGGED, s3x | {"part_ms": pm}).assign(part_ms=pm) for pm in PART_MS])
+    fig.replay(LOGGED, s3x | {"part_ms": pm}, cpu="work").assign(part_ms=pm) for pm in PART_MS])
 parts = parts[(parts.phase == "read_full") & (parts.step == 60)
               & parts.reader.isin(["cached", "cached-p8"])
               & parts.arm.isin(["mor-v3", "tailcow-c", "rmow-b", "rmow-c"])]
@@ -386,7 +408,7 @@ N |= {
 `configs/sim-recency-4m-noverify.json` is the 4 MiB recency setting with the requests logged, a
 JIT warmup, the payload check off, and four readers: `one-footer`, `cached` (deletes once per
 file), `cached-p8` (the same on 8 threads) and `stock`. Its requests and bytes match the 4 MiB
-recency runs', except the split arms' stock reads ([below](#payload-check)). The replay times
+rg-sweep run's ({eval}`N["rg_differ"]` of {eval}`N["rg_records"]` shared records differ). The replay times
 every phase, reads on 8 threads included.
 
 ```{code-cell} ipython3
@@ -470,23 +492,23 @@ chk = q("""
          AND coalesce(a.reader, '') = coalesce(b.reader, '')
     JOIN arm_meta m ON m.arm = a.arm
     WHERE a.run_id = $a AND b.run_id = $b
-    GROUP BY ALL ORDER BY m.ord""", a=WITH_CHECK, b=RECENCY)
+    GROUP BY ALL ORDER BY m.ord""", a=WITH_CHECK, b=OLD_NOVERIFY)
 chk["reads"] = chk.reads_without / chk.reads_with
 chk["batches"] = chk.batches_without / chk.batches_with
 diff = q("""SELECT arm, reader, phase, differs FROM steps_diff($a, $b)
-            WHERE len(differs) > 0 OR one_run_only""", a=WITH_CHECK, b=RECENCY)
-n_records = q("SELECT count(*) AS n FROM steps_diff($a, $b)", a=WITH_CHECK, b=RECENCY).n[0]
+            WHERE len(differs) > 0 OR one_run_only""", a=WITH_CHECK, b=OLD_NOVERIFY)
+n_records = q("SELECT count(*) AS n FROM steps_diff($a, $b)", a=WITH_CHECK, b=OLD_NOVERIFY).n[0]
 split_gets = q("""
     SELECT sum(a.gets) AS with_check, sum(b.gets) AS without
     FROM steps a JOIN steps b USING (arm, step, phase, reader)
     WHERE a.run_id = $a AND b.run_id = $b AND a.arm = 'rmow-b-split' AND a.phase = 'read_full'
-      AND a.reader = 'stock'""", a=WITH_CHECK, b=RECENCY).iloc[0]
+      AND a.reader = 'stock'""", a=WITH_CHECK, b=OLD_NOVERIFY).iloc[0]
 
 # one thread: phase_latency of both runs; eight threads: the replays of both
 one60 = q("""
     SELECT run_id = $b AS without, profile, arm, cpu_ms + request_ms + transfer_ms AS ms
     FROM phase_latency WHERE run_id IN ($a, $b) AND step = 60 AND phase = 'read_full'
-      AND reader = 'cached' AND profile IN ('s3x', 'azure')""", a=WITH_CHECK, b=RECENCY)
+      AND reader = 'cached' AND profile IN ('s3x', 'azure')""", a=WITH_CHECK, b=OLD_NOVERIFY)
 lgc = pd.concat(reps_check)
 p8c = lgc[(lgc.phase == "read_full") & (lgc.step == 60) & (lgc.reader == "cached-p8")]
 
@@ -501,7 +523,8 @@ def r8(frame, profile, arm="rmow-c", base="mor-v3"):
     return t[arm] / t[base]
 
 
-new8 = full60[full60.reader == "cached-p8"]
+lgo = pd.concat(reps_old)
+new8 = lgo[(lgo.phase == "read_full") & (lgo.step == 60) & (lgo.reader == "cached-p8")]
 only_stock_split = set(diff.reader) <= {"stock"} and all("split" in a for a in diff.arm)
 V = {
     "N1": "held" if only_stock_split else "contradicted",
@@ -575,7 +598,8 @@ but `cached-p8`) and over its batches, in both runs.
   - A batch takes about {eval}`N["s3x_batch_c"]` ms against MoR-v3's {eval}`N["s3x_batch_m"]`.
   - Of that, {eval}`N["s3x_batch_cpu_c"]` ms is CPU, re-encoding the regions it rewrites,
     against MoR-v3's {eval}`N["s3x_batch_cpu_m"]`.
-  - S3 Express's requests are too cheap for RMoW-C's 6 requests against MoR-v3's 45 to make up
+  - S3 Express's requests are too cheap for RMoW-C's {eval}`N["req_c"]` requests against
+    MoR-v3's {eval}`N["req_m"]` to make up
     for it.
 - **Where requests are dear, RMoW-C's batches are faster.**
   - On Azure Blob a batch takes {eval}`N["az_batch_c"]` ms against {eval}`N["az_batch_m"]`.
@@ -620,10 +644,10 @@ but `cached-p8`) and over its batches, in both runs.
 
 - **The model is checked against itself, not against S3.** Injected latency confirms the replay
   ([above](#validation)); the S3 Express spike would check the parameters.
-- **CPU is this machine's, and the harness's.** Reads and writes go through Iceberg's generic
-  readers and writers, row by row, which are slower than an engine's vectorized path. That
-  weighs most against RMoW, which re-encodes the regions it rewrites. The payload check is off
-  in the recency run, but not in the uniform run, whose batches it does not touch.
+- **CPU is this machine's, and the harness's.** It is modeled time from each phase's instruction
+  counts (lab/pages/cpu-measure.md), with the payload check off. Reads and writes go through
+  Iceberg's generic readers and writers, row by row, which are slower than an engine's
+  vectorized path. That weighs most against RMoW, which re-encodes the regions it rewrites.
 - **Writes are serial.** An engine would overlap a batch's requests; the replay overlaps only a
   read's split tasks. Within a task, ranges are read one after another.
 - **No size effects beyond a per-MiB rate.** Appended parts are only swept, not measured. There

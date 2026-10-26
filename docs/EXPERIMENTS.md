@@ -82,10 +82,10 @@ the local experiments repeats a run, so the Repetitions page has nothing to comp
 
 | Experiment | Question | Varies | Arms | Runs | Write-up |
 |---|---|---|---|---|---|
-| **m1** (`configs/local-m1-*`) | Every arm under recency-skewed and uniform updates, with and without compaction. | key distribution (recency, uniform) × compaction every 0 or 10 batches | the 9 MoR, CoW, TailCoW and RMoW arms (all but split and DV) | 4 | None. The H2 result is in [HYPOTHESES.md](HYPOTHESES.md#h2-result-local-recorded-before-h5); the lab's run page shows every run. |
-| **rg-sweep** (`configs/local-rg-sweep-*`) | How row-group size trades RMoW's writes against its reads. | `rowGroupBytes` = `tailSealBytes` = 1, 2, 4, 8 MiB; recency keys, no compaction | the same 9 | 4 | [rg-sweep-recency-2026-10-21.md](measurements/rg-sweep-recency-2026-10-21.md) |
-| **split-vs-append** (`configs/local-split-*`) | Appendable against split RMoW files (H5). | recency, no compaction; recency, compaction every 10; uniform, compaction every 10 | MoR-v3, TailCoW-C, RMoW-B and -C in both layouts (plus CoW for uniform) | 3 | [split-vs-append-2026-10-21.md](measurements/split-vs-append-2026-10-21.md). Its compaction numbers are superseded by the sweep. |
-| **compaction** (`configs/local-compact-*`) | When to compact, as an outcome (H6). | check period `P` = none, 1, 5, 10, 20 × threshold level (table below) | the split comparison's six | 11 | [compaction-sweep-2026-10-21.md](measurements/compaction-sweep-2026-10-21.md) |
+| **m1** (`configs/local-m1-*`) | Every arm under recency-skewed and uniform updates, with and without compaction. | key distribution (recency, uniform) × compaction every 0 or 10 batches | the 9 MoR, CoW, TailCoW and RMoW arms (all but split and DV) | 4, rerun 2026-10-25 | H2 re-decided in [lab/pages/summary.md](../lab/pages/summary.md); the lab's run page shows every run. The first H2 result is in [HYPOTHESES.md](HYPOTHESES.md#h2-result-local-recorded-before-h5). |
+| **rg-sweep** (`configs/local-rg-sweep-*`) | How row-group size trades RMoW's writes against its reads. | `rowGroupBytes` = `tailSealBytes` = 1, 2, 4, 8 MiB; recency keys, no compaction | the same 9 | 4, rerun 2026-10-25 | [lab/pages/sweep.md](../lab/pages/sweep.md); the first runs' report is [rg-sweep-recency-2026-10-21.md](measurements/rg-sweep-recency-2026-10-21.md) |
+| **split-vs-append** (`configs/local-split-*`) | Appendable against split RMoW files (H5). | recency, no compaction; recency, compaction every 10; uniform, compaction every 10 | MoR-v3, TailCoW-C, RMoW-B and -C in both layouts (plus CoW for uniform) | 3, rerun 2026-10-25 | [lab/pages/layouts.md](../lab/pages/layouts.md); the first runs' report is [split-vs-append-2026-10-21.md](measurements/split-vs-append-2026-10-21.md) |
+| **compaction** (`configs/local-compact-*`) | When to compact, as an outcome (H6). | check period `P` = none, 1, 5, 10, 20 × threshold level (table below) | the split comparison's six | 11, rerun 2026-10-25 | [lab/pages/compaction.md](../lab/pages/compaction.md); the first runs' report is [compaction-sweep-2026-10-21.md](measurements/compaction-sweep-2026-10-21.md) |
 | **micro** (`results/micro/*.json`, JMH) | What a footer costs per row group. | row groups 10–10k × 11 or 50 columns; parse, convert, merge and serialize | n/a | 2 files | `docs/measurements/footer-*-2026-10-20.txt`. The source of the README's "about 1.2 KB and 30 µs per row group". |
 | **layout vs policy** (no new runs) | H3: is RMoW against TailCoW (layout) a smaller difference than TailCoW against MoR-v3 (tail policy), and mostly in read requests? | read from the uncompacted rg-sweep, split and m1 uniform runs | MoR-v3, TailCoW-B and -C, RMoW-B and -C in both layouts | 6 of the above | [lab/pages/layout-vs-policy.md](../lab/pages/layout-vs-policy.md) |
 | **time travel** (reruns) | H4: does an old version read like the current one, and do dead bytes cost reads? | the 7 uncompacted configurations that read old versions, rerun 2026-10-22/23 with the split-offset fix: each time-travel read against the full read of the same state | all that ran | 7 of the above, rerun | [lab/pages/time-travel.md](../lab/pages/time-travel.md) |
@@ -242,31 +242,38 @@ result (`lab/annotations.toml`).
 
 All are local runs: requests and bytes are exact, latency is not measured.
 
-**Every run so far undercounts RMoW's batch requests.** Before 2026-10-24, RMoW's writer kept its
-footers from one batch to the next (`writerCachesFooters`), which an Iceberg writer cannot, and
-no MoR-family writer did. Writers now hold a footer for one batch or compaction, in every arm (I/O
-parity rule 6, `writerFooters`). At 4 MiB under recency updates, a batch then takes:
-- 9.5 requests instead of 6.0 for RMoW-C;
-- 7.1 instead of 3.6 for RMoW-B;
-- the same 45.3 for MoR-v3.
+**The core experiments were rerun on 2026-10-25 on the current build** (docs/HYPOTHESES.md):
+writer footers held per transaction, the `cached` reader models, split files planned per row
+group, the payload check off, and CPU in instructions. The bullets from m1 to store latency
+below give the reruns' figures; lab/pages/summary.md collects every number a write-up quotes.
+Against the runs they replaced (controls K1–K3):
+- MoR-v2 and MoR-v3 batches match exactly, and so does every probe under the readers that did
+  not change.
+- RMoW's batches take one footer read more per live file. Before, RMoW's writer kept its footers
+  across batches, which an Iceberg writer cannot (README, I/O parity rule 6).
+- CoW's and TailCoW's batches take fewer requests where their merge reads reuse a footer their
+  locate scan read. K1 grouped CoW with MoR-v3 and missed this: contradicted for CoW, same bytes.
 
-The ratios below that compare RMoW's batch requests with MoR-v3's are low by that much (RMoW-C:
-0.21× MoR-v3's, not 0.13×). Their bytes, their reads and every other arm are unaffected.
-
-- **Uniform updates (m1, H2).** RMoW writes what copy-on-write writes: 37.5 MB per batch, against
-  CoW's 37.6 and MoR-v3's 0.46.
+- **Uniform updates (m1, H2).** RMoW writes what copy-on-write writes: 0.996–0.997× CoW's bytes
+  per batch, against MoR-v3's 0.012×.
 - **Row-group size (rg-sweep).** The balance for this workload is near 2–4 MiB. No size changes
   the order against MoR-v3:
-  - RMoW-B and -C write 10–18× MoR-v3's bytes per batch, in 7–18% of its requests;
+  - RMoW-B and -C write 11–18× MoR-v3's bytes per batch, in 15–26% of its requests;
   - they read the table in 8–37% of its GETs.
-- **Split files (split-vs-append).** They read the same and write the same bytes, at one more
-  request per changed file. Once older versions expire they keep 1.4–1.5× their live bytes, where
-  an uncompacted appendable file keeps 7.8–8.3×.
+- **Split files (split-vs-append).**
+  - They read the same, and write the same bytes within 0.2%.
+  - They take 1.28 more PUT-class requests per batch, one per changed file, but 1.73 fewer GETs,
+    since a footer-only object is fetched whole in one request where an appendable footer takes
+    two. On balance that is 0.45 fewer requests per batch.
+  - Once older versions expire they keep 1.4–1.5× their live bytes, where an uncompacted
+    appendable file keeps 7.8–8.3×.
 - **When to compact (compaction).**
-  - The store decides whether MoR-v3 should compact: 20–33% cheaper on S3 Standard, at most 7%
-    on S3 Express.
+  - The store decides whether MoR-v3 should compact. On S3 Standard it is 21–41% cheaper at up
+    to one full read per batch (every 5 batches) and 47–50% at ten (every batch). On S3 Express
+    it is at most 8% cheaper.
   - Space is the only reason to compact RMoW. It pays only when storage weighs enough (a day
-    between batches at this table size).
+    between batches at this table size). There appendable files save 48–71% at the sweep's
+    most aggressive policy, split files 5–13%.
   - Split files need little compaction, and it is cheap.
 - **Layout against tail policy (H3).**
   - In request counts, RMoW against TailCoW is the smaller difference, and mostly in reads
@@ -274,11 +281,13 @@ The ratios below that compare RMoW's batch requests with MoR-v3's are low by tha
   - In bytes it is the larger: RMoW writes 3.3–5.3 MB more per batch, from rewriting the row
     groups that updates touch. So on S3 Express it is the larger cost at up to one full read per
     batch.
-  - Append itself is worth 1.28 requests per batch. Most of the rest comes from how RMoW applies
-    updates (no locate scan, no DVs) and from one footer per file.
+  - Append itself saves 1.28 PUT-class requests per batch and costs 1.73 GETs. Net, that is
+    0.45 more requests, though still 1.4 µ$ saved per batch on S3 Express. Most of the rest
+    comes from how RMoW applies updates (no locate scan, no DVs) and from one footer per file.
 - **Time travel (H4).**
-  - Under both readers, an old version costs exactly what the current read of the same state
-    costs, in every request and byte column: all 600 pairs, 220 of them over RMoW files.
+  - Under every reader model, an old version costs exactly what the current read of the same
+    state costs, in every request and byte column: all 1,200 pairs, 440 of them over RMoW
+    files.
   - Dead bytes are never read: appendable files read 1.000–1.002× their live bytes.
   - The earlier runs planned old RMoW versions without split offsets, so their stock-reader
     comparison measured the harness. The reruns fix that, and otherwise match them record for
@@ -297,22 +306,17 @@ The ratios below that compare RMoW's batch requests with MoR-v3's are low by tha
   - Both older reader models load a file's DV once per split (row group), as Iceberg's readers
     do. That inflates every DV arm's reads, MoR-v3's and TailCoW's included.
 
-- **Store latency, simulated (step 1: one thread, the 4 MiB recency run).**
-  - On S3 Express, RMoW-C's batches are slower than MoR-v3's (about 0.7 against 0.3 s), mostly
-    its own CPU re-encoding rewritten regions. Its 6 requests against 45 do not make up for it at
-    S3 Express's request latencies.
-  - Where requests are dear (Azure, S3 Standard), RMoW-C's batches are about twice as fast. In a
-    generic sweep the crossover lies between 10 and 20 ms per request.
-  - Full reads are mostly decode CPU (about 3 s). RMoW-C's take 0.40–0.91× MoR-v3's across the
-    sweep, and its lead grows as requests get dearer.
-  - The replay of a request log predicts a run with the same latency injected: 284 of 288
-    one-thread phases within 10%, and all 25 eight-thread full reads within 20%.
-  - On 8 reader threads (the logged run, `cached-p8`), RMoW's read advantage disappears on S3
-    Express: a full read at batch 60 takes 543 ms for MoR-v3, 456 for TailCoW-C and 563 for
-    RMoW-C. Decode CPU spreads across threads, and MoR's many small files spread well. On Azure
-    Blob, RMoW-C (838 ms) still beats MoR-v3 (1,423) and matches TailCoW-C (890).
-  - The harness's split reader runs one task per object, so split files read slowly on 8
-    threads (1.9 s). That is the reader model, not the layout.
+- **Store latency, simulated (the 4 MiB recency run, rerun on the instruction measure).**
+  - On S3 Express, RMoW-C's batches take 2.2× MoR-v3's time, mostly its own CPU re-encoding
+    rewritten regions. Its 9.5 requests against 45 do not make up for it at S3 Express's request
+    latencies.
+  - Where requests are dear (Azure Blob), RMoW-C's batches take 0.52×. At 100 MiB/s the
+    crossover lies near 20 ms per request.
+  - On one thread, RMoW-C's full read at batch 60 takes 0.69× MoR-v3's on S3 Express and 0.34×
+    on Azure Blob. On eight threads, 0.86× and 0.50×.
+  - The replay of a request log predicts a run with the same latency injected: 280 of 281
+    one-thread phases within 10%, and 24 of 25 eight-thread full reads within 20% (S1 and S2
+    contradicted as written, one phase each).
 - **Store latency without the payload check (`sim-recency-4m-noverify`, 2026-10-23).** The run
   is `sim-recency-4m` with `verifyRows` off. Split files are now planned per row group. N1–N5
   all held:
@@ -398,35 +402,49 @@ The ratios below that compare RMoW's batch requests with MoR-v3's are low by tha
 | | Claim, in short | Status |
 |---|---|---|
 | H1 | Recency-skewed updates: RMoW-C's full read stays flat, its writes within 3× MoR-v3's | **Open.** Decided on S3 Express, which has not run. |
-| H2 | Uniform updates: RMoW's writes approach copy-on-write | **Held** (local, m1). |
+| H2 | Uniform updates: RMoW's writes approach copy-on-write | **Held** (local, m1; on the reruns, 0.996–0.997× CoW's bytes). |
 | H3 | RMoW-C against TailCoW is the single-object effect | **Mixed.** Smaller, and mostly in reads, in request counts; larger, and mostly write bytes, on S3 Express prices at up to one full read per batch. The dv ablation puts 70% to all of the extra bytes on the update handling, and most of the read savings on the single object (with a delete cache). |
-| H4 | Old versions read like current ones; dead bytes cost nothing | **Held** for reads, under both readers (after the rerun), and for dead bytes. The extra abort on S3 is **open**: the trace cannot show it. |
-| H5 | Split files: one more request per changed file, the same reads, kept bytes within 1.5× | **Held**, except that RMoW-C kept 1.52×. |
-| H6 | When to compact | **Mixed.** The read half held for RMoW-B, not RMoW-C; the space and write-for-read halves held; costs half held. |
+| H4 | Old versions read like current ones; dead bytes cost nothing | **Held** for reads, under every reader model (on the reruns, all 1,200 pairs), and for dead bytes. The extra abort on S3 is **open**: the trace cannot show it. |
+| H5 | Split files: one more request per changed file, the same reads, kept bytes within 1.5× | **Mostly held.** One more PUT-class request per changed file, the same bytes and reads; kept 1.41× for RMoW-B, 1.52× for RMoW-C. **Contradicted** for requests in all: on the reruns split files take 0.45 fewer per batch, since their writer fetches a footer-only object in one GET where an appendable footer takes two. |
+| H6 | When to compact | **Mixed** (unchanged on the reruns). The read half held for RMoW-B, not RMoW-C; the space and write-for-read halves held; the costs half held for split RMoW, not for MoR-v3 (its cheapest on S3 Express is every 10 batches, 4%). |
 
 ## What is next
 
-- **Simulate first.** Latency is simulated (lab/pages/store-latency.md), from endive's store
-  measurements, over runs whose requests are logged, with payload checks off: the check is the
-  harness's and costs about 70% of a read's CPU.
-- **A server core's pace.** P3–P5 were decided on this laptop. havoc could check that a server
-  core's pace leaves them as they are, once an admin allows counters there
-  (`sysctl -w kernel.perf_event_paranoid=2`; it is 4).
-- **S3 Express (milestone M3)**, only to check the simulation's parameters.
-  - It starts with `configs/s3x-calibration.json` and the S4 spike, which need credentials, a
-    directory bucket and an instance in its zone.
-  - It is also where H4's abort can be measured, from aborted connections or the GET bytes the
-    SDK declares.
-  - Split files can also run on standard S3.
-- **Gaps in what ran:**
-  - no repetitions or second seeds;
-  - no write-up of m1 beyond H2;
-  - only runs from 2026-10-23 on can have the `cached` reader model, which loads each file's
-    deletes once per read. Earlier runs' readers load a file's DV once per split (row group), as
-    Iceberg's readers do, which inflates MoR-v3's and TailCoW's reads;
-  - runs before `sim-recency-4m-noverify` read a split file's objects as one task each, not one
-    per row group, and under `stock` read the version's footer once per object instead of once
-    per split. Their split arms' parallel reads are slow for that reason alone, and their stock
-    reads take fewer GETs than a rerun would;
-  - runs before 2026-10-24 let RMoW's writer keep its footers across batches (above), so their
-    RMoW batches take 3–4 requests fewer than a rerun would;
+The goal is a blog post on appending regions to Parquet: compacting regions, and when an
+appendable object beats Iceberg's merge-on-read. ORC is out of scope (decided 2026-10-25): it
+would need its own arms and reader checks.
+
+- **Now: the core experiments rerun on the current build** (docs/HYPOTHESES.md, 2026-10-25):
+  the 22 `local-*` configurations and the two `sim-*` ones. They fix the gaps below: writer
+  footers, the `cached` reader models, split planning, the payload check, and CPU in
+  instructions. Controls K1–K3 check them against the old runs, and H2–H6 are re-decided on them.
+- **Then: the write-ups on the reruns.**
+  - The pinned pages (layout-vs-policy, time-travel, store-latency) move to the reruns.
+  - The campaign pages (run, sweep, layouts) follow once the old runs are marked superseded.
+  - The compaction sweep, until now only a static report, gets a lab page.
+  - A summary page holds every number the post quotes.
+- **Prepared: S3 Express**, to anchor the simulated latencies (docs/S3X_RUNBOOK.md):
+  - its twin match;
+  - the spike's request latencies and cost per appended part;
+  - a check of the latency model on one run.
+
+  It needs a directory bucket, an instance in its zone, and credentials. Its hypotheses are
+  drafted in the runbook, to register with the held H1 draft.
+- **Optional, to come back to:**
+  - a second seed, to show the request and byte findings are not one op log's;
+  - a CDC-like workload with late arrivals;
+  - updating the held H1 draft (docs/HYPOTHESES.md), whose figures come from the old runs;
+  - a server core's pace on havoc. P3–P5 were decided on this laptop; havoc could check them once
+    an admin allows counters (`sysctl -w kernel.perf_event_paranoid=2`; it is 4);
+  - docker/README.md still says the repository has no remote; it has one (`self`, on GitHub), so
+    havoc could pull instead of taking a bundle;
+  - H4's abort, measurable on S3 from aborted connections or the GET bytes the SDK declares;
+  - split files on standard S3.
+- **Gaps in the old runs**, which the rerun closes:
+  - no `cached` reader model in runs before 2026-10-23, so MoR-v3's and TailCoW's reads load a
+    file's DV once per split;
+  - split files read as one task per object before `sim-recency-4m-noverify`;
+  - RMoW's writer keeping its footers across batches before 2026-10-24, so its batches take 3–4
+    requests fewer than a rerun;
+  - the payload check on, and CPU in thread time.
+- **Gaps that remain:** no repetitions or second seeds (above), and no write-up of m1 beyond H2.

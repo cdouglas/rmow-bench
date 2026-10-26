@@ -3,12 +3,14 @@ project:
   title: rmow-bench results
   toc:
     - file: index.md
+    - file: pages/summary.md
     - file: pages/experiments.md
     - file: pages/run.md
     - file: pages/sweep.md
     - file: pages/layouts.md
     - file: pages/layout-vs-policy.md
     - file: pages/time-travel.md
+    - file: pages/compaction.md
     - file: pages/store-latency.md
     - file: pages/scale.md
     - file: pages/cpu-measure.md

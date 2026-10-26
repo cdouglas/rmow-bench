@@ -221,3 +221,314 @@ def write():
     summary = df.groupby("arm", sort=False).agg(
         mb_written_per_batch=("mb_written", "mean"), requests_per_batch=("requests", "mean"))
     return fig, summary.reset_index()
+
+
+def compaction_analysis(build, arms=None, readers=("one-footer", "cached")):
+    """The compaction sweep (configs/local-compact-*.json) from one build: per run, arm and
+    reader, writes per batch, one full read and the table kept; the cost model over two price
+    lists, three read rates and two batch intervals; each arm's cheapest policy per scenario
+    against a noise band; and H6's checks. lab/pages/compaction.md presents it, and the summary
+    page quotes it. Returns the analysis's names."""
+    from types import SimpleNamespace
+    ARMS = list(arms or ["mor-v3", "tailcow-c", "rmow-b", "rmow-c", "rmow-b-split", "rmow-c-split"])
+    READERS = list(readers)  # one-footer decides H6 (as registered); cached is the post's
+    LEVELS = {0.25: "aggressive", 0.5: "default", 0.75: "lazy"}  # by RMoW's garbage ratio
+    BUILD = build
+    labels = dict(q("SELECT arm, arm_label FROM arm_meta").itertuples(index=False))
+
+    runs = q("""
+        SELECT r.run_id, r.label, r.versions ->> 'build_snapshot' AS snapshot,
+               max(p.value_num) FILTER (WHERE p.key = 'layout.compactEvery') AS P,
+               max(p.value_num) FILTER (WHERE p.key = 'layout.compactGarbageRatio') AS g
+        FROM canonical_runs r JOIN run_params p USING (run_id)
+        WHERE r.label LIKE 'local-compact-%' AND r.git_sha LIKE $b || '%'
+        GROUP BY ALL""", b=BUILD)
+    runs["P"] = runs.P.fillna(0).astype(int)
+    runs["policy"] = [("none" if p == 0 else f"{LEVELS.get(g, f'g={g}')} P={p}") for p, g in zip(runs.P, runs.g)]
+    runs["key"] = [((0, 0) if p == 0 else (list(LEVELS).index(g) + 1, p)) for p, g in zip(runs.P, runs.g)]
+
+    # CPU is each phase's instructions at its arm's pace (lab/pages/cpu-measure.md). The sweep's
+    # runs are one workload on one machine, so the pace (median cycles per instruction of an arm's
+    # phases of one kind and reader) is estimated over all of them, as is the clock: identical work
+    # then costs identical CPU, where per-run paces would differ by several percent
+    PACE = """
+        pace AS (SELECT arm, phase, reader, median(cycles / instructions) AS cpi FROM phase_work
+                 WHERE list_contains($ids, run_id) GROUP BY ALL),
+        clock AS (SELECT median(cycles / user_ns) AS ghz FROM phase_work
+                  WHERE list_contains($ids, run_id) AND user_ns > 0),
+        work AS (SELECT w.run_id, w.arm, w.step, w.phase, w.reader,
+                        w.instructions * p.cpi / (SELECT ghz FROM clock) / 1e6 AS work_ms
+                 FROM phase_work w JOIN pace p ON p.arm = w.arm AND p.phase = w.phase
+                  AND p.reader IS NOT DISTINCT FROM w.reader
+                 WHERE list_contains($ids, w.run_id))"""
+    # per run and arm: writes per batch (batches and compactions), and the table kept
+    summary = q("""
+        WITH """ + PACE + """, s AS (
+            SELECT s.*, coalesce(w.work_ms, (s.cpu_ns + coalesce(s.pool_cpu_ns, 0)) / 1e6) AS cpu_ms,
+                   w.work_ms IS NOT NULL AS counted
+            FROM steps s LEFT JOIN work w
+              ON w.run_id = s.run_id AND w.arm = s.arm AND w.step = s.step AND w.phase = s.phase
+             AND w.reader IS NOT DISTINCT FROM s.reader
+            WHERE list_contains($ids, s.run_id) AND list_contains($arms, s.arm)
+        ), b AS (
+            SELECT run_id, arm, count(DISTINCT step) FILTER (WHERE phase = 'batch' AND step > 0) AS batches
+            FROM s GROUP BY ALL
+        )
+        SELECT s.run_id, s.arm,
+               sum(bytes_written) FILTER (WHERE phase IN ('batch', 'compact') AND step > 0) / any_value(batches) / 1e6 AS write_mb,
+               coalesce(sum(bytes_written) FILTER (WHERE phase = 'compact'), 0) / any_value(batches) / 1e6 AS compact_mb,
+               sum(puts + appends) FILTER (WHERE phase IN ('batch', 'compact') AND step > 0) / any_value(batches) AS puts,
+               sum(gets + heads) FILTER (WHERE phase IN ('batch', 'compact') AND step > 0) / any_value(batches) AS write_gets,
+               sum(bytes_read) FILTER (WHERE phase IN ('batch', 'compact') AND step > 0) / any_value(batches) / 1e6 AS write_read_mb,
+               sum(cpu_ms) FILTER (WHERE phase IN ('batch', 'compact') AND step > 0) / any_value(batches) / 1e3 AS write_cpu_s,
+               avg(stored_bytes - reclaimable_bytes) FILTER (WHERE phase = 'state' AND step > 0) / 1e9 AS kept_gb,
+               avg((stored_bytes - reclaimable_bytes) / live_bytes) FILTER (WHERE phase = 'state' AND step > 0) AS kept_over_live,
+               arg_max((stored_bytes - reclaimable_bytes) / live_bytes, step) FILTER (WHERE phase = 'state') AS kept_over_live_end,
+               bool_and(counted) FILTER (WHERE phase IN ('batch', 'compact')) AS counted
+        FROM s JOIN b USING (run_id, arm) GROUP BY ALL""", ids=list(runs.run_id), arms=ARMS)
+    # per run, arm and reader: one full read, the mean over the probes after the initial load
+    reads = q("""
+        WITH """ + PACE + """
+        SELECT s.run_id, s.arm, s.reader,
+               avg(s.gets + s.heads) FILTER (WHERE s.phase = 'read_full') AS read_gets,
+               avg(s.bytes_read) FILTER (WHERE s.phase = 'read_full') / 1e6 AS read_mb,
+               avg(coalesce(w.work_ms, (s.cpu_ns + coalesce(s.pool_cpu_ns, 0)) / 1e6))
+                   FILTER (WHERE s.phase = 'read_full') / 1e3 AS read_cpu_s,
+               avg(s.gets + s.heads) FILTER (WHERE s.phase = 'read_recent') AS recent_gets
+        FROM steps s LEFT JOIN work w
+          ON w.run_id = s.run_id AND w.arm = s.arm AND w.step = s.step AND w.phase = s.phase
+         AND w.reader IS NOT DISTINCT FROM s.reader
+        WHERE list_contains($ids, s.run_id) AND list_contains($arms, s.arm) AND s.step > 0
+          AND list_contains($readers, s.reader)
+        GROUP BY ALL""", ids=list(runs.run_id), arms=ARMS, readers=READERS)
+    t_all = summary.merge(reads, on=["run_id", "arm"]).merge(runs[["run_id", "policy", "key", "P", "g"]], on="run_id")
+    t_all["arm_label"] = t_all.arm.map(labels)
+    # a full read's CPU is the arm's mean over its runs, as analysis/compaction.py charges it: reads
+    # do the same work under every policy that leaves the layout alone
+    t_all["read_cpu_s"] = t_all.groupby(["arm", "reader"]).read_cpu_s.transform("mean")
+    COUNTED = bool(t_all.counted.all())
+
+    # US East list prices, per request and per GB (storage per GB-month): S3 Standard (in-region
+    # transfer free) and S3 Express One Zone since its 2025-04-10 price cut; DELETEs are free. Compute
+    # is an assumption, about a general-purpose vCPU on demand (analysis/compaction.py)
+    CPU_PER_VCPU_HOUR = 0.04
+    PRICES = {
+        "S3 Standard": {"put": 0.005e-3, "get": 0.0004e-3, "upload": 0.0, "retrieval": 0.0,
+                        "storage": 0.023, "append": False},
+        "S3 Express": {"put": 0.00113e-3, "get": 0.00003e-3, "upload": 0.0032, "retrieval": 0.0006,
+                       "storage": 0.11, "append": True},
+    }
+    READ_RATES = [0.1, 1, 10]
+    INTERVALS = {"5 min": 5, "1 day": 24 * 60}
+    MINUTES_PER_MONTH = 30 * 24 * 60
+    IO = ["write_mb", "puts", "write_gets", "write_read_mb", "read_gets", "read_mb", "kept_gb"]
+
+
+    def costs(r, prices, q_, minutes):
+        """One arm and policy's cost per batch, in USD, by component."""
+        cpu = CPU_PER_VCPU_HOUR / 3600
+        return {
+            "write requests": r.puts * prices["put"] + r.write_gets * prices["get"],
+            "write transfer": (r.write_mb * prices["upload"] + r.write_read_mb * prices["retrieval"]) / 1e3,
+            "write compute": r.write_cpu_s * cpu,
+            "reads": q_ * (r.read_gets * prices["get"] + r.read_mb / 1e3 * prices["retrieval"] + r.read_cpu_s * cpu),
+            "storage": r.kept_gb * prices["storage"] * minutes / MINUTES_PER_MONTH,
+        }
+
+
+    def total(r, prices, q_, minutes):
+        return sum(costs(r, prices, q_, minutes).values())
+
+
+    def same_io(a, b):
+        return all(abs(a[c] - b[c]) <= 1e-9 * max(1.0, abs(b[c])) for c in IO)
+
+
+    def noise_band(t):
+        """The largest cost difference, against no compaction, between runs of an arm whose policy
+        never fired (no compaction bytes, the same batches, reads and space), with the GETs and bytes
+        its checks read set to none's: what CPU alone moves the cost by."""
+        band = 0.0
+        for arm in ARMS:
+            d = t[t.arm == arm]
+            none = d[d.policy == "none"].iloc[0]
+            for _, r in d[d.policy != "none"].iterrows():
+                r = r.copy()
+                r["write_gets"], r["write_read_mb"] = none.write_gets, none.write_read_mb
+                if r.compact_mb == 0 and same_io(r, none):
+                    for prices in PRICES.values():
+                        for minutes in INTERVALS.values():
+                            for q_ in READ_RATES:
+                                a = total(none, prices, q_, minutes)
+                                band = max(band, abs(total(r, prices, q_, minutes) - a) / a)
+        return band
+
+
+    def merged(t):
+        """One row per arm and distinct I/O: policies of an arm that did the same I/O (that fired
+        alike, or never) are one, with their CPU averaged, named by what they share."""
+        rows = []
+        for arm in ARMS:
+            groups = []
+            for _, r in t[t.arm == arm].sort_values("key").iterrows():
+                for g in groups:
+                    if same_io(r, g[0]):
+                        g.append(r)
+                        break
+                else:
+                    groups.append([r])
+            for g in groups:
+                row = g[0].copy()
+                row["write_cpu_s"] = np.mean([r.write_cpu_s for r in g])
+                row["read_cpu_s"] = np.mean([r.read_cpu_s for r in g])
+                names = [r.policy for r in g]
+                periods = {r.P for r in g}
+                if "none" in names:
+                    row["policy"] = "none" + (f" (= {len(names) - 1} that never fired)" if len(names) > 1 else "")
+                elif len(periods) == 1 and len(names) == len(LEVELS):
+                    row["policy"] = f"any level P={periods.pop()}"
+                else:
+                    row["policy"] = " = ".join(names)
+                rows.append(row)
+        return pd.DataFrame(rows)
+
+
+    def cheapest(t, band):
+        """Per store, read rate and interval: each arm's cheapest policy, its cost (µ$ per batch) and
+        its saving against no compaction; a saving within the noise band counts as none."""
+        rows = []
+        m = merged(t)
+        for store, prices in PRICES.items():
+            for interval, minutes in INTERVALS.items():
+                for q_ in READ_RATES:
+                    row = {"store": store, "full reads per batch": q_, "batch interval": interval}
+                    for arm in ARMS:
+                        if not prices["append"] and arm in ("rmow-b", "rmow-c"):
+                            row[labels[arm]] = "n/a (no append)"
+                            continue
+                        d = m[m.arm == arm].assign(cost=lambda x: [total(r, prices, q_, minutes) for _, r in x.iterrows()])
+                        none = d[d.policy.str.startswith("none")].iloc[0]
+                        best = d.loc[d.cost.idxmin()]
+                        saving = 1 - best.cost / none.cost
+                        if saving <= band:
+                            row[labels[arm]] = f"none: {none.cost * 1e6:.0f}"
+                        else:
+                            pct = f"{100 * saving:.1f}" if saving < 0.01 else f"{100 * saving:.0f}"
+                            row[labels[arm]] = f"{best.policy}: {best.cost * 1e6:.0f} ({pct}%)"
+                    rows.append(row)
+        return pd.DataFrame(rows)
+
+
+    T = {r: t_all[t_all.reader == r] for r in READERS}
+    BAND = {r: noise_band(T[r]) for r in READERS}
+    CHEAPEST = {r: cheapest(T[r], BAND[r]) for r in READERS}
+
+    # H6, as registered: on the one-footer reader
+    H = T["one-footer"]
+    M = merged(H)
+
+
+    def arm_rows(arm):
+        return H[H.arm == arm]
+
+
+    def none_of(arm):
+        return arm_rows(arm)[arm_rows(arm).policy == "none"].iloc[0]
+
+
+    def span(xs, fmt="{:.2f}"):
+        lo, hi = fmt.format(min(xs)), fmt.format(max(xs))
+        return lo if lo == hi else f"{lo}–{hi}"
+
+
+    # reads barely depend on compaction: every policy within 2 GETs of none
+    read_dev = {a: (arm_rows(a).read_gets - none_of(a).read_gets) for a in ["rmow-b", "rmow-c", "rmow-b-split", "rmow-c-split"]}
+    reads_b = all(read_dev[a].abs().max() <= 2 for a in ["rmow-b", "rmow-b-split"])
+    reads_c = all(read_dev[a].abs().max() <= 2 for a in ["rmow-c", "rmow-c-split"])
+    # appendable: kept at P = 1 under 1 / (1 - g), compaction writes falling as g rises
+    app = H[H.arm.isin(["rmow-b", "rmow-c"])]
+    p1 = app[app.P == 1]
+    kept_p1 = {g: p1[p1.g == g].kept_over_live.max() for g in LEVELS}
+    comp_p1 = {g: p1[p1.g == g].compact_mb.mean() for g in LEVELS}
+    space_app = (all(kept_p1[g] < 1 / (1 - g) for g in LEVELS)
+                 and comp_p1[0.25] > comp_p1[0.5] > comp_p1[0.75])
+    # split: at g = 0.25, kept 1.3 or less for under 0.5 MB of compaction writes; at 0.75 nothing moves
+    spl = H[H.arm.isin(["rmow-b-split", "rmow-c-split"])]
+    aggr = spl[spl.g == 0.25]
+    lazy = spl[spl.g == 0.75]
+    space_split = aggr.kept_over_live.max() <= 1.3 and aggr.compact_mb.max() < 0.5 and lazy.compact_mb.max() == 0
+    # MoR-v3 and TailCoW: as P falls (none, 20, 10, 5, 1), writes rise and full-read GETs fall
+    ORDER = [0, 20, 10, 5, 1]
+
+
+    def by_p(arm, col):
+        d = arm_rows(arm)
+        return [d[d.P == p_][col].mean() for p_ in ORDER]
+
+
+    def monotone(xs, rising):
+        return all((b > a) if rising else (b < a) for a, b in zip(xs, xs[1:]))
+
+
+    trade = all(monotone(by_p(a, "write_mb"), True) and monotone(by_p(a, "read_gets"), False)
+                for a in ["mor-v3", "tailcow-c"])
+    # costs on S3 Express at 5-minute batches and one full read per batch
+    EXPRESS = PRICES["S3 Express"]
+
+
+    def best(arm, prices, q_, minutes, frame=M):
+        d = frame[frame.arm == arm].assign(cost=lambda x: [total(r, prices, q_, minutes) for _, r in x.iterrows()])
+        return d.loc[d.cost.idxmin()], d[d.policy.str.startswith("none")].iloc[0]
+
+
+    split_best = [best(a, EXPRESS, 1, 5) for a in ["rmow-b-split", "rmow-c-split"]]
+    split_within = all(b.cost <= 1.05 * n.cost for b, n in split_best)
+    mor_best, mor_none = best("mor-v3", EXPRESS, 1, 5)
+    mor_p = int(mor_best.P)
+    mor_saving = 1 - mor_best.cost / mor_none.cost
+    mor_ok = mor_p != 0 and mor_p <= 5 and mor_saving > BAND["one-footer"]
+    std_best, std_none = best("mor-v3", PRICES["S3 Standard"], 1, 5)
+
+
+    def verdict(ok):
+        return "held" if ok else "contradicted"
+
+
+    # the cheapest policies at a day's weight on S3 Express, at up to one full read per batch
+    day = [(a, *best(a, EXPRESS, q_, 24 * 60)) for a in ARMS for q_ in (0.1, 1)]
+    day_saving = {a: [1 - b.cost / n.cost for x, b, n in day if x == a] for a in ARMS}
+    day_cost = {a: [b.cost for x, b, n in day if x == a] for a in ARMS}
+    split_vs_app = [1 - day_cost[s_][i] / day_cost[a][i] for s_, a in [("rmow-b-split", "rmow-b"), ("rmow-c-split", "rmow-c")] for i in range(2)]
+    # storage's share of each arm's cost at 5-minute batches
+    share5 = max(costs(none_of(a), EXPRESS, q_, 5)["storage"] / total(none_of(a), EXPRESS, q_, 5)
+                 for a in ARMS for q_ in READ_RATES)
+    N = {
+        "band": f"{100 * BAND['one-footer']:.2f}%",
+        "b_dev": f"{max(read_dev[a].abs().max() for a in ['rmow-b', 'rmow-b-split']):.1f}",
+        "c_dev": f"{max(read_dev[a].abs().max() for a in ['rmow-c', 'rmow-c-split']):.1f}",
+        "c_none": f"{none_of('rmow-c').read_gets:.1f}",
+        "c_min": f"{arm_rows('rmow-c').read_gets.min():.1f}",
+        "b_none": f"{none_of('rmow-b').read_gets:.1f}",
+        "b_rng": span(list(arm_rows("rmow-b").read_gets) + list(arm_rows("rmow-b-split").read_gets), "{:.1f}"),
+        "kept_end_app": span([none_of(a).kept_over_live_end for a in ["rmow-b", "rmow-c"]], "{:.1f}"),
+        "kept_end_split": span([none_of(a).kept_over_live_end for a in ["rmow-b-split", "rmow-c-split"]]),
+        "kept_p1": ", ".join(f"{kept_p1[g]:.2f}" for g in LEVELS),
+        "comp_p1": ", ".join(f"{comp_p1[g]:.2f}" for g in LEVELS),
+        "aggr_kept": span(aggr.kept_over_live), "aggr_mb": span(aggr.compact_mb),
+        "none_split_kept": span([none_of(a).kept_over_live for a in ["rmow-b-split", "rmow-c-split"]]),
+        "mor_w": " → ".join(f"{x:.2f}" for x in by_p("mor-v3", "write_mb")),
+        "mor_r": " → ".join(f"{x:.1f}" for x in by_p("mor-v3", "read_gets")),
+        "tc_w": " → ".join(f"{x:.2f}" for x in by_p("tailcow-c", "write_mb")),
+        "tc_r": " → ".join(f"{x:.1f}" for x in by_p("tailcow-c", "read_gets")),
+        "mor_best": mor_best.policy, "mor_saving": f"{100 * mor_saving:.0f}%",
+        "std_best": std_best.policy, "std_saving": f"{100 * (1 - std_best.cost / std_none.cost):.0f}%",
+        "day_app": span([100 * x for a in ["rmow-b", "rmow-c"] for x in day_saving[a]], "{:.0f}%"),
+        "day_split": span([100 * x for a in ["rmow-b-split", "rmow-c-split"] for x in day_saving[a]], "{:.0f}%"),
+        "split_vs_app": span([100 * x for x in split_vs_app], "{:.0f}%"),
+        "share5": f"{100 * share5:.0f}%",
+        "v_reads": ("held for B, not for C" if reads_b and not reads_c else verdict(reads_b and reads_c)),
+        "v_space_app": verdict(space_app), "v_space_split": verdict(space_split), "v_trade": verdict(trade),
+        "v_cost_split": verdict(split_within), "v_cost_mor": verdict(mor_ok),
+    }
+
+    return SimpleNamespace(**{k: v for k, v in locals().items() if not k.startswith("_")})

@@ -56,17 +56,20 @@ WHERE s.parallelism = 1;
 
 -- The same over a grid of generic stores: every request costs request_ms (whatever its kind) and
 -- every MiB 1000 / mib_per_s ms, in either direction. For sweeps.
+-- cpu_ms is the phase's modeled time where the run counts instructions, else its thread CPU.
 CREATE MACRO store_sweep(request_ms_list, mib_per_s_list) AS TABLE
 WITH s AS (
-    SELECT s.*, coalesce(rr.parallelism, 1) AS parallelism
+    SELECT s.*, coalesce(rr.parallelism, 1) AS parallelism, w.work_ms
     FROM steps s LEFT JOIN run_readers rr ON rr.run_id = s.run_id AND rr.reader = s.reader
+    LEFT JOIN phase_work w ON w.run_id = s.run_id AND w.arm = s.arm AND w.step = s.step
+                          AND w.phase = s.phase AND w.reader IS NOT DISTINCT FROM s.reader
     WHERE s.phase IN ('batch', 'compact', 'read_full', 'read_recent', 'read_old')
 ), g AS (
     SELECT l AS request_ms, b AS mib_per_s
     FROM unnest(request_ms_list) AS t1(l), unnest(mib_per_s_list) AS t2(b)
 )
 SELECT s.run_id, s.arm, s.step, s.phase, s.reader, g.request_ms, g.mib_per_s,
-       s.cpu_ns / 1e6 AS cpu_ms,
+       coalesce(s.work_ms, s.cpu_ns / 1e6) AS cpu_ms,
        (s.gets + s.heads + s.puts + s.appends + s.deletes) * g.request_ms AS request_ms_total,
        (s.bytes_read + s.bytes_written) / 1048576.0 * 1000.0 / g.mib_per_s AS transfer_ms
 FROM s CROSS JOIN g

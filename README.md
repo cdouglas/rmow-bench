@@ -286,17 +286,15 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
 - **Done locally:** the matrix of recency and uniform keys, with compaction off and every 10
   batches (`configs/local-m1-*`).
 - **Done locally:** a row-group size sweep under recency-skewed updates
-  ([docs/measurements/rg-sweep-recency-2026-10-21.md](docs/measurements/rg-sweep-recency-2026-10-21.md)),
-  and the S3 store against an emulator.
+  ([lab/pages/sweep.md](lab/pages/sweep.md)), and the S3 store against an emulator.
 - **Done locally:** RMoW on split files, an object per version instead of appends, against
-  appendable files
-  ([docs/measurements/split-vs-append-2026-10-21.md](docs/measurements/split-vs-append-2026-10-21.md)).
+  appendable files ([lab/pages/layouts.md](lab/pages/layouts.md)).
 - **Done locally:** store latency, simulated from the runs' requests, bytes and CPU, with endive's
   store profiles, and validated against injected latency
   ([lab/pages/store-latency.md](lab/pages/store-latency.md)).
 - **Done locally:** when to compact, as an outcome. Eleven compaction policies were run, and each
   arm's cheapest one was found per store, read rate and storage weight
-  ([docs/measurements/compaction-sweep-2026-10-21.md](docs/measurements/compaction-sweep-2026-10-21.md)).
+  ([lab/pages/compaction.md](lab/pages/compaction.md)).
 - **Done locally:**
   - layout against tail policy, H3
     ([lab/pages/layout-vs-policy.md](lab/pages/layout-vs-policy.md));
@@ -307,6 +305,10 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
   - layout against update handling, the `-dv` ablation, whose runs and arms were deleted once its
     conclusions were recorded
     ([docs/DESIGN.md](docs/DESIGN.md#deletion-vectors-on-an-appendable-file-an-ablation-removed)).
+- **Rerun on 2026-10-25:** every core experiment above, on the current build: writer footers
+  held per transaction, the `cached` reader models, the payload check off, and CPU in
+  instructions. Their write-ups read the reruns, and
+  [lab/pages/summary.md](lab/pages/summary.md) collects the numbers a write-up quotes.
 - **Done on havoc:** the scale campaign, the 4 MiB recency setting scaled to Iceberg's defaults
   (128 MiB row groups, 512 MiB files), in a container (`docker/campaigns/scale.json`,
   [docker/README.md](docker/README.md); [lab/pages/scale.md](lab/pages/scale.md)). Requests,

@@ -14,15 +14,15 @@ from labbook import palette, q, table, theme
 theme()
 
 # The runs this page reads: the uncompacted configurations that read old versions, rerun on
-# 2026-10-22/23 from cfe40b2, once RmowArm.readAfter planned old versions with their split offsets.
+# 2026-10-25 from b6c2605 (docs/HYPOTHESES.md, 2026-10-25).
 RUNS = [
-    "local-m1-recency-exp-nocompact-4a77b88bc5f8/20261022T224506Z",
-    "local-m1-uniform-nocompact-c7e50a35a7c5/20261023T042229Z",
-    "local-rg-sweep-recency-exp-rg1m-ddb0f45ee310/20261023T042220Z",
-    "local-rg-sweep-recency-exp-rg2m-9ff075ae2483/20261023T044613Z",
-    "local-rg-sweep-recency-exp-rg4m-b2e059145e94/20261023T042224Z",
-    "local-rg-sweep-recency-exp-rg8m-4920abe2147d/20261023T044422Z",
-    "local-split-recency-exp-nocompact-309eabcc0dc5/20261023T045645Z",
+    "local-m1-recency-exp-nocompact-3e13131d9629/20261025T204243Z",
+    "local-m1-uniform-nocompact-717579acbd22/20261025T210333Z",
+    "local-rg-sweep-recency-exp-rg1m-b1da2d63e642/20261025T165105Z",
+    "local-rg-sweep-recency-exp-rg2m-17d089aa92d2/20261025T173636Z",
+    "local-rg-sweep-recency-exp-rg4m-a9f7b46157c0/20261025T185718Z",
+    "local-rg-sweep-recency-exp-rg8m-3bdbc1d7c076/20261025T192231Z",
+    "local-split-recency-exp-nocompact-0b250a9fdb41/20261025T203018Z",
 ]
 GROUP = """CASE WHEN p.arm LIKE 'rmow-%-split' THEN 'RMoW split'
                 WHEN p.arm LIKE 'rmow-%' THEN 'RMoW appendable'
@@ -81,6 +81,7 @@ N = {
     "pairs": f"{summary.pairs.sum()}",
     "identical": f"{summary.identical.sum()}",
     "per_reader": f"{summary.groupby('reader').pairs.sum().iloc[0]}",
+    "n_readers": f"{summary.reader.nunique()}",
     "rmow_pairs": f"{rmow_rows.pairs.sum()}",
     "rmow_per_reader": f"{rmow_rows.groupby('reader').pairs.sum().iloc[0]}",
     "read_live": f"{rmow.read_over_live.min():.3f}–{rmow.read_over_live.max():.3f}",
@@ -101,10 +102,11 @@ H4 (docs/HYPOTHESES.md) predicts two things:
 - **Footers.** Without a footer cache, an old version's footer read on S3 costs one more aborted
   open-ended GET than a current one.
 
-The seven uncompacted configurations that read old versions were rerun for this page, once time
-travel planned old RMoW versions with their own split offsets (commit 150cc93). The earlier runs
-did not, which made the stock reader's comparison measure the harness. They are deleted, and
-[what they showed](#earlier-runs) is recorded below.
+The seven uncompacted configurations that read old versions were rerun for this page once time
+travel planned old RMoW versions with their own split offsets (commit 150cc93). They were rerun
+again on 2026-10-25, on the current build, with four reader models (docs/HYPOTHESES.md). The first
+runs did not plan old versions that way, which made the stock reader's comparison measure the
+harness. They are deleted, and [what they showed](#earlier-runs) is recorded below.
 
 ## Setup
 
@@ -118,23 +120,27 @@ did not, which made the stock reader's comparison measure the harness. They are 
 **Workload.** The runs share the m1 workload: 1M initial rows, then 60 batches of 10k operations,
 70% inserts, 25% updates and 5% deletes.
 
-**Builds.** All are commit cfe40b2:
-- `m1-recency` came from `results/builds/20261022T224505Z-cfe40b2f65bf`.
-- The others came from four snapshots marked dirty: `20261023T042219Z`, `…042224Z`, `…042228Z`
-  and `…045645Z`. Their patch touches only `CLAUDE.md`, `docs/EXPERIMENTS.md` and
-  `lab/annotations.toml`.
-- The runs ran two or three at a time, which matters only for CPU, and CPU is not used here.
+**Builds.** All are commit b6c2605, rerun on 2026-10-25 (docs/HYPOTHESES.md):
+- the rg-sweep and split runs came from `results/builds/20261025T165102Z-b6c26055757b-dirty`;
+- the m1 runs came from `…20261025T204242Z-b6c26055757b-dirty`.
 
-**Probes.** Every 10 batches, every run reads the table three times, each under both reader
-models:
+Their patch holds the rerun's configurations (payload check off, four reader models) and
+documentation. The runs ran one at a time. CPU is not used here.
+
+**Probes.** Every 10 batches, every run reads the table three times, each under every reader
+model:
 - a full read of the current table (`read_full`);
 - a recent-window read (`read_recent`);
 - a time-travel read of the table as it was 20 batches back (`read_old`).
 
-The two readers are:
+The readers are:
 - **`one-footer`** reads each footer once, in one 64 KiB prefetch, which is a bounded ranged GET.
+- **`cached`** does the same, and loads each data file's deletes once per read.
+- **`cached-p8`** is `cached` on eight threads.
 - **`stock`** behaves like stock Iceberg: one split per row group, and each split reads the
   footer with two stream requests.
+
+The chart shows the two that read footers most differently; the table covers all of them.
 
 **The comparison is paired.** `read_old` at step s reads exactly the table state that
 `read_full` read at step s − 20, when that state was current. So each pair has the same files,
@@ -183,7 +189,7 @@ alt.hconcat(*panels)
 
 Each point is one pair: a time-travel read against the full read of the same state 20 batches
 earlier. Both axes are logarithmic, and the dashed line is "the same": every pair lies on it,
-under both readers. The table gives the totals.
+under both readers shown and the other two. The table gives the totals.
 
 ```{code-cell} ipython3
 :tags: [remove-input]
@@ -218,7 +224,7 @@ table(dead.assign(read_over_live=dead.read_over_live.map("{:.3f}".format))
 
 The table comes from `steps`: `read_full` (one-footer reader) joined to `state` at step 60.
 
-Across all {eval}`N["skip_runs"]` canonical runs, every read phase under both readers shows
+Across all {eval}`N["skip_runs"]` canonical runs, every read phase under every reader shows
 `bytes_skipped_through = 0`. So does every write-side read.
 
 (earlier-runs)=
@@ -271,16 +277,15 @@ The m1 runs' other differences are their MoR and TailCoW arms' HEADs and bytes, 
 
 ## Findings
 
-- **An old version reads like the current one, under both readers.**
-  - All {eval}`N["identical"]` of {eval}`N["pairs"]` pairs ({eval}`N["per_reader"]` per reader)
-    are identical in every column. That includes all {eval}`N["rmow_pairs"]` over RMoW files,
+- **An old version reads like the current one, under every reader model.**
+  - All {eval}`N["identical"]` of {eval}`N["pairs"]` pairs ({eval}`N["per_reader"]` under each
+    of the {eval}`N["n_readers"]` readers) are identical in every column. That includes all {eval}`N["rmow_pairs"]` over RMoW files,
     appendable and split.
   - Under the stock reader, the old version now costs the same footer reads as the current one:
     one per row group, two stream requests each.
-- **The earlier runs measured the harness, not RMoW.** Under the stock reader, their time-travel
-  reads took 62% fewer GETs, because old versions were planned without split offsets
-  ([above](#earlier-runs)). Apart from that, the reruns match them record for record, as
-  registered.
+- **The first runs, of 2026-10-21, measured the harness, not RMoW.** Under the stock reader,
+  their time-travel reads took 62% fewer GETs, because old versions were planned without split
+  offsets ([above](#earlier-runs)). Every rerun since plans old versions with their own.
 - **Dead regions cost no read bytes.**
   - No read anywhere read through a gap. Iceberg's vectored Parquet reads go through
     `RangeReadable` as one bounded GET per run of adjacent column chunks (I/O parity rule 1).
@@ -313,7 +318,7 @@ The m1 runs' other differences are their MoR and TailCoW arms' HEADs and bytes, 
 
 ## H4 (docs/HYPOTHESES.md)
 
-- **Old versions read like current ones: held, under both readers.** All
+- **Old versions read like current ones: held, under every reader model.** All
   {eval}`N["rmow_pairs"]` pairs over RMoW files cost exactly what the current read of the same
   state cost, in requests, bytes, aborts and skip-through.
 - **Dead bytes add no read bytes: held.** No read read through a gap, and appendable files read
