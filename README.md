@@ -37,7 +37,8 @@ Four documents go with this one:
 ## Build and run
 
 Requires JDK 17 and Maven. Iceberg (1.12.0) and parquet-java (1.17.1) are the released versions
-from Maven Central. The fork is not needed.
+from Maven Central. The fork is not needed, except to append through its API
+([On the atomicio fork](#on-the-atomicio-fork--pfork)).
 
 ```bash
 mvn -q package -DskipTests        # the jar plus target/lib
@@ -228,6 +229,45 @@ Append Blocks from 64 KiB to 32 MiB, creates and HEADs, GETs of Append Blobs of 
 and Iceberg's reads of a 32 MiB file against exact ones. `configs/azure-calibration-exact.json` and
 `-iceberg.json` are the calibration runs, one per read path. Their Azurite twins
 (`-azurite.json`) give the requests each must send.
+
+## On the atomicio fork (`-Pfork`)
+
+The atomicio fork's `SupportsAtomicOperations` is the conditional write its catalog commits
+through, and APPEND is RMoW's primitive. With `store.append` `fork`, on S3 or Azure, RMoW appends
+through it (`org.rmow.bench.fork.ForkAppenders`). Each write returns the next snapshot, holding a
+length and an ETag, and the appender keeps it, so appends chain:
+- **An append** is one request, at the snapshot's length and conditioned on its ETag: a PutObject
+  on S3 Express, an Append Block on ADLS. Of several writers appending to one version, exactly one
+  lands.
+- **A new appendable file** is a CAS against what is there, which is looked up first (a HEAD):
+  - on S3, one PutObject;
+  - on ADLS, a temporary Append Blob (created, then one Append Block) renamed onto the file.
+
+  The model counts it as one PUT.
+
+That code needs the fork's API, so it is in `src/fork/java`, which only `-Pfork` compiles. A
+`-Pfork` build goes to `target-fork/`, so `target/`, which `bin/run.sh` runs, stays on the
+release:
+
+```bash
+mvn -Pfork -Diceberg.version=1.12.0-request-fixes-SNAPSHOT test
+```
+
+`-Diceberg.version` picks the fork build; by default it is `atomicio`'s, the one fileio-catalog
+uses. `atomicio` has the read fixes: ADLS reads open nothing until they read, and ask for exactly
+their range. They are upstream bugs, also on `core-fixes` (`adls-reads`). The fork's
+`request-fixes` branch adds three commits on top of `atomicio`:
+- S3 and ADLS appends to a snapshot send no lookup;
+- S3's `prepare()` no longer needs commons-io, which Iceberg does not ship.
+
+Until `atomicio` has them, `-Diceberg.version=1.12.0-request-fixes-SNAPSHOT` picks that branch's
+build.
+
+On the fork, Iceberg's own ADLS reads (`adlsReads: iceberg`) send the model's GETs.
+`AzureStoreContract` checks that, and `ForkAppendersTest` checks the appender on an in-memory
+store. The fork appender's runs need the real services: `AzureTest`, since Azurite cannot rename,
+and `S3ExpressTest`. One difference remains: the SDK downloads a sequential read's 4 MiB chunk
+whole, so RMoW's read bytes exceed the model's by about 15% in the test runs.
 
 For latency, a configuration can set more things, and a run can log its requests:
 - **`warmup`** runs a small op log on the in-memory store before the measured run, so the JIT has

@@ -21,9 +21,11 @@ public final class BenchConfig {
     /** For {@code local}: fsync each written object and append. */
     public boolean fsync = false;
     /**
-     * For {@code s3}: how RMoW appends. {@code express}: S3 Express One Zone, a PutObject at the
-     * object's length. {@code emulated}: read the object and write it back longer, for emulators
-     * only (unmeasured). {@code none}: standard S3, where RMoW arms cannot run.
+     * How RMoW appends. For {@code s3}: {@code express}, S3 Express One Zone, a PutObject at the
+     * object's length; {@code emulated}, read the object and write it back longer, for emulators
+     * only (unmeasured); {@code none}, standard S3, where RMoW arms cannot run. For {@code azure}:
+     * {@code none}, the store's own, Append Blobs. For either: {@code fork}, the atomicio fork's
+     * {@code SupportsAtomicOperations} (a {@code -Pfork} build; {@code org.rmow.bench.fork}).
      */
     public String append = "none";
     /**

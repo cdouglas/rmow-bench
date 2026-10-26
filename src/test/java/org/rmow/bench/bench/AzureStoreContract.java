@@ -2,6 +2,7 @@ package org.rmow.bench.bench;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -41,6 +42,26 @@ import org.rmow.bench.io.ExactAdlsFileIO;
 abstract class AzureStoreContract {
 
   static final int MIB = 1 << 20;
+
+  /**
+   * Whether this build is on the atomicio fork ({@code -Pfork}), whose ADLS reads are fixed (lazy
+   * opens, exact ranges) and which has the fork appender.
+   */
+  static final boolean FORK = present("org.apache.iceberg.io.SupportsAtomicOperations");
+
+  private static boolean present(String className) {
+    try {
+      Class.forName(className);
+      return true;
+    } catch (ClassNotFoundException e) {
+      return false;
+    }
+  }
+
+  /** Whether the store renames, as the fork's CAS on ADLS needs (Azurite does not). */
+  boolean renames() {
+    return false;
+  }
 
   private String root; // this class's prefix: abfss://container@account.dfs.core.windows.net/...
   private String endpoint; // an emulator's, or empty for Azure
@@ -141,22 +162,23 @@ abstract class AzureStoreContract {
   /**
    * A canary for what {@code adlsReads: iceberg} measures: Iceberg 1.12's ADLSInputStream opens
    * with a GET of the file's first 4 MiB, and a ranged read at an offset asks for {@code position +
-   * length} bytes. If this fails, Iceberg or the SDK changed, and so did that mode.
+   * length} bytes. If this fails, Iceberg or the SDK changed, and so did that mode. The atomicio
+   * fork fixes both (from core-fixes): it opens nothing, and reads exactly.
    */
   @Test
-  void icebergReadsAsShipped() throws IOException {
+  void icebergReads() throws IOException {
     String loc = location("shipped");
     byte[] bytes = random(10 * MIB);
     write(adls, loc, bytes);
     byte[] b = new byte[64 << 10];
     SeekableInputStream[] in = new SeekableInputStream[1];
     Sent open = sent(() -> in[0] = adls.newInputFile(loc, bytes.length).newStream());
-    assertThat(open.n(Kind.GET)).isEqualTo(1);
-    assertThat(open.getBytes()).isEqualTo(4 * MIB);
+    assertThat(open.n(Kind.GET)).isEqualTo(FORK ? 0 : 1);
+    assertThat(open.getBytes()).isEqualTo(FORK ? 0 : 4 * MIB);
 
     Sent range = sent(() -> ((RangeReadable) in[0]).readFully(6 * MIB, b, 0, b.length));
     assertThat(range.n(Kind.GET)).isEqualTo(1);
-    assertThat(range.getBytes()).isEqualTo(4 * MIB);
+    assertThat(range.getBytes()).isEqualTo(FORK ? b.length : 4 * MIB);
     assertThat(b).isEqualTo(Arrays.copyOfRange(bytes, 6 * MIB, 6 * MIB + b.length));
 
     Sent tail = sent(() -> ((RangeReadable) in[0]).readTail(b, 0, b.length));
@@ -340,22 +362,64 @@ abstract class AzureStoreContract {
         .isEmpty();
   }
 
+  /**
+   * The fork appender ({@code append fork}) on the fork's atomic operations, with exact reads. An
+   * append is one Append Block, to the snapshot the last write returned, so no lookup. A new
+   * appendable file is a CAS against what is there: its absence looked up (a HEAD), a temporary
+   * Append Blob staged (created, then one Append Block) and renamed onto the file (counted as
+   * other). Azure only, since Azurite does not rename.
+   */
   @Test
-  void icebergReadsSendMoreThanTheModel(@TempDir Path dir) throws IOException {
+  void everyArmFamilyWithForkAppends(@TempDir Path dir) throws IOException {
+    assumeTrue(FORK, "needs a -Pfork build");
+    assumeTrue(renames(), "the fork's CAS on ADLS renames, which this store does not");
+    BenchConfig cfg = config("exact");
+    cfg.store.root = root + "/runs-fork";
+    cfg.store.append = "fork";
+    new Runner(cfg, dir, "t").run();
+    List<JsonNode> phases = phases(dir);
+    for (JsonNode r : phases) {
+      String at = at(r);
+      long creates = n(r, "sdk_blob_creates");
+      assertThat(n(r, "sdk_puts") + creates).as(at + " PUTs").isEqualTo(n(r, "puts"));
+      assertThat(n(r, "sdk_appends")).as(at + " appends").isEqualTo(n(r, "appends") + creates);
+      assertThat(n(r, "sdk_other")).as(at + " renames").isEqualTo(creates);
+      assertThat(n(r, "sdk_heads")).as(at + " HEADs").isEqualTo(n(r, "heads") + creates);
+      assertThat(n(r, "sdk_gets")).as(at + " GETs").isEqualTo(n(r, "gets"));
+      assertThat(n(r, "sdk_put_bytes")).as(at + " bytes written").isEqualTo(n(r, "bytes_written"));
+      assertThat(n(r, "sdk_retries")).as(at + " retries").isZero();
+    }
+    assertThat(phases).anyMatch(r -> n(r, "sdk_appends") > 0);
+  }
+
+  /**
+   * Iceberg's own reads: as shipped they send more than the model counts; on the fork, whose reads
+   * are fixed, what it counts (sequential reads here are shorter than the SDK's 4 MiB chunk, each
+   * a request).
+   */
+  @Test
+  void icebergReadsAgainstTheModel(@TempDir Path dir) throws IOException {
     new Runner(config("iceberg"), dir, "t").run();
     List<JsonNode> phases = phases(dir);
     Map<String, long[]> byArm = new LinkedHashMap<>(); // model GETs, sent GETs, model bytes, sent
     for (JsonNode r : phases) {
       String at = at(r);
       writesMatchTheModel(r, at);
-      assertThat(n(r, "sdk_gets")).as(at + " GETs").isGreaterThanOrEqualTo(n(r, "gets"));
+      if (FORK) {
+        assertThat(n(r, "sdk_gets")).as(at + " GETs").isEqualTo(n(r, "gets"));
+        assertThat(n(r, "sdk_heads")).as(at + " HEADs").isEqualTo(n(r, "heads"));
+      } else {
+        assertThat(n(r, "sdk_gets")).as(at + " GETs").isGreaterThanOrEqualTo(n(r, "gets"));
+      }
       long[] t = byArm.computeIfAbsent(r.get("arm").asText(), k -> new long[4]);
       t[0] += n(r, "gets");
       t[1] += n(r, "sdk_gets");
       t[2] += n(r, "bytes_read");
       t[3] += n(r, "sdk_get_bytes");
     }
-    assertThat(byArm.values()).anyMatch(t -> t[1] > t[0]);
+    if (!FORK) {
+      assertThat(byArm.values()).anyMatch(t -> t[1] > t[0]);
+    }
     byArm.forEach(
         (arm, t) ->
             System.out.printf(

@@ -133,13 +133,12 @@ class S3ExpressTest {
     }
   }
 
-  @Test
-  void everyArmFamilyMatchesTheModel(@TempDir Path dir) throws IOException {
+  private static BenchConfig config(String append) {
     BenchConfig cfg = new BenchConfig();
     cfg.store.type = "s3";
-    cfg.store.root = "s3://" + bucket + "/" + prefix + "/runs";
+    cfg.store.root = "s3://" + bucket + "/" + prefix + "/runs-" + append;
     cfg.store.region = region;
-    cfg.store.append = "express";
+    cfg.store.append = append;
     cfg.workload.initialRows = 30_000;
     cfg.workload.batches = 8;
     cfg.workload.opsPerBatch = 1_000;
@@ -155,8 +154,10 @@ class S3ExpressTest {
     cfg.arms =
         List.of("mor-v2-file", "mor-v3", "cow", "tailcow-c", "rmow-b", "rmow-c",
             "rmow-c-split");
-    new Runner(cfg, dir, "t").run();
+    return cfg;
+  }
 
+  private static List<JsonNode> phases(Path dir) throws IOException {
     ObjectMapper json = new ObjectMapper();
     List<JsonNode> phases = new ArrayList<>();
     for (String l : Files.readAllLines(dir.resolve("steps.jsonl"))) {
@@ -166,8 +167,43 @@ class S3ExpressTest {
       }
     }
     assertThat(phases).isNotEmpty();
+    return phases;
+  }
+
+  private static String at(JsonNode r) {
+    return r.get("arm").asText() + " step " + r.get("step") + " " + r.get("phase").asText();
+  }
+
+  /**
+   * The fork appender ({@code append fork}, a {@code -Pfork} build): an append is one PutObject at
+   * the snapshot's length, conditioned on its ETag, with no HEAD; a new appendable file is a CAS
+   * against what is there, its absence looked up (a HEAD) and then one PutObject.
+   */
+  @Test
+  void everyArmFamilyWithForkAppends(@TempDir Path dir) throws IOException {
+    assumeTrue(AzureStoreContract.FORK, "needs a -Pfork build");
+    new Runner(config("fork"), dir, "t").run();
+    List<JsonNode> phases = phases(dir);
     for (JsonNode r : phases) {
-      String at = r.get("arm").asText() + " step " + r.get("step") + " " + r.get("phase").asText();
+      String at = at(r);
+      long lookups = r.get("sdk_heads").asLong() - r.get("heads").asLong();
+      assertThat(r.get("sdk_gets").asLong()).as(at + " GETs").isEqualTo(r.get("gets").asLong());
+      assertThat(r.get("sdk_puts").asLong()).as(at + " PUTs").isEqualTo(r.get("puts").asLong());
+      assertThat(r.get("sdk_appends").asLong()).as(at + " appends").isEqualTo(r.get("appends").asLong());
+      assertThat(lookups).as(at + " HEADs beyond the model's, one per create").isBetween(0L, r.get("puts").asLong());
+      assertThat(r.get("sdk_put_bytes").asLong()).as(at + " bytes written")
+          .isEqualTo(r.get("bytes_written").asLong());
+      assertThat(r.get("sdk_lists").asLong() + r.get("sdk_other").asLong()).as(at).isZero();
+    }
+    assertThat(phases).anyMatch(r -> r.get("sdk_appends").asLong() > 0);
+  }
+
+  @Test
+  void everyArmFamilyMatchesTheModel(@TempDir Path dir) throws IOException {
+    new Runner(config("express"), dir, "t").run();
+    List<JsonNode> phases = phases(dir);
+    for (JsonNode r : phases) {
+      String at = at(r);
       assertThat(r.get("sdk_gets").asLong()).as(at + " GETs").isEqualTo(r.get("gets").asLong());
       assertThat(r.get("sdk_puts").asLong()).as(at + " PUTs").isEqualTo(r.get("puts").asLong());
       assertThat(r.get("sdk_appends").asLong()).as(at + " appends").isEqualTo(r.get("appends").asLong());

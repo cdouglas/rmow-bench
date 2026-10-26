@@ -123,6 +123,7 @@ final class Store implements AutoCloseable {
             "s3", io, S3Appenders.emulated(unmeasured), recorder, List.of(io, unmeasured));
       }
       case "none" -> new Store("s3", io, null, recorder, List.of(io));
+      case "fork" -> new Store("s3", io, forkAppender(io), recorder, List.of(io));
       default -> throw new IllegalArgumentException("Unknown S3 append mode: " + spec.append);
     };
   }
@@ -156,8 +157,31 @@ final class Store implements AutoCloseable {
     } else {
       deleter = adls::deletePrefix; // one recursive directory delete
     }
-    return new Store(
-        "azure", io, AzureAppenders.appendBlob(clients), recorder, List.of(io, recorder), deleter);
+    RegionAppender appender =
+        switch (spec.append) {
+          case "none" -> AzureAppenders.appendBlob(clients); // the store's own: Append Blobs
+          case "fork" -> forkAppender(adls);
+          default -> throw new IllegalArgumentException("Unknown Azure append mode: " + spec.append);
+        };
+    return new Store("azure", io, appender, recorder, List.of(io, recorder), deleter);
+  }
+
+  /**
+   * The atomicio fork's appender ({@code append} {@code fork}), over {@code io}'s {@code
+   * SupportsAtomicOperations}. It is in the fork source set, which only {@code -Pfork} builds.
+   */
+  private static RegionAppender forkAppender(FileIO io) {
+    try {
+      return (RegionAppender)
+          Class.forName("org.rmow.bench.fork.ForkAppenders")
+              .getMethod("atomic", FileIO.class)
+              .invoke(null, io);
+    } catch (ClassNotFoundException e) {
+      throw new IllegalArgumentException(
+          "append fork needs a build with -Pfork, on the atomicio fork's Iceberg", e);
+    } catch (ReflectiveOperationException e) {
+      throw new IllegalStateException(e);
+    }
   }
 
   private static S3Client client(BenchConfig.StoreSpec spec, S3Recorder recorder) {

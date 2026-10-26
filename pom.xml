@@ -232,11 +232,50 @@
 
   <profiles>
     <profile>
-      <!-- Cross-check against the atomicio fork (build it from a worktree and publishToMavenLocal) -->
+      <!-- Cross-check against the atomicio fork (build it from a worktree and publishToMavenLocal;
+           -Diceberg.version picks another of its builds). It builds into target-fork/, so the
+           default build's target/ (what bin/run.sh runs) stays on the release, and it compiles
+           src/fork/java, the code that needs the fork's API (append fork). -->
       <id>fork</id>
       <properties>
         <iceberg.version>1.12.0-atomicio-SNAPSHOT</iceberg.version>
       </properties>
+      <build>
+        <directory>${project.basedir}/target-fork</directory>
+        <plugins>
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>build-helper-maven-plugin</artifactId>
+            <version>3.6.0</version>
+            <executions>
+              <execution>
+                <id>fork-sources</id>
+                <phase>generate-sources</phase>
+                <goals>
+                  <goal>add-source</goal>
+                </goals>
+                <configuration>
+                  <sources>
+                    <source>src/fork/java</source>
+                  </sources>
+                </configuration>
+              </execution>
+              <execution>
+                <id>fork-test-sources</id>
+                <phase>generate-test-sources</phase>
+                <goals>
+                  <goal>add-test-source</goal>
+                </goals>
+                <configuration>
+                  <sources>
+                    <source>src/fork-test/java</source>
+                  </sources>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
     </profile>
   </profiles>
 </project>

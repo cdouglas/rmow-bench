@@ -26,6 +26,11 @@ class AzureTest extends AzureStoreContract {
     connect(prefix, "", null);
   }
 
+  @Override
+  boolean renames() {
+    return true; // a hierarchical-namespace account
+  }
+
   @AfterAll
   void close() {
     if (prefix != null) {
