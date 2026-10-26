@@ -29,28 +29,6 @@ scale = dict(q("""SELECT CAST(rg_bytes / 1048576 AS INT), run_id FROM canonical_
                b=SCALE_BUILD).itertuples(index=False))
 S128 = scale[128]
 
-# provenance: each rerun against the run it replaced (docs/HYPOTHESES.md, K1-K3)
-pairs = q("""
-    SELECT o.run_id AS old, n.run_id AS new, o.label FROM runs o JOIN runs n ON n.label = o.label
-    WHERE o.mark = 'superseded' AND n.git_sha LIKE $b || '%' AND n.status = 'finished'
-      AND o.git_sha[1:7] IN ('cfe40b2', '17476f3', '55938de', '967db79')""", b=BUILD)
-k = []
-for _, p in pairs.iterrows():
-    d = q("""
-        SELECT n.arm, n.phase, coalesce(n.reader, '') AS reader,
-               n.requests - o.requests AS dreq, n.bytes_written - o.bytes_written AS dw,
-               n.bytes_read - o.bytes_read AS dr
-        FROM steps o JOIN steps n ON n.arm = o.arm AND n.step = o.step AND n.phase = o.phase
-         AND coalesce(n.reader, '') = coalesce(o.reader, '')
-        WHERE o.run_id = $a AND n.run_id = $b""", a=p.old, b=p.new)
-    k.append(d)
-k = pd.concat(k)
-kb = k[k.phase == "batch"]
-mor = kb[kb.arm.isin(["mor-v2-file", "mor-v2-partition", "mor-v3"])]
-cow_tail = kb[kb.arm.isin(["cow", "tailcow-b", "tailcow-c"])]
-probes = k[k.phase.str.startswith("read") & k.reader.isin(["one-footer", "stock"]) & ~k.arm.str.endswith("split")]
-rmow = kb[kb.arm.str.startswith("rmow")]
-
 # a batch and a read, 4 MiB recency without compaction; reads under cached
 ARMS = ["mor-v3", "cow", "tailcow-c", "rmow-b", "rmow-c"]
 b = q("""
@@ -122,11 +100,6 @@ sweep = q("""
 cross = sweep[sweep["rmow-c"] <= sweep["mor-v3"]].index.min()
 
 
-superseded = q("""SELECT count(*) AS n FROM runs o WHERE o.mark = 'superseded' AND EXISTS (
-                     SELECT 1 FROM runs n WHERE n.label = o.label AND n.git_sha LIKE $b || '%')""",
-               b=BUILD).n[0]
-
-
 def policy_words(policy):
     """A compaction policy's name, as prose: 'any level P=5' -> 'every 5 batches, at any threshold'."""
     if policy.startswith("none"):
@@ -142,13 +115,6 @@ def rng(xs, fmt="{:.2f}"):
 
 
 N = {
-    "pairs": f"{len(pairs)}", "superseded": f"{superseded}",
-    "mor_same": f"{int(((mor.dreq == 0) & (mor.dw == 0)).sum())}", "mor_n": f"{len(mor)}",
-    "ct_fewer": f"{int((cow_tail.dreq < 0).sum())}", "ct_more": f"{int((cow_tail.dreq > 0).sum())}",
-    "ct_bytes": f"{int((cow_tail.dw != 0).sum())}",
-    "rmow_n": f"{len(rmow)}", "rmow_bytes": f"{int((rmow.dw != 0).sum())}",
-    "rmow_extra": rng(rmow.dreq, "{:.0f}"),
-    "probes_same": f"{int(((probes.dreq == 0) & (probes.dr == 0)).sum())}", "probes_n": f"{len(probes)}",
     "rc_mb_x": f"{b.loc['rmow-c', 'mb'] / b.loc['mor-v3', 'mb']:.0f}",
     "rb_mb_x": f"{b.loc['rmow-b', 'mb'] / b.loc['mor-v3', 'mb']:.0f}",
     "rc_req": f"{b.loc['rmow-c', 'requests']:.1f}", "mor_req": f"{b.loc['mor-v3', 'requests']:.0f}",
@@ -193,19 +159,16 @@ them has not happened (docs/S3X_RUNBOOK.md).
 
 ## Provenance
 
-The rerun replaced {eval}`N["superseded"]` runs. The {eval}`N["pairs"]` whose old runs came from
-builds with the same write path but for writer footers were checked against them (the
-compaction sweep's predate its triggers):
-- **MoR family:** every MoR-v2 and MoR-v3 batch matches its old run exactly
-  ({eval}`N["mor_same"]` of {eval}`N["mor_n"]`).
-- **CoW and TailCoW:** their batches take fewer requests in {eval}`N["ct_fewer"]` batches and
-  more in {eval}`N["ct_more"]`, where their merge reads now reuse a footer their locate scan read.
-  {eval}`N["ct_bytes"]` write different bytes.
-- **RMoW:** every one of its {eval}`N["rmow_n"]` batches now reads its files' footers
-  ({eval}`N["rmow_extra"]` more requests), which earlier builds left out (README, I/O parity rule
-  6). {eval}`N["rmow_bytes"]` write different bytes.
-- **Readers that did not change:** {eval}`N["probes_same"]` of {eval}`N["probes_n"]` probes match
-  exactly.
+This section is a record. It was computed on 2026-10-26 from the reruns and the runs they
+replaced, before those were deleted (docs/EXPERIMENTS.md, Retired runs). The rerun replaced 24
+runs. The 13 whose old runs came from builds with the same write path, writer footers aside,
+were checked against them (the compaction sweep's predate its triggers):
+- **MoR family:** every MoR-v2 and MoR-v3 batch matched its old run exactly (1,700 of 1,700).
+- **CoW and TailCoW:** their batches took fewer requests in 617 batches and more in none, where
+  their merge reads now reuse a footer their locate scan read. None wrote different bytes.
+- **RMoW:** every one of its 2,460 batches now reads its files' footers (1–4 more requests),
+  which earlier builds left out (README, I/O parity rule 6). None wrote different bytes.
+- **Readers that did not change:** 3,486 of 3,486 probes matched exactly.
 
 ## A batch, and a read
 

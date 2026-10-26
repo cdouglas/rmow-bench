@@ -20,9 +20,6 @@ theme()
 # the uniform run without compaction. Both count instructions, so CPU is modeled time (work_ms).
 RECENCY = "sim-recency-4m-noverify-aae85e9fd620/20261025T222739Z"
 UNIFORM = "local-m1-uniform-nocompact-717579acbd22/20261025T210333Z"
-# The payload check's comparison (below) stays on the pair it was made with, one build, thread CPU
-WITH_CHECK = "sim-recency-4m-55c5aea6ba08/20261023T182633Z"
-OLD_NOVERIFY = "sim-recency-4m-noverify-f412f1efff2d/20261023T195501Z"
 READER = "cached"  # one thread, each file's footer and deletes loaded once per read
 ARMS = ["mor-v3", "tailcow-c", "rmow-b", "rmow-c", "rmow-b-split", "rmow-c-split"]
 PROFILES = ["cpu only", "s3x", "azure premium", "s3", "azure"]
@@ -349,12 +346,10 @@ rg4 = q("""SELECT run_id FROM canonical_runs WHERE label = 'local-rg-sweep-recen
 rgd = q("SELECT * FROM steps_diff($a, $b) WHERE NOT one_run_only", a=rg4, b=RECENCY)
 N |= {"rg_records": f"{len(rgd):,}", "rg_differ": f"{int((rgd.differs.map(len) > 0).sum())}"}
 fig = figures_module()
-reps, reps_check, reps_old = [], [], []
+reps = []
 for name in ["s3x", "s3", "azure"]:
     prof = profiles[profiles.profile == name].iloc[0].to_dict() | {"part_ms": 0.0}
     reps.append(fig.replay(LOGGED, prof, cpu="work").assign(profile=name))
-    reps_check.append(fig.replay(WITH_CHECK, prof).assign(profile=name))
-    reps_old.append(fig.replay(OLD_NOVERIFY, prof).assign(profile=name))
 lg = pd.concat(reps)
 appendable = lg.arm.isin(["rmow-b", "rmow-c"])
 lg = lg[~(appendable & (lg.profile == "s3"))]  # no append on S3 Standard
@@ -479,113 +474,45 @@ table(parts.pivot_table(index=["reader", "arm"], columns="part_ms", values="simu
 (payload-check)=
 ## Without the payload check
 
-```{code-cell} ipython3
-:tags: [remove-cell]
+This section is a record, not computed. Its runs were from one build on 2026-10-23:
+- `sim-recency-4m`, with the check (`sim-recency-4m-55c5aea6ba08/20261023T182633Z`);
+- `sim-recency-4m-noverify`, without it (`…-f412f1efff2d/20261023T195501Z`).
 
-chk = q("""
-    SELECT a.arm, m.arm_label, m.ord,
-           sum(a.cpu_ns) FILTER (WHERE a.phase LIKE 'read%' AND a.reader <> 'cached-p8') / 1e9 AS reads_with,
-           sum(b.cpu_ns) FILTER (WHERE a.phase LIKE 'read%' AND a.reader <> 'cached-p8') / 1e9 AS reads_without,
-           sum(a.cpu_ns) FILTER (WHERE a.phase IN ('batch', 'compact')) / 1e9 AS batches_with,
-           sum(b.cpu_ns) FILTER (WHERE a.phase IN ('batch', 'compact')) / 1e9 AS batches_without
-    FROM steps a JOIN steps b ON a.arm = b.arm AND a.step = b.step AND a.phase = b.phase
-         AND coalesce(a.reader, '') = coalesce(b.reader, '')
-    JOIN arm_meta m ON m.arm = a.arm
-    WHERE a.run_id = $a AND b.run_id = $b
-    GROUP BY ALL ORDER BY m.ord""", a=WITH_CHECK, b=OLD_NOVERIFY)
-chk["reads"] = chk.reads_without / chk.reads_with
-chk["batches"] = chk.batches_without / chk.batches_with
-diff = q("""SELECT arm, reader, phase, differs FROM steps_diff($a, $b)
-            WHERE len(differs) > 0 OR one_run_only""", a=WITH_CHECK, b=OLD_NOVERIFY)
-n_records = q("SELECT count(*) AS n FROM steps_diff($a, $b)", a=WITH_CHECK, b=OLD_NOVERIFY).n[0]
-split_gets = q("""
-    SELECT sum(a.gets) AS with_check, sum(b.gets) AS without
-    FROM steps a JOIN steps b USING (arm, step, phase, reader)
-    WHERE a.run_id = $a AND b.run_id = $b AND a.arm = 'rmow-b-split' AND a.phase = 'read_full'
-      AND a.reader = 'stock'""", a=WITH_CHECK, b=OLD_NOVERIFY).iloc[0]
-
-# one thread: phase_latency of both runs; eight threads: the replays of both
-one60 = q("""
-    SELECT run_id = $b AS without, profile, arm, cpu_ms + request_ms + transfer_ms AS ms
-    FROM phase_latency WHERE run_id IN ($a, $b) AND step = 60 AND phase = 'read_full'
-      AND reader = 'cached' AND profile IN ('s3x', 'azure')""", a=WITH_CHECK, b=OLD_NOVERIFY)
-lgc = pd.concat(reps_check)
-p8c = lgc[(lgc.phase == "read_full") & (lgc.step == 60) & (lgc.reader == "cached-p8")]
-
-
-def r1(without, profile):
-    t = one60[(one60.without == without) & (one60.profile == profile)].set_index("arm").ms
-    return t["rmow-c"] / t["mor-v3"]
-
-
-def r8(frame, profile, arm="rmow-c", base="mor-v3"):
-    t = frame[(frame.profile == profile)].set_index("arm").simulated_ms
-    return t[arm] / t[base]
-
-
-lgo = pd.concat(reps_old)
-new8 = lgo[(lgo.phase == "read_full") & (lgo.step == 60) & (lgo.reader == "cached-p8")]
-only_stock_split = set(diff.reader) <= {"stock"} and all("split" in a for a in diff.arm)
-V = {
-    "N1": "held" if only_stock_split else "contradicted",
-    "N2": "held" if chk.reads.max() <= 0.4 and (chk.batches - 1).abs().max() <= 0.05
-          else "contradicted",
-    "N3": "held" if r1(True, "s3x") <= 0.75 and r1(True, "azure") <= 0.4 else "contradicted",
-    "N4": "held" if abs(r8(new8, "s3x") - 1) <= 0.2 and r8(new8, "azure") <= 0.7
-          else "contradicted",
-    "N5": "held" if r8(new8, "s3x", "rmow-c-split", "rmow-c") <= 1.5 else "contradicted",
-}
-N |= {
-    "chk_reads_min": f"{chk.reads.min():.2f}", "chk_reads_max": f"{chk.reads.max():.2f}",
-    "chk_batches_min": f"{chk.batches.min():.2f}", "chk_batches_max": f"{chk.batches.max():.2f}",
-    "diff_n": f"{len(diff)}", "records_n": f"{n_records:,}",
-    "split_gets_with": f"{split_gets.with_check:.0f}", "split_gets_without": f"{split_gets.without:.0f}",
-    "r1_s3x_with": f"{r1(False, 's3x'):.2f}", "r1_s3x": f"{r1(True, 's3x'):.2f}",
-    "r1_az_with": f"{r1(False, 'azure'):.2f}", "r1_az": f"{r1(True, 'azure'):.2f}",
-    "r8_s3x_with": f"{r8(p8c, 's3x'):.2f}", "r8_s3x": f"{r8(new8, 's3x'):.2f}",
-    "r8_az_with": f"{r8(p8c, 'azure'):.2f}", "r8_az": f"{r8(new8, 'azure'):.2f}",
-    "split8_with": f"{p8c[(p8c.profile == 's3x') & (p8c.arm == 'rmow-c-split')].simulated_ms.iloc[0]:,.0f}",
-    "split8_rc_with": f"{p8c[(p8c.profile == 's3x') & (p8c.arm == 'rmow-c')].simulated_ms.iloc[0]:,.0f}",
-}
-```
+The second was replaced by the rerun of 2026-10-25 and deleted on 2026-10-26. The numbers below
+were computed from both runs before then, on thread CPU (docs/EXPERIMENTS.md, Retired runs).
 
 The payload check (`verifyRows`) checks every decoded row's payload against the op log. It is
-the harness's, not an engine's, and it is the same in every arm. `sim-recency-4m-noverify` is
-`sim-recency-4m` with the check off. Its build also plans a split file's objects per row group, as
-every other file is planned, where the earlier build ran each object as one task. The predictions
-were registered beforehand (docs/HYPOTHESES.md, "before rerunning the logged 4 MiB recency
-setting without payload checks").
+the harness's, not an engine's, and it is the same in every arm. `sim-recency-4m-noverify` was
+`sim-recency-4m` with the check off. Its build also planned a split file's objects per row group,
+as every other file is planned, where the earlier build ran each object as one task. The
+predictions were registered beforehand (docs/HYPOTHESES.md, "before rerunning the logged 4 MiB
+recency setting without payload checks").
 
-```{code-cell} ipython3
-:tags: [remove-input]
+| arm | read CPU with the check (s) | without | ratio | batch CPU with (s) | without | ratio |
+|---|---|---|---|---|---|---|
+| MoR v3 DV | 98.599 | 31.005 | 0.314 | 5.209 | 5.062 | 0.972 |
+| TailCoW-C | 96.247 | 29.345 | 0.305 | 5.735 | 5.715 | 0.996 |
+| RMoW-B | 91.774 | 26.409 | 0.288 | 24.074 | 24.646 | 1.024 |
+| RMoW-C | 91.300 | 26.406 | 0.289 | 26.265 | 26.385 | 1.005 |
+| RMoW-B-split | 92.647 | 27.229 | 0.294 | 24.623 | 24.261 | 0.985 |
+| RMoW-C-split | 89.130 | 28.020 | 0.314 | 26.785 | 26.106 | 0.975 |
 
-table(chk[["arm", "reads_with", "reads_without", "reads", "batches_with", "batches_without",
-           "batches"]].rename(columns={
-    "reads_with": "read CPU with the check (s)", "reads_without": "without",
-    "reads": "ratio", "batches_with": "batch CPU with (s)", "batches_without": "without ",
-    "batches": "ratio "}).round(2))
-```
+The table sums each arm's CPU over its one-thread reads (full, recent and old, under every
+reader but `cached-p8`) and over its batches, in both runs.
 
-The table sums each arm's CPU over its one-thread reads (full, recent and old, under every reader
-but `cached-p8`) and over its batches, in both runs.
-
-- **N1, {eval}`V["N1"]`: requests and bytes are unchanged, except stock reads of split files.**
-  {eval}`N["diff_n"]` of {eval}`N["records_n"]` records differ, all of them split arms' reads
-  under `stock`. That reader now reads the version's footer once per split rather than once per
-  object: {eval}`N["split_gets_without"]` GETs over RMoW-B-split's full reads, against
-  {eval}`N["split_gets_with"]`. Their bytes grow by the footers, which N1 did not mention.
-- **N2, {eval}`V["N2"]`: reads lose most of their CPU, batches none.** Reads take
-  {eval}`N["chk_reads_min"]`–{eval}`N["chk_reads_max"]`× the CPU without the check, and batches
-  {eval}`N["chk_batches_min"]`–{eval}`N["chk_batches_max"]`×.
-- **N3, {eval}`V["N3"]`: on one thread, RMoW's read advantage grows.** RMoW-C's full read at
-  batch 60 takes {eval}`N["r1_s3x"]`× MoR-v3's on S3 Express ({eval}`N["r1_s3x_with"]`× with the
-  check), and {eval}`N["r1_az"]`× on Azure Blob ({eval}`N["r1_az_with"]`×).
-- **N4, {eval}`V["N4"]`: on eight threads, parallelism still erases most of it where requests
-  are cheap.** Under `cached-p8`, it takes {eval}`N["r8_s3x"]`× MoR-v3's on S3 Express
-  ({eval}`N["r8_s3x_with"]`×), and {eval}`N["r8_az"]`× on Azure Blob ({eval}`N["r8_az_with"]`×).
-- **N5, {eval}`V["N5"]`: split files read in parallel.** RMoW-C-split's 8-thread full read takes
-  {eval}`N["p8_split"]` ms on S3 Express, against RMoW-C's {eval}`N["p8_rc"]`. With one task per
-  object it took {eval}`N["split8_with"]` ms, against {eval}`N["split8_rc_with"]`.
+- **N1, held: requests and bytes are unchanged, except stock reads of split files.** 29 of 2,277
+  records differ, all of them split arms' reads under `stock`. That reader now reads the
+  version's footer once per split rather than once per object: 206 GETs over RMoW-B-split's
+  full reads, against 154. Their bytes grow by the footers, which N1 did not mention.
+- **N2, held: reads lose most of their CPU, batches none.** Reads take 0.29–0.31× the CPU without
+  the check, and batches 0.97–1.02×.
+- **N3, held: on one thread, RMoW's read advantage grows.** RMoW-C's full read at batch 60 takes
+  0.67× MoR-v3's on S3 Express (0.78× with the check), and 0.33× on Azure Blob (0.45×).
+- **N4, held: on eight threads, parallelism still erases most of it where requests are cheap.**
+  Under `cached-p8`, it takes 1.01× MoR-v3's on S3 Express (1.04×), and 0.53× on Azure Blob
+  (0.59×).
+- **N5, held: split files read in parallel.** RMoW-C-split's 8-thread full read takes 347 ms on
+  S3 Express, against RMoW-C's 380. With one task per object it took 1,882 ms, against 563.
 - **After the run**, one fix: a footer-cache reader now reads a split object of at most 1 MiB,
   which Iceberg fetches whole, in one task, as it reads small files. The run's build gave each
   such object a task per row group, and each fetched it whole again. That changes none of this
@@ -634,7 +561,7 @@ but `cached-p8`) and over its batches, in both runs.
   more on reads made of many small GETs, and on files appended to for longer. The S4 spike
   measures what S3 Express does.
 - **The payload check was most of a read's CPU.** Reads took
-  {eval}`N["chk_reads_min"]`–{eval}`N["chk_reads_max"]`× the CPU without it, so the earlier
+  0.29–0.31× the CPU without it, so the earlier
   simulated reads were mostly the harness's own work ([above](#payload-check)).
 - **Under uniform updates, RMoW's copy-on-write costs time on any store.** A batch takes
   {eval}`N["uni_s3x_c"]` s against MoR-v3's {eval}`N["uni_s3x_m"]` s on S3 Express, and

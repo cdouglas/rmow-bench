@@ -238,6 +238,31 @@ outside the expected kinds:
 The in-memory `smoke` run tests the harness. The lab marks it excluded and leaves it out of every
 result (`lab/annotations.toml`).
 
+**Deleted 2026-10-26: the 24 runs the core rerun replaced** (2026-10-21 to 23), 5.4 GB:
+- `local-m1-*` (4), `local-rg-sweep-recency-exp-rg{1,2,4,8}m` (4, with their version dumps),
+  `local-split-*` (3) and `local-compact-*` (11);
+- `sim-validate-s3x` (`30a4ea0533b8`) and `sim-recency-4m-noverify` (`f412f1efff2d`).
+
+The reruns from b6c2605 replace them (docs/HYPOTHESES.md, 2026-10-25). Twelve build snapshots
+went with them, which only they used: `20261021T1922{59,302,305}Z-aac3bdff873a-dirty`,
+`20261022T224505Z-cfe40b2f65bf`, `20261023T0422{19,24,28}Z-cfe40b2f65bf-dirty`,
+`20261023T045645Z-cfe40b2f65bf-dirty`, `20261023T06175{1,5}Z-17476f3567dc`,
+`20261023T181429Z-55938debe2e4-dirty` and `20261023T195500Z-967db793bc7f-dirty`.
+
+What their data showed, against the reruns:
+- **Writes, reads, bytes.**
+  - Every MoR-v2 and MoR-v3 batch, and every probe under `one-footer` and `stock` outside the
+    split arms, matches its rerun exactly.
+  - RMoW's batches took one footer read fewer per live file, because their writer kept its
+    footers across batches.
+  - CoW's and TailCoW's batches took more requests where their merge reads re-read a footer.
+  - Their write-ups are the static reports in `docs/measurements/` (2026-10-21) and the lab
+    pages as they stood before 2026-10-26.
+- **Payload check:** `sim-recency-4m-noverify-f412f1efff2d` was half of store-latency's
+  comparison with the check, now a record in that section (N1–N5, every number).
+- **CPU** was thread CPU with the payload check on (off in the noverify run): reads took 3.2–3.5×
+  the CPU they take without the check.
+
 ## Findings so far
 
 All are local runs: requests and bytes are exact, latency is not measured.

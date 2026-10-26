@@ -55,8 +55,3 @@ note = "in-memory smoke test of the harness"
 select = "where:host = 'havoc' AND label = 'sim-validate-s3x'"
 mark = "excluded"
 note = "pipeline check of the havoc container (docker/campaigns/pipeline.json): requests and bytes match the laptop's run in 769 of 779 records, the other 10 being the split arm's stock reads, changed by the split planning"
-
-[[annotate]]
-select = "where:(label LIKE 'local-%' OR label IN ('sim-validate-s3x', 'sim-recency-4m-noverify')) AND git_sha NOT LIKE 'b6c2605%' AND host <> 'havoc'"
-mark = "superseded"
-note = "rerun 2026-10-25 on b6c2605 (docs/HYPOTHESES.md, 2026-10-25): writer footers held per transaction, the cached reader models, split files planned per row group, the payload check off, CPU in instructions"
