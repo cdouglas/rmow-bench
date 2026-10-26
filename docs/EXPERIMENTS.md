@@ -4,6 +4,11 @@ Where to start. This page says what has been run, what each experiment varied an
 found, and where the details are. It covers the 25 canonical runs and the JMH micro-benchmarks as
 of 2026-10-23.
 
+For the trade-offs in one frame, start with [lab/pages/tradeoffs.md](../lab/pages/tradeoffs.md)
+(When RMoW pays). It shows what each arm spends on a batch and a read, and the request latency
+above which RMoW pays, and how the workload moves that latency.
+[lab/pages/summary.md](../lab/pages/summary.md) collects every number a write-up quotes.
+
 ## Where things are
 
 | Document | What it is for |

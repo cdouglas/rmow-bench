@@ -3,6 +3,7 @@ project:
   title: rmow-bench results
   toc:
     - file: index.md
+    - file: pages/tradeoffs.md
     - file: pages/summary.md
     - file: pages/experiments.md
     - file: pages/run.md
