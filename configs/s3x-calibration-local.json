@@ -63,5 +63,5 @@
       }
     ]
   },
-  "verifyRows": true
+  "verifyRows": false
 }

@@ -74,5 +74,5 @@
       }
     ]
   },
-  "verifyRows": true
+  "verifyRows": false
 }

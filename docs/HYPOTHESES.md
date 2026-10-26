@@ -439,3 +439,50 @@ threshold than the floor. Within the floor, it is undecided.
   and bytes exactly (`steps_diff`).
 - **C2: every phase is counted.** Every timed phase of the four runs has instructions, and every
   manifest says counters were available.
+
+## Added 2026-10-25, before rerunning the core experiments on the current build
+
+**Why.** The core experiments ran on 2026-10-21 to 23 (m1, rg-sweep, split-vs-append, compaction,
+store latency), on builds that predate four changes:
+- **Writer footers:** writers hold a footer for one transaction (README, I/O parity rule 6).
+  Before, RMoW's writer kept its footers across batches, so its batch requests were undercounted.
+- **Readers:** the `cached` and `cached-p8` reader models. The m1, rg-sweep and split runs had
+  only `one-footer` and `stock`, and the compaction sweep only `one-footer`.
+- **Split planning:** split files are planned per row group.
+- **CPU:** measured in instructions, with the payload check off (lab/pages/cpu-measure.md).
+
+The rerun is for a write-up of the results, so every result it quotes comes from one build.
+
+**Setup.** The 22 `configs/local-*` configurations, plus `sim-validate-s3x` and
+`sim-recency-4m-noverify`, are unchanged except:
+- `verifyRows` is off;
+- the readers are `one-footer`, `cached`, `cached-p8` and `stock`.
+
+They run one after another on this laptop, from a build snapshot, with requests logged. The
+rg-sweep and uncompacted split runs also dump their versions, for row-group sizes, as before.
+
+**Controls**, against the old runs of the m1, rg-sweep, split and sim configurations (builds
+`cfe40b2`, `17476f3`, `55938de`, `967db79`). The only write-path change since them is writer
+footers.
+- **K1: MoR-family batches are unchanged.**
+  - Every MoR-v2 (file and partition), MoR-v3 and CoW batch matches its old run's requests and
+    bytes exactly.
+  - TailCoW-B's and -C's batches take at most the old run's requests, and write the same bytes.
+- **K2: RMoW's writer now reads its footers.** Every RMoW batch takes one footer read per file
+  live at its start more than its old run, and writes the same bytes. A footer read is two
+  requests for a file over 1 MiB that is not footer-only, and one for a footer-only object or a
+  file of at most 1 MiB.
+- **K3: readers that did not change read the same.** Every probe of a non-split arm under
+  `one-footer` and `stock` matches its old run's requests and bytes exactly.
+
+The compaction sweep's old runs (`aac3bdf`) predate the commit that added its triggers, so they
+get no control.
+
+**What it re-decides.** H2–H6 as registered, on the reruns, where their write-ups decided them:
+- H2: lab/pages/run.md;
+- H3: layout-vs-policy;
+- H4: time-travel;
+- H5: split-vs-append, until now a static report;
+- H6: the compaction sweep, until now a static report.
+
+A verdict that changes is reported as changed, with its cause.

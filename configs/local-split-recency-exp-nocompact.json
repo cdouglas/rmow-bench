@@ -40,7 +40,30 @@
   "reads": {
     "every": 10,
     "recentFraction": 0.01,
-    "travelBack": 20
+    "travelBack": 20,
+    "readers": [
+      {
+        "name": "one-footer",
+        "footerCache": true,
+        "footerPrefetchBytes": 65536
+      },
+      {
+        "name": "cached",
+        "footerCache": true,
+        "deleteCache": true,
+        "footerPrefetchBytes": 65536
+      },
+      {
+        "name": "cached-p8",
+        "footerCache": true,
+        "deleteCache": true,
+        "footerPrefetchBytes": 65536,
+        "parallelism": 8
+      },
+      {
+        "name": "stock"
+      }
+    ]
   },
-  "verifyRows": true
+  "verifyRows": false
 }
