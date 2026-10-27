@@ -224,14 +224,14 @@ approach 1.
   `twins-fork`), and the Azure predictions recomputed from them (AZURE_RUNBOOK.md): RMoW-C ÷
   MoR-v3 is 0.38 for a batch and 0.59 for a full read, as before. The two twins' model requests
   and bytes match in all 922 records, and every phase on Azurite sent what the model counts.
-- [ ] **`phase_work`'s CPU is probably 11% high on the laptop** (found 2026-10-27). The thread
-  CPU clock runs 11.1% fast against the wall clock there (WSL2; `host.thread_cpu_per_wall` in
-  manifests from 2026-10-26), and `phase_work` turns instructions into time with thread CPU time
-  (`ghz` = cycles per user-mode nanosecond). So every simulated latency's CPU term from the
-  laptop is in thread-clock time, if the wall clock is the right one, as its synchronization with
-  the host suggests. On Azure the predictions move 1–3%; on S3 Express, where CPU dominates, more.
-  To decide: divide `phase_work` by the ratio (it changes the published simulated numbers), and
-  check havoc's ratio.
+- [x] **`phase_work`'s CPU was 11% high on the laptop** (found 2026-10-27; divided by the ratio,
+  decided and done 2026-10-27). The thread CPU clock runs 11.1% fast against the wall clock there
+  (WSL2; `host.thread_cpu_per_wall` in manifests from 2026-10-26), and `phase_work` turned
+  instructions into time with thread CPU time. The lab's `run_clock` gives each run its ratio
+  (its own, else its host's: every counted laptop run ran on the boot of 2026-10-24, measured at
+  1.1116), and `phase_work` and `phase_breakdown` divide by it. Modeled CPU fell 10.0%, simulated
+  latencies 0.1–10%, and no verdict changed (EXPERIMENTS.md, Findings so far). Havoc's ratio is
+  still unmeasured: its runs have no counters, so nothing there used it.
 - [ ] **The calibration configurations gain `rmow-c-split` and `rmor-c`**, and lose the arms new
   campaigns leave out, after the generator's region skew and update share (decided 2026-10-26).
   With `rmor-c` they set `writerSkipsDeadRowGroups` and read with `cached-skip` beside a stock

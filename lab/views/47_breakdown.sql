@@ -25,7 +25,7 @@
 -- Hyper-V (the laptop) that clock ran 11% fast against the wall clock, so a busy phase's cpu_ns
 -- exceeded its wall_ns and other waiting went negative. Each run records the ratio, spinning
 -- before it starts (manifest host.thread_cpu_per_wall; 1 where the clocks agree), and CPU times
--- here are divided by it.
+-- here are divided by it (run_clock, in 35_work.sql).
 
 -- Runs before 2026-10-26 have none: these columns stand in until a run has them.
 ALTER TABLE steps ADD COLUMN IF NOT EXISTS io_ns BIGINT;
@@ -54,10 +54,7 @@ ALTER TABLE requests ADD COLUMN IF NOT EXISTS dur_ns BIGINT;
 
 CREATE VIEW phase_breakdown AS
 WITH k AS (
-    SELECT run_id,
-           coalesce(try_cast(json_extract(manifest, '$.host.thread_cpu_per_wall') AS DOUBLE), 1)
-             AS rate
-    FROM runs_raw
+    SELECT run_id, cpu_per_wall AS rate FROM run_clock
 ), s AS (
     SELECT s.run_id, arm, step, phase, reader, wall_ns, cpu_ns / k.rate AS cpu_ns,
            io_ns, io_cpu_ns / k.rate AS io_cpu_ns, encode_ns, encode_cpu_ns / k.rate AS encode_cpu_ns,

@@ -311,6 +311,17 @@ What they showed, kept in docs/AZURE_RUNBOOK.md:
 
 ## Findings so far
 
+**CPU on the wall clock (2026-10-27).** The laptop's thread CPU clock runs 11.1% fast against its
+wall clock (WSL2 on Hyper-V; manifest `host.thread_cpu_per_wall`, 1.1116 on the boot every
+counted run used), and `phase_work` turned instructions into time through thread CPU time. The
+lab now divides by the ratio (`run_clock`): every laptop run's modeled CPU fell by 10.0%, and its
+simulated latencies by 0.1–10% (median 2–3% on Azure and S3, 6.5% on S3 Express). The lab pages
+recompute. Below, the store-latency and scale figures are updated where they moved, with the old
+value beside; the compaction figures moved by at most a point (MoR-v3's saving on S3 Standard 41%
+to 42%), and the trade-offs page's break-evens fell 7–10% (lab/pages/tradeoffs.md). No verdict
+changed: P4's read stays 0.82× on S3 Express and 0.70× on Azure Blob, P5's range 0.91–1.01×, H6's
+MoR-v3 saving 4%.
+
 All are local runs: requests and bytes are exact, latency is not measured.
 
 **The core experiments were rerun on 2026-10-25 on the current build** (docs/HYPOTHESES.md):
@@ -377,14 +388,15 @@ Against the runs they replaced (controls K1–K3):
   - Both older reader models load a file's DV once per split (row group), as Iceberg's readers
     do. That inflates every DV arm's reads, MoR-v3's and TailCoW's included.
 
-- **Store latency, simulated (the 4 MiB recency run, rerun on the instruction measure).**
-  - On S3 Express, RMoW-C's batches take 2.2× MoR-v3's time, mostly its own CPU re-encoding
+- **Store latency, simulated (the 4 MiB recency run, rerun on the instruction measure; CPU on
+  the wall clock since 2026-10-27).**
+  - On S3 Express, RMoW-C's batches take 2.1× MoR-v3's time (2.2× before the correction), mostly its own CPU re-encoding
     rewritten regions. Its 9.5 requests against 45 do not make up for it at S3 Express's request
     latencies.
-  - Where requests are dear (Azure Blob), RMoW-C's batches take 0.52×. At 100 MiB/s the
+  - Where requests are dear (Azure Blob), RMoW-C's batches take 0.50× (0.52×). At 100 MiB/s the
     crossover lies near 20 ms per request.
-  - On one thread, RMoW-C's full read at batch 60 takes 0.69× MoR-v3's on S3 Express and 0.34×
-    on Azure Blob. On eight threads, 0.86× and 0.50×.
+  - On one thread, RMoW-C's full read at batch 60 takes 0.69× MoR-v3's on S3 Express and 0.33×
+    on Azure Blob (0.34×). On eight threads, 0.86× and 0.49× (0.50×).
   - The replay of a request log predicts a run with the same latency injected: 280 of 281
     one-thread phases within 10%, and 24 of 25 eight-thread full reads within 20% (S1 and S2
     contradicted as written, one phase each).
@@ -447,7 +459,8 @@ Against the runs they replaced (controls K1–K3):
       and per MiB written by 0.75–1.09×.
     - **P4 contradicted.** On one thread, RMoW-C's full read at batch 60 takes 0.82× MoR-v3's
       on S3 Express, against 0.9–1.1 predicted, and 0.70× on Azure Blob, as predicted.
-      RMoW-C's batches take 2.3–5.7× MoR-v3's on every store where it can run.
+      RMoW-C's batches take 2.2–5.7× MoR-v3's on every store where it can run (2.3–5.7× before
+      CPU went on the wall clock, 2026-10-27).
     - **P5 held.** On eight threads every arm's full read is within 0.91–1.01× of MoR-v3's on
       S3 Express.
   - **Verdicts.** P1 contradicted (MoR-v3 and TailCoW-C from 64 MiB). P2 contradicted for

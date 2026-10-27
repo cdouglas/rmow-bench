@@ -19,7 +19,8 @@ What anyone (or Claude) reading these results must know. Keep it short and curre
   `wall_ms`. They are times, so locally they are as noisy as `cpu_ns`: for the cloud runs, and for
   orientation locally. Thread CPU time ran 11% fast against wall time on the laptop (WSL2), so
   `cpu_ns` exceeds `wall_ns` in most busy phases of every local run; runs record the ratio
-  (manifest `host.thread_cpu_per_wall`), and `phase_breakdown` corrects for it.
+  (manifest `host.thread_cpu_per_wall`), and `phase_breakdown` and `phase_work` correct for it
+  (`run_clock`; since 2026-10-27, which cut every laptop run's `work_ms` by 10.0%).
 - Builds: runs from 2026-10-26 are on the atomicio fork (README, Appends). They send the same
   requests and bytes as the release build, but MoR-v3's and TailCoW-C's DV files are 18 bytes
   larger (Puffin's `created-by`). The configuration lost `store.append` and `store.adlsReads`, so a
