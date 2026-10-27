@@ -19,6 +19,7 @@ import org.apache.parquet.format.FileMetaData;
 import org.apache.parquet.format.KeyValue;
 import org.apache.parquet.format.RowGroup;
 import org.apache.parquet.format.Util;
+import org.rmow.bench.io.Spans;
 
 /**
  * Reads, merges and writes Parquet footers at the Thrift level.
@@ -74,7 +75,7 @@ public final class FooterCodec {
   }
 
   public static FileMetaData read(byte[] bytes, int offset, int length) {
-    try {
+    try (Spans.Span s = Spans.open(Spans.Kind.FOOTER)) {
       return Util.readFileMetaData(new ByteArrayInputStream(bytes, offset, length));
     } catch (IOException e) {
       throw new UncheckedIOException(e);
@@ -83,7 +84,7 @@ public final class FooterCodec {
 
   /** Serializes a footer followed by its 4-byte little-endian length and the magic. */
   public static byte[] serialize(FileMetaData footer) {
-    try {
+    try (Spans.Span s = Spans.open(Spans.Kind.FOOTER)) {
       ByteArrayOutputStream out = new ByteArrayOutputStream(4096);
       Util.writeFileMetaData(footer, out);
       int len = out.size();
@@ -121,6 +122,18 @@ public final class FooterCodec {
    *     region's row groups take, or null to list them last
    */
   public static FileMetaData merge(
+      FileMetaData previous,
+      Set<Integer> drop,
+      List<FileMetaData> regions,
+      List<Integer> slots,
+      long prevLength,
+      long version) {
+    try (Spans.Span s = Spans.open(Spans.Kind.FOOTER)) {
+      return merged(previous, drop, regions, slots, prevLength, version);
+    }
+  }
+
+  private static FileMetaData merged(
       FileMetaData previous,
       Set<Integer> drop,
       List<FileMetaData> regions,
@@ -297,6 +310,12 @@ public final class FooterCodec {
    * version hands the stock reader for that object. Not thread-safe on {@code footer}.
    */
   public static FileMetaData localFooter(FileMetaData footer, String path) {
+    try (Spans.Span s = Spans.open(Spans.Kind.FOOTER)) {
+      return local(footer, path);
+    }
+  }
+
+  private static FileMetaData local(FileMetaData footer, String path) {
     FileMetaData local = copyWithoutRowGroups(footer);
     List<RowGroup> groups = new ArrayList<>();
     long rows = 0;

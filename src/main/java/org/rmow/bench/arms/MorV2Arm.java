@@ -21,6 +21,7 @@ import org.apache.iceberg.io.DeleteWriteResult;
 import org.apache.iceberg.io.FileWriter;
 import org.apache.iceberg.parquet.Parquet;
 import org.apache.iceberg.util.ContentFileUtil;
+import org.rmow.bench.io.Spans;
 import org.rmow.bench.rmow.VersionedInputFile;
 
 /**
@@ -45,8 +46,16 @@ public final class MorV2Arm extends MorArm {
     this.granularity = granularity;
   }
 
+  /** Position-delete files: a {@link Spans.Kind#DELETES} span. */
   @Override
   protected void writeDeletes(int batch, long seq, Map<Integer, List<Integer>> deleted)
+      throws IOException {
+    try (Spans.Span s = Spans.open(Spans.Kind.DELETES)) {
+      writePositionDeletes(batch, seq, deleted);
+    }
+  }
+
+  private void writePositionDeletes(int batch, long seq, Map<Integer, List<Integer>> deleted)
       throws IOException {
     int[] next = {0};
     Supplier<FileWriter<PositionDelete<Record>, DeleteWriteResult>> writers =

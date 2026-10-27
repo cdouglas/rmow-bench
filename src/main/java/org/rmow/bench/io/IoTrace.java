@@ -16,11 +16,16 @@ public final class IoTrace {
   /**
    * One storage operation, kept only when event logging is on (tests, parity assertions and the
    * request log). {@code seq} orders an arm's events, and {@code task} is the split task the
-   * request ran in ({@link #enterTask}), or -1 outside one. A {@link Kind#TASK} event closes a
-   * task: {@code cpuNs} is its thread CPU, {@code instructions} and {@code cycles} its user-mode
-   * counts ({@code ThreadCounters}; -1 without counters), {@code offset} its group (the first
-   * task id of the tasks scheduled together), and {@code length} is 1 if it ran on the phase's own
-   * thread, 0 on a read pool's.
+   * request ran in ({@link #enterTask}), or -1 outside one. A request's {@code startNs} ({@code
+   * System.nanoTime}), {@code durNs} and {@code cpuNs} are the wall and thread CPU time of the
+   * calls into the store that served it ({@link Spans}): for a stream's GET, the read that opened
+   * it, and for a stream's later reads their {@link Kind#STREAM_BYTES} events; for a PUT through an
+   * output stream, its close, which uploads. They are 0 for the events that mark a request rather
+   * than time one (skips, aborts), and on a thread that is not measured. A {@link Kind#TASK} event
+   * closes a task: its start and wall time, {@code cpuNs} its thread CPU, {@code instructions} and
+   * {@code cycles} its user-mode counts ({@code ThreadCounters}; -1 without counters), {@code
+   * offset} its group (the first task id of the tasks scheduled together), and {@code length} 1 if
+   * it ran on the phase's own thread, 0 on a read pool's.
    */
   public record Event(
       long seq,
@@ -29,6 +34,8 @@ public final class IoTrace {
       String path,
       long offset,
       long length,
+      long startNs,
+      long durNs,
       long cpuNs,
       long instructions,
       long cycles) {}
@@ -74,9 +81,20 @@ public final class IoTrace {
   private final LongAdder poolUser = new LongAdder();
   private final LongAdder poolInstructions = new LongAdder();
   private final LongAdder poolCycles = new LongAdder();
+  private final LongAdder poolWall = new LongAdder();
+  private final LongAdder[] poolSpanWall = adders(Spans.kinds().length);
+  private final LongAdder[] poolSpanCpu = adders(Spans.kinds().length);
   private final AtomicLong seq = new AtomicLong();
   private final AtomicLong taskIds = new AtomicLong();
   private volatile boolean logEvents = false;
+
+  private static LongAdder[] adders(int n) {
+    LongAdder[] a = new LongAdder[n];
+    for (int i = 0; i < n; i++) {
+      a[i] = new LongAdder();
+    }
+    return a;
+  }
 
   public void logEvents(boolean enabled) {
     this.logEvents = enabled;
@@ -120,6 +138,34 @@ public final class IoTrace {
     poolCycles.add(cycles);
   }
 
+  /**
+   * Adds a pool task's wall time and its spans ({@link Spans}): what its thread spent in requests,
+   * encoding, decoding and the rest.
+   */
+  public void addPoolSpans(long wallNs, Spans.Totals spans) {
+    poolWall.add(wallNs);
+    for (int i = 0; i < poolSpanWall.length; i++) {
+      poolSpanWall[i].add(spans.wallNs()[i]);
+      poolSpanCpu[i].add(spans.cpuNs()[i]);
+    }
+  }
+
+  /** The wall time of every split task that has run on a read pool. */
+  public long poolWallNs() {
+    return poolWall.sum();
+  }
+
+  /** The spans of every split task that has run on a read pool. */
+  public Spans.Totals poolSpans() {
+    long[] w = new long[poolSpanWall.length];
+    long[] c = new long[poolSpanCpu.length];
+    for (int i = 0; i < w.length; i++) {
+      w[i] = poolSpanWall[i].sum();
+      c[i] = poolSpanCpu[i].sum();
+    }
+    return new Spans.Totals(w, c);
+  }
+
   public long poolInstructions() {
     return poolInstructions.sum();
   }
@@ -134,15 +180,22 @@ public final class IoTrace {
   }
 
   /**
-   * Logs the end of split task {@code task} of {@code group}: its thread CPU and user-mode
-   * instructions and cycles (-1 without counters), and whether it ran inline.
+   * Logs the end of split task {@code task} of {@code group}: its start and wall time, its thread
+   * CPU and user-mode instructions and cycles (-1 without counters), and whether it ran inline.
    */
   public void taskDone(
-      int task, int group, long cpuNs, long instructions, long cycles, boolean inline) {
+      int task,
+      int group,
+      long startNs,
+      long wallNs,
+      long cpuNs,
+      long instructions,
+      long cycles,
+      boolean inline) {
     if (logEvents) {
       events.add(
-          new Event(seq.getAndIncrement(), task, Kind.TASK, "", group, inline ? 1 : 0, cpuNs,
-              instructions, cycles));
+          new Event(seq.getAndIncrement(), task, Kind.TASK, "", group, inline ? 1 : 0, startNs,
+              wallNs, cpuNs, instructions, cycles));
     }
   }
 
@@ -156,7 +209,18 @@ public final class IoTrace {
     events.clear();
   }
 
+  /** Records a request that is not timed: a skip or an abort, which mark one. */
   void record(Kind kind, String path, long offset, long length) {
+    record(kind, path, offset, length, 0, 0, 0);
+  }
+
+  /** Records a request, timed by the span of the calls that served it. */
+  void record(Kind kind, String path, long offset, long length, Spans.Span span) {
+    record(kind, path, offset, length, span.startNs(), span.wallNs(), span.cpuNs());
+  }
+
+  void record(
+      Kind kind, String path, long offset, long length, long startNs, long durNs, long cpuNs) {
     switch (kind) {
       case GET_RANGE -> {
         getRange.increment();
@@ -179,18 +243,21 @@ public final class IoTrace {
     }
     if (logEvents) {
       events.add(
-          new Event(seq.getAndIncrement(), CURRENT_TASK.get(), kind, path, offset, length, 0, -1,
-              -1));
+          new Event(seq.getAndIncrement(), CURRENT_TASK.get(), kind, path, offset, length, startNs,
+              durNs, cpuNs, -1, -1));
     }
   }
 
-  /** Bytes a stream request delivered to its reader (counted per read, not per request). */
-  void streamBytes(String path, long n) {
+  /**
+   * Bytes a stream request delivered to its reader (counted per read, not per request), and the
+   * read's time: none if the read opened the request, whose GET carries it.
+   */
+  void streamBytes(String path, long n, long startNs, long durNs, long cpuNs) {
     getStreamBytes.add(n);
     if (logEvents) {
       events.add(
-          new Event(seq.getAndIncrement(), CURRENT_TASK.get(), Kind.STREAM_BYTES, path, -1, n, 0,
-              -1, -1));
+          new Event(seq.getAndIncrement(), CURRENT_TASK.get(), Kind.STREAM_BYTES, path, -1, n,
+              startNs, durNs, cpuNs, -1, -1));
     }
   }
 

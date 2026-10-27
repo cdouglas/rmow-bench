@@ -164,12 +164,29 @@ public final class Main {
     // whether phases carry instructions and cycles, and if not, why
     h.put("thread_counters",
         ThreadCounters.unavailable() == null ? "available" : ThreadCounters.unavailable());
+    h.put("thread_cpu_per_wall", threadCpuPerWall());
     h.put("max_heap_bytes", Runtime.getRuntime().maxMemory());
     if (System.getProperty("rmow.placement") != null) {
       h.put("container", true);
       h.put("placement", System.getProperty("rmow.placement"));
     }
     return h;
+  }
+
+  /**
+   * Thread CPU time per nanosecond of wall time, spinning for 200 ms: 1 where the two clocks agree.
+   * Under WSL2 on Hyper-V the thread CPU clock ran 11% fast (1.111), so a phase's CPU exceeded its
+   * wall time; the lab's {@code phase_breakdown} divides CPU times by this.
+   */
+  private static double threadCpuPerWall() {
+    var mx = ManagementFactory.getThreadMXBean();
+    long cpu0 = mx.getCurrentThreadCpuTime();
+    long t0 = System.nanoTime();
+    long t;
+    do {
+      t = System.nanoTime();
+    } while (t - t0 < 200_000_000L);
+    return (mx.getCurrentThreadCpuTime() - cpu0) / (double) (t - t0);
   }
 
   /** The first {@code key: value} line's value in a /proc file; empty when there is none. */

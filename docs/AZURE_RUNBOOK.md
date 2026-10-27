@@ -147,6 +147,9 @@ docker stop rmow-azurite
   - what the fork's writes cost: `append_sao` against `append`, `create_sao` against `create_own`;
   - a GET's extra latency per appended block, from the 1- to 1000-block blobs;
   - what Iceberg's ranged read costs against the SDK's alone (`iceberg_mid`, `get_mid_32m`).
+- **Where the time went.** `phase_breakdown` splits each phase into encoding, decoding,
+  footers, deletes, other CPU, the store client's CPU, waiting on the store, and other waiting.
+  It needs the VM's two clocks to agree: its manifest's `host.thread_cpu_per_wall` should be 1.
 - **The model.** Replay the run with the measured profile (`sdk_latency` prices what was sent;
   `figures.replay` the logged requests), and compare each one-thread phase's simulated latency
   with its wall time (`wall_ns`).

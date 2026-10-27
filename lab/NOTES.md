@@ -12,6 +12,14 @@ What anyone (or Claude) reading these results must know. Keep it short and curre
   `cycles` (and `pool_*` for a read's pool threads; split tasks carry theirs in `requests`).
   Instructions are the steady measure; thread CPU time (`cpu_ns`, `pool_cpu_ns`) moves with the
   clock. `phase_work.work_ms` is a phase's time for the latency model (lab/pages/cpu-measure.md).
+- Where the time went: runs from 2026-10-26 carry each phase's wall and CPU time by kind of work,
+  exclusive of one another (`io`, `encode`, `decode`, `footer`, `deletes` as `<kind>_ns` and
+  `<kind>_cpu_ns`; `pool_*` for a read's pool), and the request log each request's `start_ns`,
+  `dur_ns` and `cpu_ns`. `phase_breakdown` turns a phase into components that add up to its
+  `wall_ms`. They are times, so locally they are as noisy as `cpu_ns`: for the cloud runs, and for
+  orientation locally. Thread CPU time ran 11% fast against wall time on the laptop (WSL2), so
+  `cpu_ns` exceeds `wall_ns` in most busy phases of every local run; runs record the ratio
+  (manifest `host.thread_cpu_per_wall`), and `phase_breakdown` corrects for it.
 - Builds: runs from 2026-10-26 are on the atomicio fork (README, Appends). They send the same
   requests and bytes as the release build, but MoR-v3's and TailCoW-C's DV files are 18 bytes
   larger (Puffin's `created-by`). The configuration lost `store.append` and `store.adlsReads`, so a

@@ -37,6 +37,7 @@ import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.parquet.format.FileMetaData;
 import org.rmow.bench.bench.ThreadCounters;
 import org.rmow.bench.io.IoTrace;
+import org.rmow.bench.io.Spans;
 import org.rmow.bench.oracle.TableHash;
 import org.rmow.bench.rmow.FooterCodec;
 import org.rmow.bench.rmow.ParquetReads;
@@ -77,6 +78,8 @@ final class Scans {
   /**
    * Reads {@code df} with {@code deletes} applied and {@code filter} as a residual; rows have the
    * delete filter's required schema ({@code projection}, plus {@code _pos} if there are deletes).
+   * The scan is a {@link Spans.Kind#DECODE} span: its requests and its deletes' loading are spans
+   * of their own.
    *
    * @param tail the file's cached tail, or null to read its footer from storage
    * @param start the split's start, or -1 for the whole file
@@ -129,8 +132,9 @@ final class Scans {
             df.fileSizeInBytes(),
             tail,
             reader.footerPrefetchBytes());
-    try (CloseableIterable<Record> rs =
-        deleteFilter.filter(ParquetReads.open(in, required, filter, start, length))) {
+    try (Spans.Span decode = Spans.open(Spans.Kind.DECODE);
+        CloseableIterable<Record> rs =
+            deleteFilter.filter(ParquetReads.open(in, required, filter, start, length))) {
       for (Record r : rs) {
         if (residual == null || residual.eval(wrapper.wrap(r))) {
           rows.accept(r);
@@ -284,9 +288,9 @@ final class Scans {
 
   /**
    * Runs a read's tasks on the reader's pool, or one after another without one. A task on the
-   * pool adds its thread CPU to the trace's pool CPU (the arm's thread counts the others itself).
-   * When the trace logs requests, each task's requests carry its number, and its end its thread
-   * CPU.
+   * pool adds its thread CPU, and its wall time and spans ({@link Spans}), to the trace's pool
+   * totals (the arm's thread counts the others itself). When the trace logs requests, each task's
+   * requests carry its number, and its end its times.
    */
   private static TableHash run(ArmContext ctx, Reader reader, List<Callable<TableHash>> tasks)
       throws IOException {
@@ -304,6 +308,9 @@ final class Scans {
               if (logging) {
                 IoTrace.enterTask(id);
               }
+              Spans.measure(); // a pool's thread is measured only inside its tasks
+              Spans.Totals spans0 = Spans.totals();
+              long start = System.nanoTime();
               long cpu0 = MX.getCurrentThreadCpuTime();
               long user0 = MX.getCurrentThreadUserTime();
               ThreadCounters.Sample counts0 = ThreadCounters.now();
@@ -311,16 +318,19 @@ final class Scans {
                 return t.call();
               } finally {
                 long cpu = MX.getCurrentThreadCpuTime() - cpu0;
+                long wall = System.nanoTime() - start;
                 ThreadCounters.Sample d =
                     counts0 == null ? null : ThreadCounters.now().minus(counts0);
+                Spans.unmeasure();
                 if (!inline) {
                   trace.addPoolCpu(cpu, MX.getCurrentThreadUserTime() - user0);
+                  trace.addPoolSpans(wall, Spans.totals().minus(spans0));
                   if (d != null) {
                     trace.addPoolCounts(d.instructions(), d.cycles());
                   }
                 }
                 if (logging) {
-                  trace.taskDone(id, group, cpu, d == null ? -1 : d.instructions(),
+                  trace.taskDone(id, group, start, wall, cpu, d == null ? -1 : d.instructions(),
                       d == null ? -1 : d.cycles(), inline);
                   IoTrace.exitTask();
                 }

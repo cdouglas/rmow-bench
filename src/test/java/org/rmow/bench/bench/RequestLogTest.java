@@ -328,6 +328,84 @@ class RequestLogTest {
     return out;
   }
 
+  private static final List<String> KINDS = List.of("io", "encode", "decode", "footer", "deletes");
+
+  private static long sum(JsonNode r, String prefix, String suffix) {
+    long n = 0;
+    for (String k : KINDS) {
+      n += r.get(prefix + k + suffix).asLong();
+    }
+    return n;
+  }
+
+  /**
+   * Each phase splits its time by kind of work ({@code io}, {@code encode}, {@code decode}, {@code
+   * footer}, {@code deletes}), exclusive of one another, so on one thread they add up to at most
+   * its wall and CPU time; a pool's tasks are counted apart. Each kind shows where it should, and
+   * every logged request carries its time.
+   */
+  @Test
+  void phasesSplitTheirTimeByKindOfWork(@TempDir Path dir) throws IOException {
+    BenchConfig cfg = config(dir);
+    BenchConfig.ReaderSpec pooled = BenchConfig.ReaderSpec.cached();
+    pooled.name = "cached-p2";
+    pooled.parallelism = 2;
+    cfg.reads.readers = List.of(BenchConfig.ReaderSpec.cached(), pooled);
+    List<JsonNode> steps = run(cfg, dir);
+    Map<String, JsonNode> byKey = new HashMap<>();
+    Map<String, Long> seen = new HashMap<>(); // arm phase kind -> ns
+    for (JsonNode s : steps) {
+      if (s.get("phase").asText().equals("state")) {
+        continue;
+      }
+      String at = key(s);
+      byKey.put(at, s);
+      assertThat(sum(s, "", "_ns")).as(at + " wall").isLessThanOrEqualTo(s.get("wall_ns").asLong());
+      assertThat(sum(s, "", "_cpu_ns")).as(at + " CPU")
+          .isLessThanOrEqualTo(s.get("cpu_ns").asLong() + 1_000_000);
+      assertThat(sum(s, "pool_", "_ns")).as(at + " pool wall")
+          .isLessThanOrEqualTo(s.get("pool_wall_ns").asLong());
+      for (String k : KINDS) {
+        String phase = s.get("phase").asText().startsWith("read_") ? "read" : s.get("phase").asText();
+        seen.merge(s.get("arm").asText() + " " + phase + " " + k,
+            s.get(k + "_ns").asLong() + s.get("pool_" + k + "_ns").asLong(), Long::sum);
+      }
+    }
+    for (String arm : cfg.arms) {
+      assertThat(seen.get(arm + " batch io")).as(arm + " batches' requests").isPositive();
+      assertThat(seen.get(arm + " batch encode")).as(arm + " batches' encoding").isPositive();
+      assertThat(seen.get(arm + " read decode")).as(arm + " reads' decoding").isPositive();
+    }
+    assertThat(seen.get("rmow-c batch footer")).as("RMoW's footers").isPositive();
+    assertThat(seen.get("rmow-c batch decode")).as("RMoW's merge reads").isPositive();
+    assertThat(seen.get("mor-v3 batch deletes")).as("MoR's DVs written").isPositive();
+    assertThat(seen.get("mor-v3 read deletes")).as("MoR's DVs loaded").isPositive();
+    assertThat(steps).as("a pooled read's tasks")
+        .anyMatch(s -> s.has("pool_decode_ns") && s.get("pool_decode_ns").asLong() > 0);
+
+    Map<String, Long> loggedNs = new HashMap<>();
+    for (JsonNode e : lines(dir.resolve("requests.jsonl"))) {
+      String kind = e.get("kind").asText();
+      if (List.of("abort", "skip_through").contains(kind)) {
+        assertThat(e.get("start_ns").isNull()).as(kind + " marks, not times").isTrue();
+        continue;
+      }
+      if (kind.equals("stream_bytes") && e.get("dur_ns").asLong() == 0) {
+        continue; // the read that opened its GET, which carries its time
+      }
+      assertThat(e.get("start_ns").asLong()).as(key(e) + " " + kind + " start").isNotNegative();
+      assertThat(e.get("dur_ns").asLong()).as(key(e) + " " + kind + " time").isPositive();
+      if (!kind.equals("task") && e.get("task").asInt() < 0) {
+        loggedNs.merge(key(e), e.get("dur_ns").asLong(), Long::sum);
+      }
+    }
+    // a phase's logged requests outside split tasks took at most its time in requests (stream
+    // closes are in it too, on no request)
+    loggedNs.forEach(
+        (k, ns) -> assertThat(ns).as(k).isLessThanOrEqualTo(byKey.get(k).get("io_ns").asLong()));
+    assertThat(loggedNs).isNotEmpty();
+  }
+
   @Test
   void injectedLatencyMakesPhasesTakeTheirRequestsTime(@TempDir Path dir) throws IOException {
     BenchConfig cfg = config(dir);
@@ -353,6 +431,10 @@ class RequestLogTest {
       // one thread: the phase slept its requests' time, and the rest is its own work
       long wall = s.get("wall_ns").asLong();
       assertThat((double) wall).as(key(s) + " wall").isGreaterThanOrEqualTo(ns);
+      // the sleeps are in its requests' spans
+      assertThat((double) s.get("io_ns").asLong()).as(key(s) + " in requests")
+          .isGreaterThanOrEqualTo(ns)
+          .isLessThanOrEqualTo(wall);
       checked++;
     }
     assertThat(checked).isPositive();

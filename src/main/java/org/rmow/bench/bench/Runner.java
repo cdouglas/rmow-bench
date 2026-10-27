@@ -30,6 +30,7 @@ import org.rmow.bench.arms.TailPolicy;
 import org.rmow.bench.arms.VersionDump;
 import org.rmow.bench.io.IoTrace;
 import org.rmow.bench.io.RelocatedFileIO;
+import org.rmow.bench.io.Spans;
 import org.rmow.bench.io.StoreLatency;
 import org.rmow.bench.io.TracingFileIO;
 import org.rmow.bench.oracle.ReferenceModel;
@@ -352,6 +353,16 @@ public final class Runner {
         m.put("pool_cycles", p.poolCounts().cycles());
       }
       m.put("process_cpu_ns", p.processCpuNs());
+      // where the time went (Spans): <kind>_ns and <kind>_cpu_ns, exclusive of one another
+      for (Spans.Kind k : Spans.kinds()) {
+        m.put(k.field() + "_ns", p.spans().wallNs(k));
+        m.put(k.field() + "_cpu_ns", p.spans().cpuNs(k));
+      }
+      m.put("pool_wall_ns", p.poolWallNs());
+      for (Spans.Kind k : Spans.kinds()) {
+        m.put("pool_" + k.field() + "_ns", p.poolSpans().wallNs(k));
+        m.put("pool_" + k.field() + "_cpu_ns", p.poolSpans().cpuNs(k));
+      }
       IoTrace.Counters c = p.io();
       m.put("requests", c.requests());
       m.put("gets", c.gets());
@@ -389,6 +400,9 @@ public final class Runner {
       m.put("object", path.startsWith(LOGICAL_ROOT + "/") ? path.substring(LOGICAL_ROOT.length() + 1) : path);
       m.put("offset", e.offset());
       m.put("length", e.length());
+      // from the outermost phase's start; null for the events that only mark a request
+      m.put("start_ns", e.startNs() == 0 ? null : e.startNs() - p.startNs());
+      m.put("dur_ns", e.durNs());
       m.put("cpu_ns", e.cpuNs());
       if (e.instructions() >= 0) {
         m.put("instructions", e.instructions());

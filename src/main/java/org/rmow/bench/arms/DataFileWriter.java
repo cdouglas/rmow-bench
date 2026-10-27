@@ -11,6 +11,7 @@ import org.apache.iceberg.data.parquet.GenericParquetWriter;
 import org.apache.iceberg.io.FileAppender;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.parquet.Parquet;
+import org.rmow.bench.io.Spans;
 import org.rmow.bench.workload.Rows;
 
 /**
@@ -24,7 +25,16 @@ public final class DataFileWriter {
 
   private DataFileWriter() {}
 
+  /** Writes the file: an {@link Spans.Kind#ENCODE} span, with its PUT a request span. */
   public static DataFile write(
+      FileIO io, String location, Iterable<Record> rows, Map<String, String> writerProperties)
+      throws IOException {
+    try (Spans.Span s = Spans.open(Spans.Kind.ENCODE)) {
+      return encode(io, location, rows, writerProperties);
+    }
+  }
+
+  private static DataFile encode(
       FileIO io, String location, Iterable<Record> rows, Map<String, String> writerProperties)
       throws IOException {
     FileAppender<Record> appender =

@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Map;
 import org.rmow.bench.io.IoTrace;
 import org.rmow.bench.io.SdkRecorder;
+import org.rmow.bench.io.Spans;
 
 /**
  * Times named phases of one arm: wall-clock and thread CPU time, and the requests the arm's
@@ -23,6 +24,10 @@ import org.rmow.bench.io.SdkRecorder;
  *
  * <p>When the trace logs events (the request log), an outermost phase takes the events logged
  * while it ran, its nested phases' included; events logged outside every phase are dropped.
+ *
+ * <p>A phase's thread is measured while it runs ({@link Spans}), so each phase records where its
+ * time went: in requests, encoding, decoding, footers and deletes, each as wall and CPU time,
+ * exclusive of one another, and the same for its split tasks on a read pool.
  */
 public final class Phases {
 
@@ -33,11 +38,14 @@ public final class Phases {
    * reads), and process CPU (which also counts the JVM's own GC and JIT threads). {@code counts}
    * and {@code poolCounts} are the same threads' user-mode instructions and cycles ({@link
    * ThreadCounters}), null without counters. {@code extra} holds phase-specific values (e.g. rows
-   * read); {@code events}, the logged requests of an outermost phase.
+   * read); {@code events}, the logged requests of an outermost phase. {@code startNs} is its start
+   * on {@code System.nanoTime}'s clock, the events'; {@code spans} its thread's time by kind of
+   * work, and {@code poolSpans} and {@code poolWallNs} its pool tasks'.
    */
   public record Measured(
       String phase,
       long startMs,
+      long startNs,
       long wallNs,
       long cpuNs,
       long poolCpuNs,
@@ -46,6 +54,9 @@ public final class Phases {
       long processCpuNs,
       ThreadCounters.Sample counts,
       ThreadCounters.Sample poolCounts,
+      Spans.Totals spans,
+      Spans.Totals poolSpans,
+      long poolWallNs,
       IoTrace.Counters io,
       Map<String, Object> extra,
       List<IoTrace.Event> events) {}
@@ -96,6 +107,10 @@ public final class Phases {
     IoTrace.Counters before = trace.snapshot();
     Map<String, Long> sdk0 = recorder == null ? null : recorder.fields();
     long proc0 = OS.getProcessCpuTime();
+    Spans.measure();
+    Spans.Totals spans0 = Spans.totals();
+    Spans.Totals poolSpans0 = trace.poolSpans();
+    long poolWall0 = trace.poolWallNs();
     long pool0 = trace.poolCpuNs();
     long poolUser0 = trace.poolUserNs();
     long user0 = MX.getCurrentThreadUserTime();
@@ -110,9 +125,13 @@ public final class Phases {
       result = body.get();
     } finally {
       depth--;
+      Spans.unmeasure();
     }
     long wall = System.nanoTime() - t0;
     long cpu = MX.getCurrentThreadCpuTime() - cpu0;
+    Spans.Totals spans = Spans.totals().minus(spans0);
+    Spans.Totals poolSpans = trace.poolSpans().minus(poolSpans0);
+    long poolWall = trace.poolWallNs() - poolWall0;
     long user = MX.getCurrentThreadUserTime() - user0;
     long pool = trace.poolCpuNs() - pool0;
     long poolUser = trace.poolUserNs() - poolUser0;
@@ -128,8 +147,8 @@ public final class Phases {
     List<IoTrace.Event> events = outermost && trace.logging() ? trace.drainEvents() : List.of();
     measured.add(
         new Measured(
-            phase, startMs, wall, cpu, pool, user, poolUser, proc, counts, poolCounts,
-            trace.snapshot().minus(before), extra, events));
+            phase, startMs, t0, wall, cpu, pool, user, poolUser, proc, counts, poolCounts, spans,
+            poolSpans, poolWall, trace.snapshot().minus(before), extra, events));
     return result;
   }
 

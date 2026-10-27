@@ -9,6 +9,7 @@ import org.apache.iceberg.data.BaseDeleteLoader;
 import org.apache.iceberg.data.DeleteLoader;
 import org.apache.iceberg.deletes.BaseDVFileWriter;
 import org.apache.iceberg.io.DeleteWriteResult;
+import org.rmow.bench.io.Spans;
 
 /** Writes one batch's deletion vectors, as Spark's DV writer does, for every arm that uses DVs. */
 final class Dvs {
@@ -18,9 +19,20 @@ final class Dvs {
   /**
    * Writes a Puffin file at {@code location} with one DV per data file in {@code positions}. A
    * data file whose {@code previous} DV is not null gets a DV merged with it (read from storage);
-   * the caller replaces the previous DV with the result's.
+   * the caller replaces the previous DV with the result's. A {@link Spans.Kind#DELETES} span.
    */
   static DeleteWriteResult write(
+      ArmContext ctx,
+      String location,
+      Map<String, List<Long>> positions,
+      Function<String, DeleteFile> previous)
+      throws IOException {
+    try (Spans.Span s = Spans.open(Spans.Kind.DELETES)) {
+      return encode(ctx, location, positions, previous);
+    }
+  }
+
+  private static DeleteWriteResult encode(
       ArmContext ctx,
       String location,
       Map<String, List<Long>> positions,

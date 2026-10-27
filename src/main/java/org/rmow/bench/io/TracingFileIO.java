@@ -34,6 +34,9 @@ import org.rmow.bench.append.RegionAppender;
  * The wrapper keeps the delegate's {@link RangeReadable} capability: dropping it would silently
  * switch Parquet to seek-and-read (I/O parity rule 1).
  *
+ * <p>Every call into the store runs in a {@link Spans.Kind#REQUEST} span, so a phase knows its time
+ * in requests, and each logged request carries its own wall and CPU time.
+ *
  * <p>Given a {@link StoreLatency}, each request also sleeps its simulated latency, so wall time
  * becomes what the phase would take on that store.
  */
@@ -87,11 +90,14 @@ public final class TracingFileIO implements FileIO, RegionAppender {
 
   @Override
   public void deleteFile(String path) {
-    trace.record(IoTrace.Kind.DELETE, path, 0, 0);
-    if (latency != null) {
-      latency.delete(path);
+    Spans.Span span = Spans.open(Spans.Kind.REQUEST);
+    try (span) {
+      if (latency != null) {
+        latency.delete(path);
+      }
+      delegate.deleteFile(path);
     }
-    delegate.deleteFile(path);
+    trace.record(IoTrace.Kind.DELETE, path, 0, 0, span);
   }
 
   @Override
@@ -99,11 +105,16 @@ public final class TracingFileIO implements FileIO, RegionAppender {
     if (appender == null) {
       throw new UnsupportedOperationException("This store has no append: " + location);
     }
-    trace.record(IoTrace.Kind.APPEND, location, expectedLength, bytes.length);
-    if (latency != null) {
-      latency.append(location, bytes.length);
+    long length;
+    Spans.Span span = Spans.open(Spans.Kind.REQUEST);
+    try (span) {
+      if (latency != null) {
+        latency.append(location, bytes.length);
+      }
+      length = appender.append(location, expectedLength, bytes);
     }
-    return appender.append(location, expectedLength, bytes);
+    trace.record(IoTrace.Kind.APPEND, location, expectedLength, bytes.length, span);
+    return length;
   }
 
   /** A new appendable object: one PUT, as the output stream it replaces would be. */
@@ -112,11 +123,14 @@ public final class TracingFileIO implements FileIO, RegionAppender {
     if (appender == null) {
       throw new UnsupportedOperationException("This store has no append: " + location);
     }
-    appender.create(location, bytes);
-    trace.record(IoTrace.Kind.PUT, location, 0, bytes.length);
-    if (latency != null) {
-      latency.put(location, bytes.length);
+    Spans.Span span = Spans.open(Spans.Kind.REQUEST);
+    try (span) {
+      appender.create(location, bytes);
+      if (latency != null) {
+        latency.put(location, bytes.length);
+      }
     }
+    trace.record(IoTrace.Kind.PUT, location, 0, bytes.length, span);
   }
 
   private final class TracingInputFile implements InputFile {
@@ -131,14 +145,20 @@ public final class TracingFileIO implements FileIO, RegionAppender {
 
     @Override
     public long getLength() {
-      if (!knownLength && !headDone) {
-        headDone = true;
-        trace.record(IoTrace.Kind.HEAD, file.location(), 0, 0);
+      if (knownLength || headDone) {
+        return file.getLength();
+      }
+      headDone = true;
+      long length;
+      Spans.Span span = Spans.open(Spans.Kind.REQUEST);
+      try (span) {
         if (latency != null) {
           latency.head();
         }
+        length = file.getLength();
       }
-      return file.getLength();
+      trace.record(IoTrace.Kind.HEAD, file.location(), 0, 0, span);
+      return length;
     }
 
     @Override
@@ -158,11 +178,16 @@ public final class TracingFileIO implements FileIO, RegionAppender {
 
     @Override
     public boolean exists() {
-      trace.record(IoTrace.Kind.HEAD, file.location(), 0, 0);
-      if (latency != null) {
-        latency.head();
+      boolean exists;
+      Spans.Span span = Spans.open(Spans.Kind.REQUEST);
+      try (span) {
+        if (latency != null) {
+          latency.head();
+        }
+        exists = file.exists();
       }
-      return file.exists();
+      trace.record(IoTrace.Kind.HEAD, file.location(), 0, 0, span);
+      return exists;
     }
   }
 
@@ -188,27 +213,48 @@ public final class TracingFileIO implements FileIO, RegionAppender {
       in.seek(newPos);
     }
 
-    private void beforeRead() throws IOException {
+    /**
+     * Before a read: a skip through, or an abort and a new request. Returns the position a new
+     * request opens at, or -1 if the read continues the open one.
+     */
+    private long beforeRead() throws IOException {
       long pos = in.getPos();
       if (requestOpen && pos == requestPos) {
-        return;
+        return -1;
       }
       if (requestOpen && pos > requestPos && pos - requestPos <= SKIP_SIZE) {
         trace.record(IoTrace.Kind.SKIP_THROUGH, location, requestPos, pos - requestPos);
         delivered(pos - requestPos);
         requestPos = pos;
-        return;
+        return -1;
       }
       if (requestOpen) {
         trace.record(IoTrace.Kind.ABORT, location, requestPos, 0);
       }
-      trace.record(IoTrace.Kind.GET_STREAM, location, pos, -1);
       if (latency != null) {
         sleepTransfer();
         latency.open(location);
       }
       requestOpen = true;
       requestPos = pos;
+      return pos;
+    }
+
+    /**
+     * Records a read: the GET it opened, timed by the read, or else the read's own time on its
+     * delivered bytes.
+     */
+    private void read(long opened, long n, Spans.Span span) {
+      if (opened >= 0) {
+        trace.record(IoTrace.Kind.GET_STREAM, location, opened, -1, span);
+      }
+      if (n > 0) {
+        if (opened >= 0) {
+          trace.streamBytes(location, n, 0, 0, 0);
+        } else {
+          trace.streamBytes(location, n, span.startNs(), span.wallNs(), span.cpuNs());
+        }
+      }
     }
 
     /** Charges the transfer of {@code n} streamed bytes, slept once enough has built up. */
@@ -228,13 +274,18 @@ public final class TracingFileIO implements FileIO, RegionAppender {
 
     @Override
     public int read() throws IOException {
-      beforeRead();
-      int b = in.read();
-      if (b >= 0) {
-        trace.streamBytes(location, 1);
-        delivered(1);
-        requestPos += 1;
+      long opened;
+      int b;
+      Spans.Span span = Spans.open(Spans.Kind.REQUEST);
+      try (span) {
+        opened = beforeRead();
+        b = in.read();
+        if (b >= 0) {
+          delivered(1);
+          requestPos += 1;
+        }
       }
+      read(opened, b >= 0 ? 1 : 0, span);
       return b;
     }
 
@@ -243,24 +294,34 @@ public final class TracingFileIO implements FileIO, RegionAppender {
       if (len == 0) {
         return 0;
       }
-      beforeRead();
-      int n = in.read(b, off, len);
-      if (n > 0) {
-        trace.streamBytes(location, n);
-        delivered(n);
-        requestPos += n;
+      long opened;
+      int n;
+      Spans.Span span = Spans.open(Spans.Kind.REQUEST);
+      try (span) {
+        opened = beforeRead();
+        n = in.read(b, off, len);
+        if (n > 0) {
+          delivered(n);
+          requestPos += n;
+        }
       }
+      read(opened, n, span);
       return n;
     }
 
+    /**
+     * A request closed before EOF is aborted by the cloud streams, which costs them time (in the
+     * phase's requests, on no request of the log). The model does not know the object's length
+     * here, so closes are not counted as aborts; seeks away are.
+     */
     @Override
     public void close() throws IOException {
-      // A request closed before EOF is aborted by the cloud streams. The model does not know the
-      // object's length here, so closes are not counted as aborts; seeks away are.
-      if (latency != null) {
-        sleepTransfer();
+      try (Spans.Span span = Spans.open(Spans.Kind.REQUEST)) {
+        if (latency != null) {
+          sleepTransfer();
+        }
+        in.close();
       }
-      in.close();
     }
 
     protected String location() {
@@ -278,35 +339,54 @@ public final class TracingFileIO implements FileIO, RegionAppender {
 
     @Override
     public void readFully(long position, byte[] buffer, int offset, int length) throws IOException {
-      trace.record(IoTrace.Kind.GET_RANGE, location(), position, length);
-      if (latency != null) {
-        latency.get(location(), length);
+      Spans.Span span = Spans.open(Spans.Kind.REQUEST);
+      try (span) {
+        if (latency != null) {
+          latency.get(location(), length);
+        }
+        range.readFully(position, buffer, offset, length);
       }
-      range.readFully(position, buffer, offset, length);
+      trace.record(IoTrace.Kind.GET_RANGE, location(), position, length, span);
     }
 
     @Override
     public int readTail(byte[] buffer, int offset, int length) throws IOException {
-      int n = range.readTail(buffer, offset, length);
-      trace.record(IoTrace.Kind.GET_RANGE, location(), -1, n);
-      if (latency != null) {
-        latency.get(location(), n);
+      int n;
+      Spans.Span span = Spans.open(Spans.Kind.REQUEST);
+      try (span) {
+        n = range.readTail(buffer, offset, length);
+        if (latency != null) {
+          latency.get(location(), n);
+        }
       }
+      trace.record(IoTrace.Kind.GET_RANGE, location(), -1, n, span);
       return n;
     }
 
+    /**
+     * Counts each range as one GET; a delegate that coalesces ranges issues fewer, which the
+     * SDK-level recorders would show. The read's time goes on its first range.
+     */
     @Override
     public void readVectored(List<FileRange> ranges, IntFunction<ByteBuffer> allocate)
         throws IOException {
-      // Count each range as one GET; a delegate that coalesces ranges issues fewer, which the
-      // SDK-level recorders would show.
-      for (FileRange r : ranges) {
-        trace.record(IoTrace.Kind.GET_RANGE, location(), r.offset(), r.length());
+      Spans.Span span = Spans.open(Spans.Kind.REQUEST);
+      try (span) {
         if (latency != null) {
-          latency.get(location(), r.length()); // one request after another
+          for (FileRange r : ranges) {
+            latency.get(location(), r.length()); // one request after another
+          }
+        }
+        range.readVectored(ranges, allocate);
+      }
+      for (int i = 0; i < ranges.size(); i++) {
+        FileRange r = ranges.get(i);
+        if (i == 0) {
+          trace.record(IoTrace.Kind.GET_RANGE, location(), r.offset(), r.length(), span);
+        } else {
+          trace.record(IoTrace.Kind.GET_RANGE, location(), r.offset(), r.length());
         }
       }
-      range.readVectored(ranges, allocate);
     }
   }
 
@@ -324,11 +404,16 @@ public final class TracingFileIO implements FileIO, RegionAppender {
      */
     @Override
     public PositionOutputStream create() {
-      trace.record(IoTrace.Kind.HEAD, file.location(), 0, 0);
-      if (latency != null) {
-        latency.head();
+      PositionOutputStream out;
+      Spans.Span span = Spans.open(Spans.Kind.REQUEST);
+      try (span) {
+        if (latency != null) {
+          latency.head();
+        }
+        out = file.create();
       }
-      return new TracingOutputStream(file.create(), file.location());
+      trace.record(IoTrace.Kind.HEAD, file.location(), 0, 0, span);
+      return new TracingOutputStream(out, file.location());
     }
 
     @Override
@@ -347,6 +432,12 @@ public final class TracingFileIO implements FileIO, RegionAppender {
     }
   }
 
+  /**
+   * Its PUT's time is its close's, which uploads the object. Writes are not timed (Thrift writes a
+   * footer in many small ones): they copy into the client's buffer, or stage on its local disk, as
+   * part of the encoding that makes them. For a large object, parts upload during the writes, off
+   * the writing thread; the close waits for the rest.
+   */
   private final class TracingOutputStream extends PositionOutputStream {
     private final PositionOutputStream out;
     private final String location;
@@ -382,11 +473,14 @@ public final class TracingFileIO implements FileIO, RegionAppender {
       if (!closed) {
         closed = true;
         long len = out.getPos();
-        out.close();
-        trace.record(IoTrace.Kind.PUT, location, 0, len);
-        if (latency != null) {
-          latency.put(location, len);
+        Spans.Span span = Spans.open(Spans.Kind.REQUEST);
+        try (span) {
+          out.close();
+          if (latency != null) {
+            latency.put(location, len);
+          }
         }
+        trace.record(IoTrace.Kind.PUT, location, 0, len, span);
       }
     }
   }

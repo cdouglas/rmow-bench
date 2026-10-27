@@ -115,6 +115,32 @@ using an order-independent hash of (id, version), and a mismatch stops the run. 
 (the default), every decoded row's payload is checked as well. That check is the harness's, not an
 engine's, and it costs about 70% of a read's CPU, so runs made for latency simulation turn it off.
 
+**Where the time went** (`Spans`, since 2026-10-26). Each phase also splits its thread's time by
+kind of work, as wall and CPU time (`<kind>_ns`, `<kind>_cpu_ns`), each exclusive of the others:
+
+| Kind | What it covers |
+|---|---|
+| `io` | Every call into the store, through the tracing FileIO: the client's work (checksums, HTTP, TLS) and the wait. A PUT through an output stream is its close, which uploads: its writes copy into the client's buffer, as part of the encoding. |
+| `encode` | Parquet encoding of rows: data files and RMoW's regions. |
+| `decode` | Parquet decoding in a scan: footers, pages and rows, with deletes applied, and the scan's consumer (a hash, or rows kept to merge). |
+| `footer` | RMoW's footers: Thrift decoding, encoding and merging. |
+| `deletes` | Delete files: DVs and position deletes built, encoded, loaded and decoded. |
+
+The rest of the thread's CPU is planning and bookkeeping, and the rest of its wall time is off the
+CPU outside requests (garbage collection, the JIT, scheduling). A read pool's tasks record the same
+(`pool_<kind>_ns`, `pool_<kind>_cpu_ns`, with `pool_wall_ns`). The lab's `phase_breakdown` view
+turns them into components that add up to a phase's wall time, for stacked bars. The store
+client's threads of its own (Azure's event loop) are in `process_cpu_ns`, not in `io`. In the
+request log, each request has its start in its phase (`start_ns`), wall time (`dur_ns`) and thread
+CPU (`cpu_ns`). Each span reads the thread's CPU clock twice, about 2 µs here, and a batch or read
+opens tens to hundreds of them; on a 7-arm run they moved user-mode instructions by -0.5% to +2%.
+
+CPU and wall time must run on one clock for the breakdown to add up. On this laptop (WSL2 on
+Hyper-V) the thread CPU clock runs 11% fast against the wall clock, so a busy phase's `cpu_ns`
+exceeds its `wall_ns`. Each run spins for 200 ms before it starts and records the ratio in its
+manifest (`host.thread_cpu_per_wall`, 1 where the clocks agree), and `phase_breakdown` divides CPU
+times by it.
+
 ### I/O parity rules
 
 Each rule guards against a bias found in Iceberg's code:

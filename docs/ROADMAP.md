@@ -92,12 +92,20 @@ leave them out.
   - [ ] **Against the stores' own writes, in the cloud:** the spikes now time the store's own
     appends and creates beside RMoW's, interleaved (draft hypotheses X5 and Z7). That leaves
     nothing native in the runs, only in the spikes.
-- [ ] **Each request's latency in the request log.** `requests.jsonl` records each request's
-  kind, object, range and the CPU before it, but not how long it took. Record its start and
-  duration, so a cloud phase splits into CPU, each request's measured latency, and the rest.
-- [ ] **Stacked bars of where time goes:** a lab view and page with phase and sub-phase (locate,
+- [x] **Where time goes, measured** (done 2026-10-26). Each phase splits its
+  thread's time by kind of work (`Spans`), as wall and CPU time, each exclusive of the others:
+  `io` (every call into the store), `encode` (Parquet encoding), `decode` (Parquet decoding in
+  scans, deletes applied), `footer` (RMoW's footers), `deletes` (delete files written and loaded).
+  A read pool's tasks are counted the same way, apart. In the request log, each request has its
+  start, wall time and CPU. The lab's `phase_breakdown` view turns a phase into components that add
+  up to its wall time: each kind's CPU, other CPU, the store client's CPU, waiting on the store,
+  and other waiting.
+  - Writes into an output stream count as encoding: Thrift writes a footer in many small writes,
+    which would cost 2 µs each to time. The PUT is the stream's close.
+  - The store client's own threads (Azure's event loop) are in `process_cpu_ns`, not `io`.
+- [ ] **Stacked bars of where time goes:** a lab page with phase and sub-phase (locate,
   merge-read, write, delete-write; each read) split into CPU and waiting, with process CPU shown
-  beside, for the five arms.
+  beside, for the five arms. The view is done (`phase_breakdown`); the page is not.
   - On the Azurite twin, process CPU exceeds thread CPU by 89–112 ms a phase: garbage
     collection, the JIT and the SDK's I/O threads. So "waiting" includes off-thread work.
   - Build it on the twins now, so the cloud results drop in.

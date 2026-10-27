@@ -94,6 +94,9 @@ the build the cloud run uses, so its requests and bytes are what the cloud run m
   - medians and lognormal sigmas per operation and size, as `store_profiles` holds them;
   - what the fork's conditions cost: `append_sao` against `append`, `create_sao` against `put`;
   - a GET's extra latency per appended part, from the 1-, 10-, 100- and 1000-part objects.
+- **Where the time went.** `phase_breakdown` splits each phase into encoding, decoding,
+  footers, deletes, other CPU, the store client's CPU, waiting on the store, and other waiting.
+  It needs the VM's two clocks to agree: its manifest's `host.thread_cpu_per_wall` should be 1.
 - **The model.** Replay the calibration run with the measured profile, and compare each one-thread
   phase's simulated latency with its measured wall time (`wall_ns`).
 

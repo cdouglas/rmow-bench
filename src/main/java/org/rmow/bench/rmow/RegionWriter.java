@@ -12,6 +12,7 @@ import org.apache.iceberg.data.parquet.GenericParquetWriter;
 import org.apache.iceberg.io.FileAppender;
 import org.apache.iceberg.parquet.Parquet;
 import org.apache.parquet.format.FileMetaData;
+import org.rmow.bench.io.Spans;
 
 /**
  * Writes one region: a single row group (with its page indexes and bloom filters) encoded by the
@@ -45,8 +46,17 @@ public final class RegionWriter {
     return schema;
   }
 
-  /** Encodes {@code rows} as a region to be written at {@code base} of {@code location}. */
+  /**
+   * Encodes {@code rows} as a region to be written at {@code base} of {@code location}: an {@link
+   * Spans.Kind#ENCODE} span, with the region's footer decoded in a footer span.
+   */
   public Region write(String location, long base, Iterable<Record> rows) throws IOException {
+    try (Spans.Span s = Spans.open(Spans.Kind.ENCODE)) {
+      return encode(location, base, rows);
+    }
+  }
+
+  private Region encode(String location, long base, Iterable<Record> rows) throws IOException {
     OffsetOutputFile out = new OffsetOutputFile(location, base);
     FileAppender<Record> appender =
         Parquet.write(out)
