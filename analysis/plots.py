@@ -40,6 +40,7 @@ ARMS = {  # arm -> (family, marker, label)
     "tailcow-b": ("cow", "s", "TailCoW-B"),
     "tailcow-c": ("cow", "^", "TailCoW-C"),
     "rmor-c": ("rmor", "^", "RMoR-C"),
+    "rmor-c-footer": ("rmor", "s", "RMoR-C footer"),
     "rmow-a": ("rmow", "o", "RMoW-A"),
     "rmow-b": ("rmow", "s", "RMoW-B"),
     "rmow-c": ("rmow", "^", "RMoW-C"),
@@ -47,7 +48,7 @@ ARMS = {  # arm -> (family, marker, label)
     "rmow-b-split": ("rmowsplit", "s", "RMoW-B-split"),
     "rmow-c-split": ("rmowsplit", "^", "RMoW-C-split"),
 }
-HEADLINE = ["mor-v3", "tailcow-c", "rmor-c", "rmow-b", "rmow-c", "rmow-b-split", "rmow-c-split"]
+HEADLINE = ["mor-v3", "tailcow-c", "rmor-c", "rmor-c-footer", "rmow-b", "rmow-c", "rmow-b-split", "rmow-c-split"]
 INK, INK2, MUTED = "#0b0b0b", "#52514e", "#898781"
 SURFACE, GRID, AXIS = "#fcfcfb", "#e1e0d9", "#c3c2b7"
 

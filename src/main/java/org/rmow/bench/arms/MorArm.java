@@ -21,10 +21,13 @@ import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.InclusiveMetricsEvaluator;
 import org.apache.iceberg.io.DeleteWriteResult;
+import org.apache.iceberg.io.IOUtil;
 import org.apache.iceberg.io.InputFile;
+import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.iceberg.types.Conversions;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.ContentFileUtil;
+import org.rmow.bench.io.MemFileIO;
 import org.rmow.bench.oracle.TableHash;
 import org.rmow.bench.workload.OpLog;
 import org.rmow.bench.workload.Rows;
@@ -200,6 +203,11 @@ public abstract class MorArm implements Arm {
     removedRows.set(k, removedRows.get(k) + 1);
   }
 
+  /** Notes that data file {@code k}'s current version holds no deleted or moved row. */
+  protected void clearRemoved(int k) {
+    removedRows.set(k, 0);
+  }
+
   @Override
   public void apply(OpLog.Batch b) throws IOException {
     footers.begin();
@@ -266,8 +274,26 @@ public abstract class MorArm implements Arm {
       records.add(Rows.record(r[0], ctx.log().ts(r[0]), (int) r[1]));
       ids.add(r[0]);
     }
-    DataFile df = DataFileWriter.write(ctx.io(), location, records, ctx.layout().writerProperties());
+    DataFile df;
+    if (appendable()) {
+      // encoded in memory, then created as an object the store can extend: one PUT, or on ADLS
+      // an Append Blob created atomically
+      MemFileIO mem = new MemFileIO();
+      df = DataFileWriter.write(mem, location, records, ctx.layout().writerProperties());
+      byte[] bytes = new byte[(int) df.fileSizeInBytes()];
+      try (SeekableInputStream in = mem.newInputFile(location, bytes.length).newStream()) {
+        IOUtil.readFully(in, bytes, 0, bytes.length);
+      }
+      ctx.io().create(location, bytes);
+    } else {
+      df = DataFileWriter.write(ctx.io(), location, records, ctx.layout().writerProperties());
+    }
     return addFile(df, seq, ids);
+  }
+
+  /** Whether the arm's data files must be objects the store can append to. */
+  protected boolean appendable() {
+    return false;
   }
 
   /** Adds {@code df}, which holds the rows {@code ids} in this order, as a live data file. */
@@ -521,6 +547,11 @@ public abstract class MorArm implements Arm {
   /** The live bytes of one delete file (a DV counts its blob, not its whole Puffin file). */
   protected abstract long liveBytes(DeleteFile d);
 
+  /** The bytes data file {@code k}'s current version references: all of it, unless appended to. */
+  protected long liveDataBytes(int k) {
+    return files.get(k).fileSizeInBytes();
+  }
+
   @Override
   public ArmStats stats() {
     long dataBytes = 0;
@@ -530,7 +561,7 @@ public abstract class MorArm implements Arm {
       DataFile df = files.get(k);
       dataBytes += df.fileSizeInBytes();
       if (live.get(k)) {
-        liveDataBytes += df.fileSizeInBytes();
+        liveDataBytes += liveDataBytes(k);
         rowGroups += df.splitOffsets() == null ? 1 : df.splitOffsets().size();
       }
     }

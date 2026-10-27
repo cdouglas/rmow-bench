@@ -1,6 +1,7 @@
 package org.rmow.bench.bench;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -150,6 +151,57 @@ class RmorTest {
     }
     assertThat(read[1]).as("batches' reads, skipping").isLessThan(read[0]);
     assertThat(written[1]).as("batches' writes").isEqualTo(written[0]);
+  }
+
+  /**
+   * RMoR-C with footers: RMoR-C's rewrites at θ = 0, each old row group hidden by a footer
+   * appended to its file instead of a DV. The batches write the same data files, append footers
+   * where RMoR-C writes DV files, and leave no reader a dead row group to fetch or skip.
+   */
+  @Test
+  void footersHideTheOldRowGroups(@TempDir Path dir) throws IOException {
+    BenchConfig cfg = config(0);
+    cfg.layout.compactEvery = 0; // compaction triggers on DVs' delete ratios, which differ
+    cfg.arms = List.of("rmor-c", "rmor-c-footer");
+    cfg.reads.readers =
+        List.of(
+            BenchConfig.ReaderSpec.cached(),
+            BenchConfig.ReaderSpec.skipping(),
+            BenchConfig.ReaderSpec.stock());
+    List<JsonNode> steps = run(cfg, dir);
+    Map<String, JsonNode> dv = of(steps, "rmor-c");
+    Map<String, JsonNode> footer = of(steps, "rmor-c-footer");
+    for (String k : dv.keySet()) {
+      if (k.endsWith(" write ")) {
+        for (String f : List.of("puts", "bytes_written")) {
+          assertThat(footer.get(k).get(f).asLong()).as(k + " " + f)
+              .isEqualTo(dv.get(k).get(f).asLong());
+        }
+      }
+    }
+    assertThat(sum(steps, "rmor-c", "delete-write", null, "puts")).as("DV files").isPositive();
+    assertThat(sum(steps, "rmor-c-footer", "delete-write", null, "puts")).as("DV files").isZero();
+    assertThat(sum(steps, "rmor-c-footer", "delete-write", null, "appends"))
+        .as("footers appended")
+        .isPositive();
+    for (String phase : List.of("read_full", "read_recent", "read_old")) {
+      assertThat(sum(steps, "rmor-c-footer", phase, "cached-skip", "bytes_read"))
+          .as(phase + ": nothing to skip")
+          .isEqualTo(sum(steps, "rmor-c-footer", phase, "cached", "bytes_read"));
+    }
+    assertThat(sum(steps, "rmor-c-footer", "read_full", "stock", "gets"))
+        .as("stock reads fetch no dead row group")
+        .isLessThan(sum(steps, "rmor-c", "read_full", "stock", "gets"));
+  }
+
+  /** A row group's removal moves its file's later rows up, so a DV would go stale: θ must be 0. */
+  @Test
+  void footersNeedEveryChangedRegionRewritten(@TempDir Path dir) {
+    BenchConfig cfg = config(0.5);
+    cfg.arms = List.of("rmor-c-footer");
+    assertThatThrownBy(() -> new Runner(cfg, dir, "t").run())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("rmorRewriteShare 0");
   }
 
   /** Between 0 and 1, a batch rewrites only the regions it changes enough of. */

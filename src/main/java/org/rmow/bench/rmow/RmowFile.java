@@ -335,22 +335,28 @@ public final class RmowFile implements LogicalFile {
   @Override
   public DataFile dataFile() {
     if (dataFile == null) {
-      try {
-        ParquetMetadata md = new ParquetMetadataConverter().fromParquetMetadata(footer);
-        dataFile =
-            DataFiles.builder(PartitionSpec.unpartitioned())
-                .withPath(location)
-                .withFormat(FileFormat.PARQUET)
-                .withFileSizeInBytes(length)
-                .withMetrics(
-                    ParquetUtil.footerMetrics(md, Stream.empty(), MetricsConfig.getDefault()))
-                .withSplitOffsets(ParquetUtil.getSplitOffsets(md))
-                .build();
-      } catch (IOException e) {
-        throw new UncheckedIOException(e);
-      }
+      dataFile = describe(location, length, footer);
     }
     return dataFile;
+  }
+
+  /**
+   * A version of an object described as an Iceberg data file: its length, and the column metrics
+   * and split offsets Iceberg derives from its footer, as a manifest entry for it would hold.
+   */
+  public static DataFile describe(String location, long length, FileMetaData footer) {
+    try {
+      ParquetMetadata md = new ParquetMetadataConverter().fromParquetMetadata(footer);
+      return DataFiles.builder(PartitionSpec.unpartitioned())
+          .withPath(location)
+          .withFormat(FileFormat.PARQUET)
+          .withFileSizeInBytes(length)
+          .withMetrics(ParquetUtil.footerMetrics(md, Stream.empty(), MetricsConfig.getDefault()))
+          .withSplitOffsets(ParquetUtil.getSplitOffsets(md))
+          .build();
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    }
   }
 
   @Override

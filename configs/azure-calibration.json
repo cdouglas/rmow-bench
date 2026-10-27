@@ -31,8 +31,8 @@
     "mor-v3",
     "tailcow-c",
     "rmor-c",
-    "rmow-c",
-    "rmow-c-split"
+    "rmor-c-footer",
+    "rmow-c"
   ],
   "reads": {
     "every": 5,

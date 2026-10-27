@@ -3,18 +3,24 @@ package org.rmow.bench.arms;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.BitSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.TreeSet;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.data.Record;
 import org.apache.iceberg.io.InputFile;
+import org.apache.parquet.format.FileMetaData;
+import org.apache.parquet.format.RowGroup;
 import org.rmow.bench.io.MemFileIO;
+import org.rmow.bench.rmow.FooterCodec;
+import org.rmow.bench.rmow.RmowFile;
 import org.rmow.bench.workload.OpLog;
 import org.rmow.bench.workload.Rows;
 
@@ -45,6 +51,15 @@ import org.rmow.bench.workload.Rows;
  * arm is TailCoW-C, request for request. To plan, the writer reads the footer of each sealed file
  * of several row groups it changes, once per batch; a file of at most 1 MiB, which every open
  * fetches whole, is fetched whole for it once, and its row groups read from what was fetched.
+ *
+ * <p>With {@code elide} it is RMoR-C with footers ({@code rmor-c-footer}): a rewritten row group's
+ * old copy is hidden by a new footer appended to its file, listing the file's other row groups,
+ * instead of a DV. Only that differs from RMoR-C; against RMoW-C, only where the rewritten region
+ * goes (the batch's new data file, not its own object). Every data file is created as an object
+ * the store can extend, and each append makes a new version of the file, with its length, split
+ * offsets and metrics, as RMoW's do. Rows after an elided row group move up in their file, so a DV
+ * on its other rows would go stale; θ must be 0, which rewrites every region a batch changes and
+ * so leaves no DV.
  */
 public final class TailCowArm extends MorArm {
 
@@ -58,6 +73,11 @@ public final class TailCowArm extends MorArm {
 
   private final TailPolicy policy;
   private final double rewriteShare; // above 1: regions are never rewritten (TailCoW)
+  private final boolean elide; // hide a rewritten row group with a new footer, not a DV
+  // with elide: each data file's ids by position, and the last footer appended to it, serialized
+  private final Map<Integer, long[]> idsOf = new HashMap<>();
+  private final Map<Integer, FileMetaData> appended = new HashMap<>();
+  private final Map<Integer, Integer> appendedBytes = new HashMap<>();
   // under RMoR, each data file's positions its DVs cover
   private final Map<Integer, BitSet> dead = new HashMap<>();
   // the files of at most 1 MiB fetched whole to plan this batch, by file
@@ -70,9 +90,49 @@ public final class TailCowArm extends MorArm {
 
   /** @param rewriteShare θ: at most 1 for RMoR, above 1 for TailCoW */
   public TailCowArm(ArmContext ctx, TailPolicy.Kind kind, double rewriteShare) {
+    this(ctx, kind, rewriteShare, false);
+  }
+
+  /** @param elide hide a rewritten row group with a footer appended to its file (θ must be 0) */
+  public TailCowArm(ArmContext ctx, TailPolicy.Kind kind, double rewriteShare, boolean elide) {
     super(ctx);
+    if (elide && rewriteShare != 0) {
+      throw new IllegalArgumentException(
+          "RMoR-C with footers rewrites every region it changes (rmorRewriteShare 0), not "
+              + rewriteShare);
+    }
     this.policy = new TailPolicy(kind, ctx.layout().tailSealBytes, ctx.layout().tierFanout);
     this.rewriteShare = rewriteShare;
+    this.elide = elide;
+  }
+
+  @Override
+  protected boolean appendable() {
+    return elide;
+  }
+
+  @Override
+  public void load(List<InitialLoad.InitialFile> initial) {
+    super.load(initial);
+    if (elide) {
+      for (int k = 0; k < initial.size(); k++) {
+        InitialLoad.InitialFile f = initial.get(k);
+        long[] ids = new long[(int) f.rows()];
+        for (int i = 0; i < ids.length; i++) {
+          ids[i] = f.firstId() + i;
+        }
+        idsOf.put(k, ids);
+      }
+    }
+  }
+
+  @Override
+  protected int addFile(DataFile df, long seq, List<Long> ids) {
+    int k = super.addFile(df, seq, ids);
+    if (elide) {
+      idsOf.put(k, ids.stream().mapToLong(Long::longValue).toArray());
+    }
+    return k;
   }
 
   private boolean regional() {
@@ -166,6 +226,14 @@ public final class TailCowArm extends MorArm {
               }
               rewriteOpen(b, rewrites, versions, seq);
             });
+    if (elide) {
+      Map<Integer, List<Rewrite>> sealed = sealedRewrites(rewrites, dvPositions);
+      if (!sealed.isEmpty()) {
+        ctx.phases().run("delete-write", () -> elide(sealed));
+      }
+      endBatch();
+      return;
+    }
     if (regional()) {
       deadAfter(rewrites, dvPositions);
     }
@@ -173,6 +241,113 @@ public final class TailCowArm extends MorArm {
       ctx.phases().run("delete-write", () -> writeDVs(b.index(), seq, dvPositions));
     }
     endBatch();
+  }
+
+  /**
+   * With footers: the batch's rewritten row groups of sealed files, by file. At θ = 0 they are
+   * every changed row's old place, so no row is left for a DV.
+   */
+  private static Map<Integer, List<Rewrite>> sealedRewrites(
+      List<Rewrite> rewrites, Map<Integer, List<Integer>> dvPositions) {
+    Map<Integer, List<Rewrite>> sealed = new TreeMap<>();
+    Set<Integer> whole = new HashSet<>();
+    for (Rewrite r : rewrites) {
+      if (r.whole()) {
+        whole.add(r.k());
+      } else {
+        sealed.computeIfAbsent(r.k(), x -> new ArrayList<>()).add(r);
+      }
+    }
+    Set<Integer> covered = new HashSet<>(sealed.keySet());
+    covered.addAll(whole);
+    if (!covered.equals(dvPositions.keySet())) {
+      throw new IllegalStateException("A changed row's region was not rewritten");
+    }
+    return sealed;
+  }
+
+  /**
+   * Hides the rewritten row groups of each sealed file with a footer appended to it that lists its
+   * other row groups; a file left with none leaves the table.
+   */
+  private void elide(Map<Integer, List<Rewrite>> sealed) throws IOException {
+    for (Map.Entry<Integer, List<Rewrite>> e : sealed.entrySet()) {
+      int k = e.getKey();
+      Set<Long> firsts = new HashSet<>();
+      long rows = 0;
+      for (Rewrite r : e.getValue()) {
+        firsts.add(r.first());
+        rows += r.rows();
+      }
+      clearRemoved(k); // what the batch moved or deleted leaves the file's footer
+      if (rows == files.get(k).recordCount()) {
+        retire(k);
+      } else {
+        appendFooter(k, firsts);
+      }
+    }
+  }
+
+  /**
+   * Appends a footer to data file {@code k} without the row groups that start at the rows {@code
+   * firsts}, in one append at its length, and moves its later rows up.
+   */
+  private void appendFooter(int k, Set<Long> firsts) throws IOException {
+    DataFile df = files.get(k);
+    byte[] tail = tailOf(k);
+    FooterCodec.Tail t = FooterCodec.locate(tail, tail.length);
+    FileMetaData footer = FooterCodec.read(tail, t.footerStart(), t.footerLength());
+    List<RowGroup> groups = footer.getRow_groups();
+    Set<Integer> drop = new HashSet<>();
+    long[] ids = idsOf.get(k);
+    long[] kept = new long[ids.length];
+    int n = 0;
+    long first = 0;
+    for (int i = 0; i < groups.size(); i++) {
+      long rows = groups.get(i).getNum_rows();
+      if (firsts.contains(first)) {
+        drop.add(i);
+      } else {
+        System.arraycopy(ids, (int) first, kept, n, (int) rows);
+        n += (int) rows;
+      }
+      first += rows;
+    }
+    if (drop.size() != firsts.size() || first != ids.length) {
+      throw new IllegalStateException("Rewritten row groups out of step with " + df.location());
+    }
+    long version = appended.containsKey(k) ? versionOf(appended.get(k)) + 1 : 1;
+    FileMetaData next = FooterCodec.merge(footer, drop, List.of(), df.fileSizeInBytes(), version);
+    byte[] newTail = FooterCodec.serialize(next);
+    long length = ctx.io().append(df.location(), df.fileSizeInBytes(), newTail);
+    files.set(k, RmowFile.describe(df.location(), length, next));
+    appended.put(k, next);
+    appendedBytes.put(k, newTail.length);
+    kept = Arrays.copyOf(kept, n);
+    idsOf.put(k, kept);
+    for (int pos = 0; pos < kept.length; pos++) {
+      if (fileOfId[(int) kept[pos]] == k) {
+        posOfId[(int) kept[pos]] = pos;
+      }
+    }
+  }
+
+  private static long versionOf(FileMetaData footer) {
+    return Long.parseLong(FooterCodec.keyValues(footer).get(FooterCodec.VERSION));
+  }
+
+  /** A file a footer was appended to references its live row groups and that footer only. */
+  @Override
+  protected long liveDataBytes(int k) {
+    FileMetaData footer = appended.get(k);
+    if (footer == null) {
+      return super.liveDataBytes(k);
+    }
+    long live = FooterCodec.MAGIC.length + appendedBytes.get(k);
+    for (RowGroup rg : footer.getRow_groups()) {
+      live += FooterCodec.liveBytes(rg);
+    }
+    return live;
   }
 
   /**

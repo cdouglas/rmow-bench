@@ -136,9 +136,9 @@ public final class Runner {
     }
   }
 
-  /** Whether an arm appends to its files: the appendable RMoW arms. */
+  /** Whether an arm appends to its files: the appendable RMoW arms, and RMoR-C with footers. */
   private static boolean appends(String arm) {
-    return arm.startsWith("rmow-") && !arm.endsWith("-split");
+    return arm.startsWith("rmow-") && !arm.endsWith("-split") || arm.equals("rmor-c-footer");
   }
 
   private String run(Store store) throws IOException {
@@ -267,6 +267,8 @@ public final class Runner {
       case "tailcow-b" -> new TailCowArm(ctx, TailPolicy.Kind.B);
       case "tailcow-c" -> new TailCowArm(ctx, TailPolicy.Kind.C);
       case "rmor-c" -> new TailCowArm(ctx, TailPolicy.Kind.C, ctx.layout().rmorRewriteShare);
+      case "rmor-c-footer" ->
+          new TailCowArm(ctx, TailPolicy.Kind.C, ctx.layout().rmorRewriteShare, true);
       case "cow" -> new CowArm(ctx);
       default -> throw new IllegalArgumentException("Unknown arm: " + name);
     };
