@@ -21,26 +21,13 @@ public final class BenchConfig {
     /** For {@code local}: fsync each written object and append. */
     public boolean fsync = false;
     /**
-     * How RMoW appends. For {@code s3}: {@code express}, S3 Express One Zone, a PutObject at the
-     * object's length; {@code emulated}, read the object and write it back longer, for emulators
-     * only (unmeasured); {@code none}, standard S3, where RMoW arms cannot run. For {@code azure}:
-     * {@code none}, the store's own, Append Blobs. For either: {@code fork}, the atomicio fork's
-     * {@code SupportsAtomicOperations} (a {@code -Pfork} build; {@code org.rmow.bench.fork}).
-     */
-    public String append = "none";
-    /**
-     * For {@code s3} and {@code azure}: an endpoint to use instead of the cloud's (an emulator's).
-     * For Azurite, {@code http://127.0.0.1:10000/devstoreaccount1}, with the account's key in
-     * {@code AZURE_STORAGE_KEY}; against Azure, the default credential chain applies.
+     * For {@code s3} and {@code azure}: an emulator's endpoint, to use instead of the cloud's. An
+     * emulator lacks part of the fork's atomic operations, so RMoW's appendable arms run there on
+     * stand-ins ({@link org.rmow.bench.append.EmulatorAppenders}). For Azurite, {@code
+     * http://127.0.0.1:10000/devstoreaccount1}, with the account's key in {@code
+     * AZURE_STORAGE_KEY}; against Azure, the default credential chain applies.
      */
     public String endpoint = "";
-    /**
-     * For {@code azure}: how reads reach the store; writes are Iceberg's ADLSFileIO either way.
-     * {@code iceberg}: ADLSFileIO's streams as Iceberg 1.12 ships them, which open with a GET of up
-     * to 4 MiB and fetch up to 4 MiB for a ranged read at an offset. {@code exact}: reads that send
-     * what the request model assumes ({@link org.rmow.bench.io.ExactAdlsFileIO}).
-     */
-    public String adlsReads = "iceberg";
     /** For {@code s3}: the region; empty means {@code AWS_REGION}, or else us-east-1. */
     public String region = "";
     /** For {@code s3}: path-style requests, as emulators need. */

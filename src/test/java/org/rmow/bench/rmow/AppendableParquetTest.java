@@ -29,6 +29,8 @@ import org.apache.parquet.io.RecordReader;
 import org.apache.parquet.schema.MessageType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.rmow.bench.append.RegionAppender;
+import org.rmow.bench.append.AtomicAppender;
 import org.rmow.bench.io.IoTrace;
 import org.rmow.bench.io.MemFileIO;
 import org.rmow.bench.io.TracingFileIO;
@@ -53,11 +55,13 @@ class AppendableParquetTest {
   private static final String LOC = "mem://t/f.parquet";
 
   private MemFileIO io;
+  private RegionAppender appender;
   private RegionWriter writer;
 
   @BeforeEach
   void setUp() {
     io = new MemFileIO();
+    appender = new AtomicAppender(io);
     writer = new RegionWriter(Rows.SCHEMA, Map.of("write.parquet.compression-codec", "zstd"));
   }
 
@@ -83,11 +87,11 @@ class AppendableParquetTest {
 
   private Versions build(String loc, int n0, int n1, boolean inPlace) throws IOException {
     Region r0 = writer.write(loc, 0, rows(0, n0, 0));
-    RmowFile f = RmowFile.create(io, io, loc, List.of(r0), List.of(0L));
+    RmowFile f = RmowFile.create(appender, loc, List.of(r0), List.of(0L));
     long len0 = f.length();
 
     Region r1 = writer.write(loc, f.length(), rows(n0, n0 + n1, 0));
-    f.append(io, List.of(r1), List.of(), List.of(1L));
+    f.append(appender, List.of(r1), List.of(), List.of(1L));
     long len1 = f.length();
 
     List<Record> rows2 = new ArrayList<>(rows(0, 50, 1));
@@ -95,7 +99,7 @@ class AppendableParquetTest {
     Region r2 = writer.write(loc, f.length(), rows2);
     List<Long> inPlaceOf = new ArrayList<>();
     inPlaceOf.add(inPlace ? 0L : null);
-    f.append(io, List.of(r2), List.of(0L), List.of(2L), inPlaceOf);
+    f.append(appender, List.of(r2), List.of(0L), List.of(2L), inPlaceOf);
     return new Versions(f, len0, len1, f.length(), rows2);
   }
 
@@ -265,7 +269,7 @@ class AppendableParquetTest {
     assertThat(v.len0()).isGreaterThan(1 << 20);
     IoTrace trace = new IoTrace();
     trace.logEvents(true);
-    TracingFileIO traced = new TracingFileIO(io, io, trace);
+    TracingFileIO traced = new TracingFileIO(io, appender, trace);
     InputFile in = new VersionedInputFile(traced.newInputFile(LOC, v.len0()), v.len0());
     assertThat(readIceberg(in)).isEqualTo(hash(rows(0, 60_000, 0)));
 
@@ -291,8 +295,8 @@ class AppendableParquetTest {
     Versions v = build(60_000, 20_000);
     IoTrace stock = new IoTrace();
     IoTrace prefetch = new IoTrace();
-    TracingFileIO a = new TracingFileIO(io, io, stock);
-    TracingFileIO b = new TracingFileIO(io, io, prefetch);
+    TracingFileIO a = new TracingFileIO(io, appender, stock);
+    TracingFileIO b = new TracingFileIO(io, appender, prefetch);
     TableHash want = hash(rows(0, 60_000, 0));
     assertThat(readIceberg(new VersionedInputFile(a.newInputFile(LOC, v.len0()), v.len0())))
         .isEqualTo(want);

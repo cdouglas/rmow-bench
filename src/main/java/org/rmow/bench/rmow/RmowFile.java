@@ -57,7 +57,6 @@ public final class RmowFile implements LogicalFile {
    * request, as the store's appender creates objects it can extend ({@link RegionAppender#create}).
    */
   public static RmowFile create(
-      FileIO io,
       RegionAppender appender,
       String location,
       List<Region> regions,
@@ -73,7 +72,7 @@ public final class RmowFile implements LogicalFile {
       out.write(r.bytes());
     }
     out.write(tail);
-    appender.create(io, location, out.toByteArray());
+    appender.create(location, out.toByteArray());
     f.commit(regions.get(regions.size() - 1).end() + tail.length, merged, tail, newRgIds);
     return f;
   }

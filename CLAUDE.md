@@ -26,8 +26,9 @@ records requests, bytes and CPU per arm, step and phase.
 
 ## Build, test, run
 
-Java 17 and Maven. Iceberg 1.12.0 and parquet-java 1.17.1 come from Maven Central. The
-`-Pfork` profile, built on the atomicio fork, is optional.
+Java 17 and Maven, and the atomicio fork's Iceberg 1.12.0 (`1.12.0-atomicio-SNAPSHOT`) in the
+local Maven repository: every store appends through its `SupportsAtomicOperations` (README,
+Appends). parquet-java 1.17.1 comes from Maven Central.
 
 ```bash
 mvn -q package -DskipTests                     # target/rmow-bench-*.jar + target/lib

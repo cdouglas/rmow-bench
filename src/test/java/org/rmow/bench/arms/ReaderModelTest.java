@@ -10,6 +10,8 @@ import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.data.Record;
 import org.apache.iceberg.expressions.Expressions;
 import org.junit.jupiter.api.Test;
+import org.rmow.bench.append.RegionAppender;
+import org.rmow.bench.append.AtomicAppender;
 import org.rmow.bench.bench.Phases;
 import org.rmow.bench.io.IoTrace;
 import org.rmow.bench.io.MemFileIO;
@@ -32,6 +34,7 @@ class ReaderModelTest {
   @Test
   void oneFooterPerVersion() throws IOException {
     MemFileIO mem = new MemFileIO();
+    RegionAppender appender = new AtomicAppender(mem);
     RegionWriter writer =
         new RegionWriter(Rows.SCHEMA, Map.of("write.parquet.compression-codec", "zstd"));
     TableHash want = new TableHash();
@@ -45,9 +48,9 @@ class ReaderModelTest {
       }
       Region r = writer.write(LOC, f == null ? 0 : f.length(), rows);
       if (f == null) {
-        f = RmowFile.create(mem, mem, LOC, List.of(r), List.of(0L));
+        f = RmowFile.create(appender, LOC, List.of(r), List.of(0L));
       } else {
-        f.append(mem, List.of(r), List.of(), List.of((long) region));
+        f.append(appender, List.of(r), List.of(), List.of((long) region));
       }
     }
     assertThat(f.length()).isGreaterThan(1 << 20);
@@ -71,7 +74,7 @@ class ReaderModelTest {
         new ArmContext(
             "t",
             "mem://t",
-            new TracingFileIO(mem, mem, trace),
+            new TracingFileIO(mem, null, trace),
             mem,
             new Phases(trace),
             new LayoutSpec(),

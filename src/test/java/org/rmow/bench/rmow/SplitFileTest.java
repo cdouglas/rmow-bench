@@ -13,6 +13,8 @@ import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.parquet.format.RowGroup;
 import org.junit.jupiter.api.Test;
+import org.rmow.bench.append.RegionAppender;
+import org.rmow.bench.append.AtomicAppender;
 import org.rmow.bench.io.MemFileIO;
 import org.rmow.bench.oracle.TableHash;
 import org.rmow.bench.rmow.RegionWriter.Region;
@@ -30,6 +32,7 @@ class SplitFileTest {
   private static final String LOC = "mem://t/f.parquet";
 
   private final MemFileIO io = new MemFileIO();
+  private final RegionAppender appender = new AtomicAppender(io);
   private final RegionWriter writer =
       new RegionWriter(Rows.SCHEMA, Map.of("write.parquet.compression-codec", "zstd"));
 
@@ -62,7 +65,7 @@ class SplitFileTest {
   @Test
   void versionsReadBackAndWholeObjectsBecomeReclaimable() throws IOException {
     List<List<Record>> initial = List.of(rows(0, 100, 0), rows(100, 200, 0), rows(200, 300, 0));
-    RmowFile plain = RmowFile.create(io, io, LOC, regions(LOC, initial), List.of(0L, 1L, 2L));
+    RmowFile plain = RmowFile.create(appender, LOC, regions(LOC, initial), List.of(0L, 1L, 2L));
     long id = 10;
     long[] next = {0};
     SplitFile f = SplitFile.adopt(io, LOC, plain.length(), () -> next[0]++);
@@ -132,7 +135,7 @@ class SplitFileTest {
   @Test
   void stockReadersRefuseFooterOnlyVersions() throws IOException {
     RmowFile plain =
-        RmowFile.create(io, io, LOC, regions(LOC, List.of(rows(0, 100, 0), rows(100, 200, 0))),
+        RmowFile.create(appender, LOC, regions(LOC, List.of(rows(0, 100, 0), rows(100, 200, 0))),
             Arrays.asList(0L, 1L));
     long[] next = {0};
     SplitFile f = SplitFile.adopt(io, LOC, plain.length(), () -> next[0]++);

@@ -1,10 +1,9 @@
 {
-  "label": "azure-calibration-iceberg-azurite",
+  "label": "azure-calibration-azurite",
   "store": {
     "type": "azure",
     "root": "abfss://bench@devstoreaccount1.dfs.core.windows.net/rmow-bench",
-    "endpoint": "http://127.0.0.1:10000/devstoreaccount1",
-    "adlsReads": "iceberg"
+    "endpoint": "http://127.0.0.1:10000/devstoreaccount1"
   },
   "warmup": {
     "batches": 5,

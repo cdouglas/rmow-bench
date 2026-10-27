@@ -1,9 +1,8 @@
 {
-  "label": "azure-calibration-iceberg",
+  "label": "azure-calibration",
   "store": {
     "type": "azure",
-    "root": "abfss://REPLACE-container@REPLACE-account.dfs.core.windows.net/rmow-bench",
-    "adlsReads": "iceberg"
+    "root": "abfss://REPLACE-container@REPLACE-account.dfs.core.windows.net/rmow-bench"
   },
   "warmup": {
     "batches": 5,

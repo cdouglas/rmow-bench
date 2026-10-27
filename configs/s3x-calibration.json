@@ -3,7 +3,6 @@
   "store": {
     "type": "s3",
     "root": "s3://REPLACE-bucket--use1-az4--x-s3/rmow-bench",
-    "append": "express",
     "region": "us-east-1"
   },
   "warmup": {

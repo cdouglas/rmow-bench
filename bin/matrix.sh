@@ -15,11 +15,11 @@
 #
 # The snapshot, results/builds/<UTC>-<git sha>[-dirty]/, holds a copy of the project jar, hard
 # links to its released dependencies (a released jar's name changes with its version, so a link
-# keeps the bytes the run loaded) and copies of SNAPSHOT ones (-Pfork), the configurations as
-# they were at the start, and, for a dirty tree, the uncommitted diff and untracked files. Each
-# run's manifest names the snapshot and its git state, and its console output goes to the
-# snapshot's logs/. One failed configuration does not stop the others; the exit status says
-# whether any failed.
+# keeps the bytes the run loaded) and copies of SNAPSHOT ones (the atomicio fork's), the
+# configurations as they were at the start, and, for a dirty tree, the uncommitted diff and
+# untracked files. Each run's manifest names the snapshot and its git state, and its console
+# output goes to the snapshot's logs/. One failed configuration does not stop the others; the exit
+# status says whether any failed.
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 out="$here/results"

@@ -84,6 +84,14 @@ The [plan's default matrix](PLAN.md#default-experiment-matrix) was larger than w
 for 5M rows, 200 batches, 16 MiB row groups, and three repetitions plus two more seeds. None of
 the local experiments repeats a run, so the Repetitions page has nothing to compare yet.
 
+**Builds.** Runs before 2026-10-26 ran on Iceberg 1.12.0 as released. From 2026-10-26 the atomicio
+fork's build is the only one, and every store appends through its `SupportsAtomicOperations`
+(README, Appends). On a 7-arm local configuration the two builds sent the same requests and bytes,
+except one thing: MoR-v3's and TailCoW-C's DV files are 18 bytes larger, since Puffin's
+`created-by` names the build (`1.12.0-atomicio-SNAPSHOT`). The config hash changed too. The
+configuration lost `store.append` and `store.adlsReads`, so a configuration rerun on the fork has
+a new hash under the same label.
+
 ## The experiments
 
 | Experiment | Question | Varies | Arms | Runs | Write-up |

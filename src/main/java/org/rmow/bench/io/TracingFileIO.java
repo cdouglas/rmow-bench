@@ -108,11 +108,11 @@ public final class TracingFileIO implements FileIO, RegionAppender {
 
   /** A new appendable object: one PUT, as the output stream it replaces would be. */
   @Override
-  public void create(FileIO io, String location, byte[] bytes) throws IOException {
+  public void create(String location, byte[] bytes) throws IOException {
     if (appender == null) {
       throw new UnsupportedOperationException("This store has no append: " + location);
     }
-    appender.create(delegate, location, bytes);
+    appender.create(location, bytes);
     trace.record(IoTrace.Kind.PUT, location, 0, bytes.length);
     if (latency != null) {
       latency.put(location, bytes.length);

@@ -26,17 +26,17 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.io.TempDir;
-import org.rmow.bench.append.AzureAppenders;
+import org.rmow.bench.append.AtomicAppender;
+import org.rmow.bench.append.EmulatorAppenders;
 import org.rmow.bench.append.RegionAppender;
 import org.rmow.bench.io.AdlsClients;
 import org.rmow.bench.io.AzureRecorder;
 import org.rmow.bench.io.AzureRecorder.Kind;
-import org.rmow.bench.io.ExactAdlsFileIO;
 
 /**
  * What the Azure store relies on, against Azurite ({@link AzureStoreTest}) and Azure itself
- * ({@link AzureTest}): Iceberg's ADLSFileIO writes and reads, its reads as shipped and exact,
- * RMoW's Append Blobs, and what the recorder counts, under every arm family.
+ * ({@link AzureTest}): the atomicio fork's ADLSFileIO writes and reads, RMoW's Append Blobs through
+ * its atomic operations, and what the recorder counts, under every arm family.
  */
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
 abstract class AzureStoreContract {
@@ -44,23 +44,16 @@ abstract class AzureStoreContract {
   static final int MIB = 1 << 20;
 
   /**
-   * Whether this build is on the atomicio fork ({@code -Pfork}), whose ADLS reads are fixed (lazy
-   * opens, exact ranges) and which has the fork appender.
+   * Whether the store renames, as the fork's atomic create on ADLS does. Azurite does not, so
+   * there RMoW creates its files through a stand-in ({@link EmulatorAppenders#appendBlobs}).
    */
-  static final boolean FORK = present("org.apache.iceberg.io.SupportsAtomicOperations");
-
-  private static boolean present(String className) {
-    try {
-      Class.forName(className);
-      return true;
-    } catch (ClassNotFoundException e) {
-      return false;
-    }
-  }
-
-  /** Whether the store renames, as the fork's CAS on ADLS needs (Azurite does not). */
   boolean renames() {
     return false;
+  }
+
+  /** RMoW's appender on this store, as {@code Store} builds it. */
+  RegionAppender appender() {
+    return renames() ? new AtomicAppender(adls) : EmulatorAppenders.appendBlobs(clients, adls);
   }
 
   private String root; // this class's prefix: abfss://container@account.dfs.core.windows.net/...
@@ -160,10 +153,9 @@ abstract class AzureStoreContract {
   }
 
   /**
-   * A canary for what {@code adlsReads: iceberg} measures: Iceberg 1.12's ADLSInputStream opens
-   * with a GET of the file's first 4 MiB, and a ranged read at an offset asks for {@code position +
-   * length} bytes. If this fails, Iceberg or the SDK changed, and so did that mode. The atomicio
-   * fork fixes both (from core-fixes): it opens nothing, and reads exactly.
+   * Iceberg 1.12's ADLSInputStream opens with a GET of the file's first 4 MiB, and a ranged read
+   * at an offset asks for {@code position + length} bytes. The atomicio fork fixes both: a stream
+   * opens nothing, and a ranged read asks for exactly its range.
    */
   @Test
   void icebergReads() throws IOException {
@@ -173,12 +165,12 @@ abstract class AzureStoreContract {
     byte[] b = new byte[64 << 10];
     SeekableInputStream[] in = new SeekableInputStream[1];
     Sent open = sent(() -> in[0] = adls.newInputFile(loc, bytes.length).newStream());
-    assertThat(open.n(Kind.GET)).isEqualTo(FORK ? 0 : 1);
-    assertThat(open.getBytes()).isEqualTo(FORK ? 0 : 4 * MIB);
+    assertThat(open.total()).isZero();
 
     Sent range = sent(() -> ((RangeReadable) in[0]).readFully(6 * MIB, b, 0, b.length));
     assertThat(range.n(Kind.GET)).isEqualTo(1);
-    assertThat(range.getBytes()).isEqualTo(FORK ? b.length : 4 * MIB);
+    assertThat(range.total()).isEqualTo(1);
+    assertThat(range.getBytes()).isEqualTo(b.length);
     assertThat(b).isEqualTo(Arrays.copyOfRange(bytes, 6 * MIB, 6 * MIB + b.length));
 
     Sent tail = sent(() -> ((RangeReadable) in[0]).readTail(b, 0, b.length));
@@ -187,64 +179,22 @@ abstract class AzureStoreContract {
     in[0].close();
   }
 
-  @Test
-  void exactReadsSendTheModelsRequests() throws IOException {
-    String loc = location("exact");
-    byte[] bytes = random(10 * MIB);
-    write(adls, loc, bytes);
-    FileIO io = new ExactAdlsFileIO(adls, clients);
-    byte[] b = new byte[64 << 10];
-    SeekableInputStream[] in = new SeekableInputStream[1];
-    assertThat(sent(() -> in[0] = io.newInputFile(loc, bytes.length).newStream()).total()).isZero();
-
-    Sent range = sent(() -> ((RangeReadable) in[0]).readFully(6 * MIB, b, 0, b.length));
-    assertThat(range.total()).isEqualTo(1);
-    assertThat(range.getBytes()).isEqualTo(b.length);
-    assertThat(b).isEqualTo(Arrays.copyOfRange(bytes, 6 * MIB, 6 * MIB + b.length));
-
-    Sent tail = sent(() -> ((RangeReadable) in[0]).readTail(b, 0, b.length));
-    assertThat(tail.total()).isEqualTo(1);
-    assertThat(b).isEqualTo(Arrays.copyOfRange(bytes, bytes.length - b.length, bytes.length));
-
-    // a sequential read opens one request; a short forward seek reads through, a backward one
-    // abandons it and opens another
-    byte[] seq = new byte[MIB];
-    Sent first =
-        sent(
-            () -> {
-              in[0].seek(4 * MIB);
-              IOUtil.readFully(in[0], seq, 0, seq.length);
-            });
-    assertThat(first.n(Kind.GET)).isEqualTo(1);
-    assertThat(seq).isEqualTo(Arrays.copyOfRange(bytes, 4 * MIB, 5 * MIB));
-    Sent skip =
-        sent(
-            () -> {
-              in[0].seek(5 * MIB + MIB / 2);
-              IOUtil.readFully(in[0], seq, 0, seq.length);
-            });
-    assertThat(skip.total()).isZero();
-    assertThat(seq).isEqualTo(Arrays.copyOfRange(bytes, 5 * MIB + MIB / 2, 6 * MIB + MIB / 2));
-    Sent back =
-        sent(
-            () -> {
-              in[0].seek(0);
-              IOUtil.readFully(in[0], seq, 0, seq.length);
-            });
-    assertThat(back.n(Kind.GET)).isEqualTo(1);
-    assertThat(seq).isEqualTo(Arrays.copyOfRange(bytes, 0, MIB));
-    in[0].close();
-  }
-
+  /**
+   * RMoW's files are Append Blobs, created and extended through the fork. A create is three
+   * requests: on Azure, a staged Append Blob, an Append Block and a rename (counted as other); on
+   * Azurite, an empty Append Blob, a HEAD and an Append Block. An append is one Append Block, at
+   * the blob's length and conditioned on its ETag; one anywhere else fails and changes nothing.
+   */
   @Test
   void appendBlobsAppendAtTheirLengthOnly() throws IOException {
-    RegionAppender appender = AzureAppenders.appendBlob(clients);
+    RegionAppender appender = appender();
     String loc = location("append");
     byte[] first = "first|".getBytes(StandardCharsets.UTF_8);
-    Sent create = sent(() -> appender.create(adls, loc, first));
+    Sent create = sent(() -> appender.create(loc, first));
     assertThat(create.n(Kind.BLOB_CREATE)).isEqualTo(1);
     assertThat(create.n(Kind.APPEND)).isEqualTo(1);
-    assertThat(create.total()).isEqualTo(2);
+    assertThat(create.n(renames() ? Kind.OTHER : Kind.HEAD)).isEqualTo(1);
+    assertThat(create.total()).isEqualTo(3);
 
     byte[] second = "second".getBytes(StandardCharsets.UTF_8);
     long[] length = new long[1];
@@ -256,12 +206,18 @@ abstract class AzureStoreContract {
     // ADLSFileIO reads an Append Blob, with the length it is given (PLAN.md's S5)
     assertThat(new String(read(loc, 12), StandardCharsets.UTF_8)).isEqualTo("first|second");
 
-    for (long wrong : new long[] {0, 11, 13}) {
-      assertThatThrownBy(() -> appender.append(loc, wrong, second))
+    // not at 0: the fork's snapshots, as Iceberg's, take a length of 0 for an unknown one, so an
+    // APPEND from newInputFile(location, 0) extends the blob at whatever length it has
+    for (long wrong : new long[] {1, 11, 13}) {
+      // an appender with no snapshot of the blob looks its ETag up
+      assertThatThrownBy(() -> new AtomicAppender(adls).append(loc, wrong, second))
           .as("append at " + wrong)
           .isInstanceOf(IOException.class)
-          .hasMessageContaining("AppendPositionConditionNotMet");
+          .hasMessageContaining("APPEND");
     }
+    assertThatThrownBy(() -> appender().create(loc, first))
+        .as("a create where a blob is")
+        .isInstanceOf(IOException.class);
     assertThat(new String(read(loc, 12), StandardCharsets.UTF_8)).isEqualTo("first|second");
   }
 
@@ -269,17 +225,15 @@ abstract class AzureStoreContract {
   void aFileIcebergWroteCannotBeAppendedTo() throws IOException {
     String loc = location("block");
     write(adls, loc, random(1000));
-    assertThatThrownBy(() -> AzureAppenders.appendBlob(clients).append(loc, 1000, random(10)))
-        .isInstanceOf(IOException.class)
+    assertThatThrownBy(() -> new AtomicAppender(adls).append(loc, 1000, random(10)))
         .hasMessageContaining("InvalidBlobType");
   }
 
-  private BenchConfig config(String reads) {
+  private BenchConfig config() {
     BenchConfig cfg = new BenchConfig();
     cfg.store.type = "azure";
-    cfg.store.root = root + "/runs-" + reads;
+    cfg.store.root = root + "/runs";
     cfg.store.endpoint = endpoint;
-    cfg.store.adlsReads = reads;
     cfg.workload.initialRows = 30_000;
     cfg.workload.batches = 8;
     cfg.workload.opsPerBatch = 1_000;
@@ -321,109 +275,52 @@ abstract class AzureStoreContract {
     return r.get(field).asLong();
   }
 
-  /**
-   * Writes as the model counts them, whatever the reads: a whole-object PUT is one Put Blob, or,
-   * for a new appendable file, an empty Append Blob and its first block; an append is one Append
-   * Block. Nothing else, and no retries.
-   */
-  private static void writesMatchTheModel(JsonNode r, String at) {
-    long creates = n(r, "sdk_blob_creates");
-    assertThat(n(r, "sdk_puts") + creates).as(at + " PUTs").isEqualTo(n(r, "puts"));
-    assertThat(n(r, "sdk_appends")).as(at + " appends").isEqualTo(n(r, "appends") + creates);
-    assertThat(n(r, "sdk_put_bytes")).as(at + " bytes written").isEqualTo(n(r, "bytes_written"));
-    assertThat(n(r, "sdk_deletes")).as(at + " deletes").isEqualTo(n(r, "deletes"));
-    assertThat(n(r, "sdk_blocks") + n(r, "sdk_block_lists") + n(r, "sdk_lists") + n(r, "sdk_other"))
-        .as(at + " other requests")
-        .isZero();
-    assertThat(n(r, "sdk_retries")).as(at + " retries").isZero();
-  }
-
   private static String at(JsonNode r) {
     return r.get("arm").asText() + " step " + r.get("step") + " " + r.get("phase").asText()
         + (r.hasNonNull("reader") ? " " + r.get("reader").asText() : "");
   }
 
-  @Test
-  void everyArmFamilyMatchesTheModelWithExactReads(@TempDir Path dir) throws IOException {
-    new Runner(config("exact"), dir, "t").run();
-    List<JsonNode> phases = phases(dir);
-    assertThat(phases).isNotEmpty();
-    for (JsonNode r : phases) {
-      String at = at(r);
-      writesMatchTheModel(r, at);
-      assertThat(n(r, "sdk_gets")).as(at + " GETs").isEqualTo(n(r, "gets"));
-      assertThat(n(r, "sdk_heads")).as(at + " HEADs").isEqualTo(n(r, "heads"));
-    }
-    assertThat(phases).anyMatch(r -> n(r, "sdk_appends") > 0);
-    assertThat(phases).anyMatch(r -> n(r, "sdk_blob_creates") > 0);
-    String prefix = AdlsClients.Location.of(root).path() + "/runs-exact/";
-    assertThat(clients.container(root).listBlobsByHierarchy(prefix).stream())
-        .as("the run's objects are deleted")
-        .isEmpty();
-  }
-
   /**
-   * The fork appender ({@code append fork}) on the fork's atomic operations, with exact reads. An
-   * append is one Append Block, to the snapshot the last write returned, so no lookup. A new
-   * appendable file is a CAS against its absence, pinned without a lookup: a temporary Append Blob
-   * staged (created, then one Append Block) and renamed onto the file with {@code If-None-Match: *}
-   * (counted as other). Azure only, since Azurite does not rename.
+   * Every arm family sends what the model counts. A whole-object PUT is one Put Blob; a new
+   * appendable file is three requests (an Append Blob, an Append Block, and a rename on Azure or a
+   * HEAD on Azurite); an append is one Append Block; GETs and HEADs are the model's. Nothing else,
+   * and no retries. Bytes read are printed, not checked: the SDK downloads a sequential read's 4
+   * MiB chunk whole.
    */
   @Test
-  void everyArmFamilyWithForkAppends(@TempDir Path dir) throws IOException {
-    assumeTrue(FORK, "needs a -Pfork build");
-    assumeTrue(renames(), "the fork's CAS on ADLS renames, which this store does not");
-    BenchConfig cfg = config("exact");
-    cfg.store.root = root + "/runs-fork";
-    cfg.store.append = "fork";
-    new Runner(cfg, dir, "t").run();
+  void everyArmFamilyMatchesTheModel(@TempDir Path dir) throws IOException {
+    new Runner(config(), dir, "t").run();
     List<JsonNode> phases = phases(dir);
+    assertThat(phases).isNotEmpty();
+    Map<String, long[]> byArm = new LinkedHashMap<>(); // model bytes read, sent
     for (JsonNode r : phases) {
       String at = at(r);
       long creates = n(r, "sdk_blob_creates");
       assertThat(n(r, "sdk_puts") + creates).as(at + " PUTs").isEqualTo(n(r, "puts"));
       assertThat(n(r, "sdk_appends")).as(at + " appends").isEqualTo(n(r, "appends") + creates);
-      assertThat(n(r, "sdk_other")).as(at + " renames").isEqualTo(creates);
-      assertThat(n(r, "sdk_heads")).as(at + " HEADs").isEqualTo(n(r, "heads"));
+      assertThat(n(r, "sdk_other")).as(at + " renames").isEqualTo(renames() ? creates : 0);
+      assertThat(n(r, "sdk_heads"))
+          .as(at + " HEADs")
+          .isEqualTo(n(r, "heads") + (renames() ? 0 : creates));
       assertThat(n(r, "sdk_gets")).as(at + " GETs").isEqualTo(n(r, "gets"));
       assertThat(n(r, "sdk_put_bytes")).as(at + " bytes written").isEqualTo(n(r, "bytes_written"));
+      assertThat(n(r, "sdk_deletes")).as(at + " deletes").isEqualTo(n(r, "deletes"));
+      assertThat(n(r, "sdk_blocks") + n(r, "sdk_block_lists") + n(r, "sdk_lists"))
+          .as(at + " other requests")
+          .isZero();
       assertThat(n(r, "sdk_retries")).as(at + " retries").isZero();
+      long[] t = byArm.computeIfAbsent(r.get("arm").asText(), k -> new long[2]);
+      t[0] += n(r, "bytes_read");
+      t[1] += n(r, "sdk_get_bytes");
     }
     assertThat(phases).anyMatch(r -> n(r, "sdk_appends") > 0);
-  }
-
-  /**
-   * Iceberg's own reads: as shipped they send more than the model counts; on the fork, whose reads
-   * are fixed, what it counts (sequential reads here are shorter than the SDK's 4 MiB chunk, each
-   * a request).
-   */
-  @Test
-  void icebergReadsAgainstTheModel(@TempDir Path dir) throws IOException {
-    new Runner(config("iceberg"), dir, "t").run();
-    List<JsonNode> phases = phases(dir);
-    Map<String, long[]> byArm = new LinkedHashMap<>(); // model GETs, sent GETs, model bytes, sent
-    for (JsonNode r : phases) {
-      String at = at(r);
-      writesMatchTheModel(r, at);
-      if (FORK) {
-        assertThat(n(r, "sdk_gets")).as(at + " GETs").isEqualTo(n(r, "gets"));
-        assertThat(n(r, "sdk_heads")).as(at + " HEADs").isEqualTo(n(r, "heads"));
-      } else {
-        assertThat(n(r, "sdk_gets")).as(at + " GETs").isGreaterThanOrEqualTo(n(r, "gets"));
-      }
-      long[] t = byArm.computeIfAbsent(r.get("arm").asText(), k -> new long[4]);
-      t[0] += n(r, "gets");
-      t[1] += n(r, "sdk_gets");
-      t[2] += n(r, "bytes_read");
-      t[3] += n(r, "sdk_get_bytes");
-    }
-    if (!FORK) {
-      assertThat(byArm.values()).anyMatch(t -> t[1] > t[0]);
-    }
+    assertThat(phases).anyMatch(r -> n(r, "sdk_blob_creates") > 0);
     byArm.forEach(
         (arm, t) ->
-            System.out.printf(
-                "iceberg reads, %s: GETs %d sent / %d modelled, MB %.1f / %.1f%n",
-                arm, t[1], t[0], t[3] / 1e6, t[2] / 1e6));
+            System.out.printf("%s: MB read %.1f sent / %.1f modelled%n", arm, t[1] / 1e6, t[0] / 1e6));
+    String prefix = AdlsClients.Location.of(root).path() + "/runs/";
+    assertThat(clients.container(root).listBlobsByHierarchy(prefix).stream())
+        .as("the run's objects are deleted")
+        .isEmpty();
   }
 }

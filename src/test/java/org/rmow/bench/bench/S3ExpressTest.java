@@ -17,10 +17,9 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.rmow.bench.append.AtomicAppender;
 import org.rmow.bench.append.RegionAppender;
-import org.rmow.bench.append.S3Appenders;
 import org.rmow.bench.io.S3Recorder;
-import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.S3Object;
@@ -32,11 +31,12 @@ import software.amazon.awssdk.services.s3.model.S3Object;
  * the default chain; {@code RMOW_S3X_REGION} (else {@code AWS_REGION}, else us-east-1) names its
  * region. Everything it writes goes under a prefix of its own, deleted at the end.
  *
- * <p>It checks what the benchmark's S3 Express path relies on: an append at the object's length
- * lands, with the SDK's default checksums; one anywhere else fails with {@code
- * InvalidWriteOffset} and leaves the object as it was; the recorder sees an append as one {@code
- * PutObject} with a write offset, and no HEAD; and a run of every arm family matches the trace's
- * model request for request, appends included.
+ * <p>It checks what the benchmark's S3 Express path relies on, the atomicio fork's atomic
+ * operations ({@link AtomicAppender} over S3FileIO): an append at the object's length lands; one
+ * anywhere else fails ({@code InvalidWriteOffset}) and leaves the object as it was; the recorder
+ * sees a create as one {@code PutObject}, conditioned on the object's absence, and an append as one
+ * {@code PutObject} with a write offset, conditioned on its ETag, neither with a HEAD; and a run of
+ * every arm family matches the trace's model request for request, appends included.
  */
 class S3ExpressTest {
 
@@ -86,14 +86,15 @@ class S3ExpressTest {
     return s3.getObjectAsBytes(b -> b.bucket(bucket).key(prefix + "/" + name)).asByteArray();
   }
 
-  private static void put(String name, byte[] body) {
-    s3.putObject(b -> b.bucket(bucket).key(prefix + "/" + name), RequestBody.fromBytes(body));
+  /** RMoW's appender, over S3FileIO over {@code client}, which the caller closes. */
+  private static RegionAppender appender(S3Client client) {
+    return new AtomicAppender(Store.s3FileIO(client));
   }
 
   @Test
   void appendsAtTheObjectsLength() throws IOException {
-    put("append", bytes("first|"));
-    RegionAppender appender = S3Appenders.express(s3);
+    RegionAppender appender = appender(s3);
+    appender.create(location("append"), bytes("first|"));
     long length = appender.append(location("append"), 6, bytes("second|"));
     length = appender.append(location("append"), length, bytes("third"));
     assertThat(length).isEqualTo(18);
@@ -101,44 +102,54 @@ class S3ExpressTest {
   }
 
   @Test
-  void appendElsewhereFailsAndChangesNothing() {
-    put("wrong", bytes("0123456789"));
-    RegionAppender appender = S3Appenders.express(s3);
+  void appendElsewhereFailsAndChangesNothing() throws IOException {
+    appender(s3).create(location("wrong"), bytes("0123456789"));
     for (long offset : new long[] {0, 9, 11}) {
-      assertThatThrownBy(() -> appender.append(location("wrong"), offset, bytes("x")))
+      // an appender with no snapshot of the object looks its ETag up
+      assertThatThrownBy(() -> appender(s3).append(location("wrong"), offset, bytes("x")))
           .as("append at " + offset)
           .isInstanceOf(IOException.class)
-          .hasMessageContaining("InvalidWriteOffset");
+          .hasMessageContaining("APPEND");
     }
+    assertThat(read("wrong")).isEqualTo(bytes("0123456789"));
+    assertThatThrownBy(() -> appender(s3).create(location("wrong"), bytes("again")))
+        .as("a create where an object is")
+        .isInstanceOf(IOException.class)
+        .hasMessageContaining("CAS");
     assertThat(read("wrong")).isEqualTo(bytes("0123456789"));
   }
 
   @Test
-  void recorderSeesOneAppendAndNoHead() throws IOException {
-    put("recorded", bytes("abc"));
+  void recorderSeesACreateAndAnAppendAndNoHead() throws IOException {
     S3Recorder recorder = new S3Recorder();
     try (S3Client recorded =
         S3Client.builder()
             .region(Region.of(region))
             .overrideConfiguration(o -> o.addExecutionInterceptor(recorder))
             .build()) {
+      RegionAppender appender = appender(recorded);
       S3Recorder.Counts before = recorder.snapshot();
-      S3Appenders.express(recorded).append(location("recorded"), 3, bytes("defg"));
-      S3Recorder.Counts d = recorder.snapshot().minus(before);
-      assertThat(d.appends()).isEqualTo(1);
-      assertThat(d.puts() + d.heads() + d.gets() + d.other()).isZero();
-      assertThat(d.putBytes()).isEqualTo(4);
+      appender.create(location("recorded"), bytes("abc"));
+      S3Recorder.Counts create = recorder.snapshot().minus(before);
+      assertThat(create.puts()).isEqualTo(1);
+      assertThat(create.appends() + create.heads() + create.gets() + create.other()).isZero();
+
+      before = recorder.snapshot();
+      appender.append(location("recorded"), 3, bytes("defg"));
+      S3Recorder.Counts append = recorder.snapshot().minus(before);
+      assertThat(append.appends()).isEqualTo(1);
+      assertThat(append.puts() + append.heads() + append.gets() + append.other()).isZero();
+      assertThat(append.putBytes()).isEqualTo(4);
       // CreateSession goes to sdk_sessions if this client sends it; print what it did
-      System.out.println("S3 Express append: " + d);
+      System.out.println("S3 Express create: " + create + "; append: " + append);
     }
   }
 
-  private static BenchConfig config(String append) {
+  private static BenchConfig config() {
     BenchConfig cfg = new BenchConfig();
     cfg.store.type = "s3";
-    cfg.store.root = "s3://" + bucket + "/" + prefix + "/runs-" + append;
+    cfg.store.root = "s3://" + bucket + "/" + prefix + "/runs";
     cfg.store.region = region;
-    cfg.store.append = append;
     cfg.workload.initialRows = 30_000;
     cfg.workload.batches = 8;
     cfg.workload.opsPerBatch = 1_000;
@@ -175,32 +186,13 @@ class S3ExpressTest {
   }
 
   /**
-   * The fork appender ({@code append fork}, a {@code -Pfork} build) sends what the model counts: an
-   * append is one PutObject at the snapshot's length, conditioned on its ETag, with no HEAD; a new
-   * appendable file is one PutObject conditioned on its absence ({@code If-None-Match: *}), also
-   * with no HEAD.
+   * Every arm family sends what the model counts. An append is one PutObject at the snapshot's
+   * length, conditioned on its ETag, with no HEAD; a new appendable file is one PutObject
+   * conditioned on its absence ({@code If-None-Match: *}), also with no HEAD.
    */
   @Test
-  void everyArmFamilyWithForkAppends(@TempDir Path dir) throws IOException {
-    assumeTrue(AzureStoreContract.FORK, "needs a -Pfork build");
-    new Runner(config("fork"), dir, "t").run();
-    List<JsonNode> phases = phases(dir);
-    for (JsonNode r : phases) {
-      String at = at(r);
-      assertThat(r.get("sdk_gets").asLong()).as(at + " GETs").isEqualTo(r.get("gets").asLong());
-      assertThat(r.get("sdk_puts").asLong()).as(at + " PUTs").isEqualTo(r.get("puts").asLong());
-      assertThat(r.get("sdk_appends").asLong()).as(at + " appends").isEqualTo(r.get("appends").asLong());
-      assertThat(r.get("sdk_heads").asLong()).as(at + " HEADs").isEqualTo(r.get("heads").asLong());
-      assertThat(r.get("sdk_put_bytes").asLong()).as(at + " bytes written")
-          .isEqualTo(r.get("bytes_written").asLong());
-      assertThat(r.get("sdk_lists").asLong() + r.get("sdk_other").asLong()).as(at).isZero();
-    }
-    assertThat(phases).anyMatch(r -> r.get("sdk_appends").asLong() > 0);
-  }
-
-  @Test
   void everyArmFamilyMatchesTheModel(@TempDir Path dir) throws IOException {
-    new Runner(config("express"), dir, "t").run();
+    new Runner(config(), dir, "t").run();
     List<JsonNode> phases = phases(dir);
     for (JsonNode r : phases) {
       String at = at(r);

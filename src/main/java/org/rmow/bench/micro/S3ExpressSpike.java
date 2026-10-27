@@ -15,8 +15,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.SplittableRandom;
+import org.apache.iceberg.aws.s3.S3FileIO;
+import org.rmow.bench.append.AtomicAppender;
 import org.rmow.bench.append.RegionAppender;
-import org.rmow.bench.append.S3Appenders;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.http.apache.ApacheHttpClient;
 import software.amazon.awssdk.regions.Region;
@@ -25,9 +26,10 @@ import software.amazon.awssdk.services.s3.S3ClientBuilder;
 import software.amazon.awssdk.services.s3.model.S3Object;
 
 /**
- * Spike S4 (PLAN.md, M3), its latency half: what an S3 Express append costs by size, against a
- * PUT of a new object of the same size, and what a GET costs against the number of parts an
- * object was appended in. {@code S3ExpressTest} checks the append's semantics.
+ * Spike S4 (PLAN.md, M3), its latency half: what an S3 Express append costs by size, the store's
+ * own and RMoW's through the fork's atomic operations, against a PUT of a new object of the same
+ * size, and what a GET costs against the number of parts an object was appended in. {@code
+ * S3ExpressTest} checks the append's semantics.
  *
  * <pre>
  *   java -cp ... org.rmow.bench.micro.S3ExpressSpike s3://&lt;bucket&gt;--&lt;az id&gt;--x-s3/&lt;prefix&gt;
@@ -35,9 +37,12 @@ import software.amazon.awssdk.services.s3.model.S3Object;
  * </pre>
  *
  * <ul>
- *   <li><b>append</b> and <b>put</b>: for sizes 64 KiB to 32 MiB, doubling, {@code reps} appends
- *       of that size to one object (created by a PUT of the same size), and {@code reps} PUTs of
- *       new objects;
+ *   <li><b>append</b>, <b>append_sao</b>, <b>put</b> and <b>create_sao</b>: for sizes 64 KiB to 32
+ *       MiB, doubling, {@code reps} each, interleaved: the store's own appends of that size to one
+ *       object (a PutObject at its length, created by a PUT of the same size); RMoW's, the fork's
+ *       APPEND ({@link AtomicAppender}: a PutObject at the length, conditioned on the ETag) to
+ *       another; PUTs of new objects; and RMoW's creates of new objects, a PUT conditioned on
+ *       their absence ({@code If-None-Match: *});
  *   <li><b>get_full</b>, <b>get_tail</b> and <b>get_mid</b>: objects of 1, 10, 100 and 1000 parts
  *       of 64 KiB (a PUT, then appends), read whole, as their last 64 KiB (a footer prefetch), and
  *       as 64 KiB from the middle, {@code reps} times each.
@@ -160,37 +165,70 @@ public final class S3ExpressSpike {
     s3.putObject(b -> b.bucket(bucket).key(key), RequestBody.fromBytes(body));
   }
 
+  /**
+   * The store's own append: a PutObject at the object's length ({@code writeOffsetBytes}), which
+   * S3 rejects unless it is the object's size, with no other condition.
+   */
+  private long append(String key, long at, byte[] body) {
+    s3.putObject(
+        b -> b.bucket(bucket).key(key).writeOffsetBytes(at), RequestBody.fromBytes(body));
+    return at + body.length;
+  }
+
   private void appendsAndPuts() throws IOException {
-    RegionAppender appender = S3Appenders.express(s3);
+    RegionAppender atomic = new AtomicAppender(fileIO());
     for (int size = PART; size <= 32 * KIB * KIB; size *= 2) {
       byte[] body = payload(size);
-      String key = prefix + "/append-" + size;
-      put(key, body);
-      long length = size;
+      String own = prefix + "/append-" + size;
+      put(own, body);
+      String sao = location(prefix + "/append-sao-" + size);
+      atomic.create(sao, body);
+      long ownLength = size;
+      long saoLength = size;
       for (int i = 0; i < reps; i++) {
         long t = System.nanoTime();
-        length = appender.append(location(key), length, body);
+        ownLength = append(own, ownLength, body);
         record("append", size, i + 2, i, System.nanoTime() - t);
-      }
-      for (int i = 0; i < reps; i++) {
+
+        t = System.nanoTime();
+        saoLength = atomic.append(sao, saoLength, body);
+        record("append_sao", size, i + 2, i, System.nanoTime() - t);
+
         String k = prefix + "/put-" + size + "-" + i;
-        long t = System.nanoTime();
+        t = System.nanoTime();
         put(k, body);
         record("put", size, 1, i, System.nanoTime() - t);
+
+        String c = location(prefix + "/create-sao-" + size + "-" + i);
+        t = System.nanoTime();
+        atomic.create(c, body);
+        record("create_sao", size, 1, i, System.nanoTime() - t);
       }
       out.flush();
     }
   }
 
+  /** S3FileIO over the spike's client, which the spike closes; it builds no client of its own. */
+  private S3FileIO fileIO() {
+    S3Client client = s3;
+    S3FileIO io =
+        new S3FileIO(
+            () -> client,
+            () -> {
+              throw new UnsupportedOperationException("The spike's S3 store is synchronous");
+            });
+    io.initialize(Map.of());
+    return io;
+  }
+
   private void getsByParts() throws IOException {
-    RegionAppender appender = S3Appenders.express(s3);
     byte[] part = payload(PART);
     for (int parts : new int[] {1, 10, 100, 1000}) {
       String key = prefix + "/parts-" + parts;
       put(key, part);
       long length = PART;
       for (int i = 1; i < parts; i++) {
-        length = appender.append(location(key), length, part);
+        length = append(key, length, part);
       }
       for (int i = 0; i < reps; i++) {
         long t = System.nanoTime();

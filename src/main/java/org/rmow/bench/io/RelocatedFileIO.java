@@ -70,12 +70,11 @@ public final class RelocatedFileIO implements FileIO, RegionAppender {
   }
 
   @Override
-  public void create(FileIO io, String location, byte[] bytes) throws IOException {
+  public void create(String location, byte[] bytes) throws IOException {
     if (appender == null) {
-      RegionAppender.super.create(this, location, bytes);
-    } else {
-      appender.create(delegate, physical(location), bytes);
+      throw new UnsupportedOperationException("This store has no append: " + location);
     }
+    appender.create(physical(location), bytes);
   }
 
   private record In(InputFile file, String location) implements InputFile {

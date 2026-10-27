@@ -9,6 +9,8 @@ import java.util.Map;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.parquet.format.RowGroup;
 import org.junit.jupiter.api.Test;
+import org.rmow.bench.append.RegionAppender;
+import org.rmow.bench.append.AtomicAppender;
 import org.rmow.bench.bench.Phases;
 import org.rmow.bench.io.IoTrace;
 import org.rmow.bench.io.MemFileIO;
@@ -46,12 +48,13 @@ class RmowCompactionTest {
       log = OpLogGenerator.generate(w);
       model = new ReferenceModel(log);
       MemFileIO mem = new MemFileIO();
+      RegionAppender appender = new AtomicAppender(mem);
       IoTrace trace = new IoTrace();
       ArmContext ctx =
           new ArmContext(
               "t",
               "mem://t/arm",
-              new TracingFileIO(mem, mem, trace),
+              new TracingFileIO(mem, appender, trace),
               mem,
               new Phases(trace),
               layout,
@@ -60,7 +63,7 @@ class RmowCompactionTest {
       arm = new RmowArm(ctx, TailPolicy.Kind.A, split);
       arm.load(
           InitialLoad.copy(
-              mem, InitialLoad.write(mem, "mem://t/base", log, layout), ctx.root(), mem));
+              mem, InitialLoad.write(mem, "mem://t/base", log, layout), ctx.root(), appender));
     }
 
     void batches(int n) throws IOException {

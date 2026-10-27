@@ -1,7 +1,6 @@
 package org.rmow.bench.bench;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -27,10 +26,11 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 
 /**
- * The S3 store against versitygw, an S3 emulator: Iceberg's S3FileIO under every arm family, with
- * RMoW on the emulated append (versitygw ignores {@code writeOffsetBytes}; the S3 Express append
- * itself needs the real service). Every phase's requests, as the SDK sent them, must match what
- * {@code TracingFileIO} modelled, and the run must leave nothing behind.
+ * The S3 store against versitygw, an S3 emulator: Iceberg's S3FileIO under every arm family. RMoW
+ * creates its files through the fork's atomic operations, and appends on a stand-in that rewrites
+ * the object, unmeasured (versitygw ignores {@code writeOffsetBytes}; the S3 Express append itself
+ * needs the real service). Every phase's requests, as the SDK sent them, must match what {@code
+ * TracingFileIO} modelled, and the run must leave nothing behind.
  */
 class S3StoreTest {
 
@@ -92,14 +92,13 @@ class S3StoreTest {
         .build();
   }
 
-  private static BenchConfig config(String append) {
+  private static BenchConfig config() {
     BenchConfig cfg = new BenchConfig();
     cfg.store.type = "s3";
     cfg.store.root = "s3://" + BUCKET + "/runs";
     cfg.store.endpoint = endpoint.toString();
     cfg.store.region = "us-east-1";
     cfg.store.pathStyle = true;
-    cfg.store.append = append;
     cfg.workload.initialRows = 30_000;
     cfg.workload.batches = 8;
     cfg.workload.opsPerBatch = 1_000;
@@ -126,7 +125,7 @@ class S3StoreTest {
 
   @Test
   void everyArmFamilyOnS3(@TempDir Path dir) throws IOException {
-    BenchConfig cfg = config("emulated");
+    BenchConfig cfg = config();
     cfg.arms =
         List.of(
             "mor-v2-file",
@@ -166,8 +165,8 @@ class S3StoreTest {
 
   /** Split files need no append: they run on standard S3 (and GCS), one object per write. */
   @Test
-  void splitFilesOnStandardS3(@TempDir Path dir) throws IOException {
-    BenchConfig cfg = config("none");
+  void splitFilesNeedNoAppend(@TempDir Path dir) throws IOException {
+    BenchConfig cfg = config();
     cfg.arms = List.of("mor-v3", "rmow-b-split", "rmow-c-split");
     new Runner(cfg, dir, "t").run();
     List<JsonNode> phases = records(dir).stream().filter(r -> r.has("sdk_requests")).toList();
@@ -180,14 +179,5 @@ class S3StoreTest {
       assertThat(r.get("sdk_puts").asLong()).as(at + " PUTs").isEqualTo(r.get("puts").asLong());
       assertThat(r.get("sdk_heads").asLong()).as(at + " HEADs").isEqualTo(r.get("heads").asLong());
     }
-  }
-
-  @Test
-  void rmowNeedsAppend(@TempDir Path dir) {
-    BenchConfig cfg = config("none");
-    cfg.arms = List.of("mor-v3", "rmow-c");
-    assertThatThrownBy(() -> new Runner(cfg, dir, "t").run())
-        .isInstanceOf(IllegalArgumentException.class)
-        .hasMessageContaining("S3 Express");
   }
 }

@@ -59,26 +59,39 @@ leave them out.
 - [ ] **Run the fork's contract suites on the real services** (`S3ExpressFileIOAtomicTest`,
   `AdlsFileIOAtomicTest`, `GcsFileIOAtomicRapidTest`), first on each cloud VM. No emulator runs
   the fork's paths: versitygw ignores write offsets, and Azurite has no rename.
+  The runbooks now list them as step 1. They need keys in the environment, not the VM's
+  identity: AWS keys for S3 Express, a SAS token for ADLS.
+- [ ] **An APPEND at length 0 is an APPEND at any length** (found 2026-10-26, for
+  fileio-catalog). The fork's snapshots, like Iceberg's, take a known length of 0 for an unknown
+  one (`length > 0 ? length : null` in `S3InputFile`, `ADLSInputFile` and `GCSInputFile`). So an
+  APPEND from `newInputFile(location, 0)` looks the object up and extends it at whatever length it
+  has, where the contract says it lands only at the snapshot's length. On Azurite an append "at 0"
+  to a 12-byte blob landed at 12. RMoW never appends at 0. The bench's stand-in for Azurite's
+  creates relies on it, which is safe there. The local stores keep the length.
 
 ## Harness (rmow-bench)
 
-- [ ] **Unify on SAO** (decided 2026-10-26). One appender, `ForkAppenders`, for every store:
-  - `-Pfork` becomes the only build;
-  - S3 Express's and Azure's own appenders (`S3Appenders`, `AzureAppenders`) go;
-  - `ExactAdlsFileIO` and `store.adlsReads` go too, since the fork's ADLS reads are exact.
+- [x] **Unify on SAO** (decided and done 2026-10-26). One appender,
+  `AtomicAppender`, over the fork's `SupportsAtomicOperations`, for every store:
+  - the fork's build is the only one: no `-Pfork` profile, no `src/fork`, no `target-fork/`;
+  - `S3Appenders`, `AzureAppenders`, `ExactAdlsFileIO`, `store.append` and `store.adlsReads` are
+    gone. S3 appends only in a directory bucket, decided by the bucket's name;
+  - `MemFileIO` and `PreadFileIO` implement the API, and pass the fork's own contract
+    (`LocalAtomicContractTest`), so local runs take the same path;
+  - emulators run RMoW's appendable arms on stand-ins (`EmulatorAppenders`): versitygw ignores
+    write offsets, so appends rewrite the object, unmeasured; Azurite cannot rename, so a create
+    there is an empty Append Blob, a HEAD and an Append Block;
+  - `azure-calibration-{exact,iceberg}` became `azure-calibration`, with one Azurite twin.
 
-  It needs:
-  - a local SAO FileIO, so every arm family runs with fork appends locally (`MemAtomicFileIO` is
-    test-only);
-  - `bin/run.sh` and `bin/matrix.sh` running the fork build.
-
-  The baseline then runs on Iceberg 1.12 plus the fork's fixes. A run of Iceberg's ADLS as shipped
+  The baseline now runs on Iceberg 1.12 plus the fork's fixes. A run of Iceberg's ADLS as shipped
   is optional, from an older build.
-  - [ ] **The fork appender on the new rule** (on `main`, uncommitted). A create is a CAS from a
-    fresh snapshot, so it sends exactly the model's requests on S3, and one rename more on ADLS.
-    The cloud tests (`S3ExpressTest`, `AzureTest` under `-Pfork`) now expect the model's HEADs.
-  - [ ] Show that SAO matches the stores' own appenders on each store, request for request with
-    ADLS's rename aside, and in wall time per write sub-phase. Then remove the native appenders.
+  - [x] **Request for request, locally:** the old build and this one sent the same requests and
+    bytes on 7 arms. The one difference is 18 bytes per DV file, from Puffin's `created-by`
+    (EXPERIMENTS.md, Builds). versitygw and Azurite match the model in every phase, with the
+    stand-ins' counts.
+  - [ ] **Against the stores' own writes, in the cloud:** the spikes now time the store's own
+    appends and creates beside RMoW's, interleaved (draft hypotheses X5 and Z7). That leaves
+    nothing native in the runs, only in the spikes.
 - [ ] **Each request's latency in the request log.** `requests.jsonl` records each request's
   kind, object, range and the CPU before it, but not how long it took. Record its start and
   duration, so a cloud phase splits into CPU, each request's measured latency, and the rest.

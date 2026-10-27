@@ -8,8 +8,10 @@
 -- model (sdk_other, S3 Express's CreateSession) are left out.
 --
 -- GET bytes are what responses declare. That is what a bounded GET transfers, and every GET of
--- Iceberg's ADLS reads is bounded (store.adlsReads = iceberg). An open-ended GET that is abandoned
--- transfers less than it declares, so for the other runs read bytes are the model's.
+-- Iceberg's ADLS reads is bounded: as shipped (store.adlsReads = iceberg, in runs before
+-- 2026-10-26) and on the atomicio fork (Azure runs without store.adlsReads), whose sequential reads
+-- download bounded 4 MiB blocks. An open-ended GET that is abandoned transfers less than it
+-- declares, so for the other runs (S3; adlsReads = exact) read bytes are the model's.
 
 -- Runs without a cloud store have no sdk_* columns: these stand in until a run has them.
 ALTER TABLE steps ADD COLUMN IF NOT EXISTS sdk_requests BIGINT;
@@ -33,7 +35,7 @@ ALTER TABLE steps ADD COLUMN IF NOT EXISTS sdk_put_bytes BIGINT;
 CREATE VIEW sdk_latency AS
 WITH s AS (
     SELECT s.*, coalesce(rr.parallelism, 1) AS parallelism, w.work_ms,
-           coalesce(p.value, '') AS adls_reads
+           coalesce(p.value, CASE WHEN s.store = 'azure' THEN 'fork' ELSE '' END) AS adls_reads
     FROM steps s LEFT JOIN run_readers rr ON rr.run_id = s.run_id AND rr.reader = s.reader
     LEFT JOIN phase_work w ON w.run_id = s.run_id AND w.arm = s.arm AND w.step = s.step
                           AND w.phase = s.phase AND w.reader IS NOT DISTINCT FROM s.reader
@@ -50,7 +52,7 @@ SELECT s.run_id, s.arm, s.step, s.phase, s.reader, p.profile,
                 WHEN p.append_ms IS NULL THEN 'NaN'::DOUBLE
                 ELSE s.sdk_appends * p.append_ms * exp(p.append_sigma ^ 2 / 2) END
          AS request_ms,
-       (CASE WHEN s.adls_reads = 'iceberg' THEN s.sdk_get_bytes ELSE s.bytes_read END)
+       (CASE WHEN s.adls_reads IN ('iceberg', 'fork') THEN s.sdk_get_bytes ELSE s.bytes_read END)
            / 1048576.0 * p.read_ms_per_mib
          + s.sdk_put_bytes / 1048576.0 * p.write_ms_per_mib AS transfer_ms
 FROM s CROSS JOIN store_profiles p

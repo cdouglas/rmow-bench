@@ -145,7 +145,7 @@ public final class Runner {
       for (String arm : cfg.arms) {
         if (appends(arm)) {
           throw new IllegalArgumentException(
-              arm + " appends, and this store cannot (on S3 it needs S3 Express: append express)");
+              arm + " appends, and this store cannot (on S3 it needs a directory bucket: S3 Express)");
         }
       }
     }

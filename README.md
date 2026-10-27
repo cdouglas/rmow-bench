@@ -36,9 +36,12 @@ Four documents go with this one:
 
 ## Build and run
 
-Requires JDK 17 and Maven. Iceberg (1.12.0) and parquet-java (1.17.1) are the released versions
-from Maven Central. The fork is not needed, except to append through its API
-([On the atomicio fork](#on-the-atomicio-fork--pfork)).
+Requires JDK 17 and Maven, and the atomicio fork of Iceberg 1.12.0 (`1.12.0-atomicio-SNAPSHOT`)
+in the local Maven repository: RMoW appends through its `SupportsAtomicOperations` on every store
+([Appends: the fork's atomic operations](#appends-the-forks-atomic-operations)). Build it from the
+fork's `atomicio` branch with `./gradlew publishToMavenLocal -x test -x integrationTest`;
+`-Diceberg.version` picks another of its builds. parquet-java (1.17.1) and everything else come
+from Maven Central.
 
 ```bash
 mvn -q package -DskipTests        # the jar plus target/lib
@@ -147,12 +150,14 @@ Each rule guards against a bias found in Iceberg's code:
 
 `store.type` `s3` runs every arm on Iceberg's `S3FileIO`, over one AWS SDK client that this
 project builds (`Store`), with credentials from the default chain, so none are in a configuration
-or its manifest. `store.append` says how RMoW appends:
+or its manifest. Only directory buckets (S3 Express One Zone, `<name>--<az id>--x-s3`) append, so
+the bucket decides:
 
-- `express`: S3 Express One Zone, one PutObject at the object's length (`writeOffsetBytes`), with
-  no HEAD;
-- `emulated`: read the object and write it back longer, for emulators, on an unmeasured client;
-- `none`: standard S3. The runner refuses RMoW arms.
+- **a directory bucket:** RMoW appends through the fork (`AtomicAppender`): one PutObject at the
+  object's length (`writeOffsetBytes`), conditioned on its ETag, with no HEAD;
+- **a standard bucket:** the runner refuses RMoW's appendable arms; split files run;
+- **an emulator** (`store.endpoint`): appends read the object and CAS it back longer, on an
+  unmeasured client (`EmulatorAppenders.rewriting`). Creates are the fork's.
 
 An interceptor on the client (`S3Recorder`) counts the requests the SDK sends. Each phase then
 records them beside the trace's model, as `sdk_*` fields: requests by operation, retries, and
@@ -167,13 +172,16 @@ not in the model), and latency. Two things check them, given a directory bucket:
 - **`S3ExpressTest`** runs when `RMOW_S3X_ROOT` names a prefix in a directory bucket
   (`s3://<bucket>--<az id>--x-s3/<prefix>`; region from `RMOW_S3X_REGION` or `AWS_REGION`). It
   checks that:
-  - an append at the object's length lands, with the SDK's default checksums;
-  - one anywhere else fails with `InvalidWriteOffset` and changes nothing;
-  - the recorder sees an append as one PutObject with a write offset, and no HEAD;
+  - an append at the object's length lands;
+  - one anywhere else fails and changes nothing, and so does a create where an object is;
+  - the recorder sees a create as one PutObject and an append as one PutObject with a write
+    offset, neither with a HEAD;
   - a run of every arm family matches the model, appends and bytes written included.
-- **`org.rmow.bench.micro.S3ExpressSpike <s3://bucket/prefix>`** measures latencies: appends
-  against PUTs from 64 KiB to 32 MiB, and GETs (whole, last 64 KiB, middle 64 KiB) of objects of
-  1 to 1000 appended parts. It writes `results/spike/s3x-spike-<UTC>/spike.jsonl`.
+- **`org.rmow.bench.micro.S3ExpressSpike <s3://bucket/prefix>`** measures latencies, interleaved:
+  the store's own appends (a write offset alone) against RMoW's (the fork's, conditioned on the
+  ETag too), PUTs against RMoW's creates (conditioned on absence), from 64 KiB to 32 MiB; and GETs
+  (whole, last 64 KiB, middle 64 KiB) of objects of 1 to 1000 appended parts. It writes
+  `results/spike/s3x-spike-<UTC>/spike.jsonl`.
 
 `configs/s3x-calibration.json` is the first cloud run, to make once the bucket exists: a small
 workload and every default arm, from an EC2 instance in the bucket's zone. Its twin,
@@ -188,23 +196,18 @@ the default chain (a VM's managed identity, the environment, the Azure CLI), so 
 configuration or its manifest. For an emulator, `store.endpoint` names it, and the account key is
 in `AZURE_STORAGE_KEY`.
 
-Iceberg 1.12.0's ADLS FileIO writes what the model counts. An output stream is one Put Blob up to
-256 MiB, and `create()` adds its existence check, a HEAD. Its reads do not
-([docs/AZURE_RUNBOOK.md](docs/AZURE_RUNBOOK.md)):
-- every stream opens with a GET of the file's first 4 MiB, before any read;
-- a ranged read at an offset fetches up to a 4 MiB chunk, since it asks for `position + length`
-  bytes.
-
-So `store.adlsReads` picks the reads; writes are ADLSFileIO's in both:
-- `iceberg`: as shipped;
-- `exact`: `ExactAdlsFileIO`, which sends what the model counts, as S3FileIO does. A stream opens
-  nothing until it reads, a ranged read is one GET of its range, and a sequential read is one
-  streamed GET.
+The fork's ADLS FileIO sends what the model counts. An output stream is one Put Blob up to
+256 MiB, and `create()` adds its existence check, a HEAD. A stream opens nothing until it reads,
+and a ranged read is one GET of exactly its range. Iceberg 1.12.0 as shipped reads more: every
+stream opens with a GET of the file's first 4 MiB, and a ranged read at an offset fetches up to a
+4 MiB chunk, since it asks for `position + length` bytes ([docs/AZURE_RUNBOOK.md](docs/AZURE_RUNBOOK.md)).
+The fork's sequential reads still download the SDK's 4 MiB blocks whole, so they read more bytes
+than the model counts, but no more requests.
 
 `AppendBlock` extends only an Append Blob, and Iceberg writes block blobs. So RMoW's files are
-created by the appender (`AzureAppenders`), as an empty Append Blob and its first version
-appended (`RegionAppender.create`). Each append is one `AppendBlock`, conditioned on the blob's
-length. The model counts the create as one PUT.
+Append Blobs, created through the fork (`AtomicAppender`) as a temporary Append Blob, one Append
+Block and a rename with `If-None-Match: *`: three requests, where the model counts one PUT. Each
+append is one `AppendBlock`, conditioned on the blob's length and ETag.
 
 The recorder (`AzureRecorder`) counts what the SDK sends through every client in the process,
 Iceberg's included: azure-core adds its policies to every storage pipeline
@@ -212,64 +215,69 @@ Iceberg's included: azure-core adds its policies to every storage pipeline
 prices them.
 
 `AzureStoreTest` runs the store's contract (`AzureStoreContract`) against Azurite, in Docker
-(skipped without it). Azurite has no Data Lake endpoint, which only a directory delete needs, so
-the store deletes an emulator's runs blob by blob. The contract checks that:
+(skipped without it). Azurite has no Data Lake endpoint, so the store deletes an emulator's runs
+blob by blob, and it cannot rename, so RMoW creates its files there through a stand-in
+(`EmulatorAppenders.appendBlobs`): an empty Append Blob made in place, a HEAD, and an Append
+Block. The contract checks that:
 - Iceberg's write is a HEAD and one Put Blob;
-- its reads behave as above (a canary, should Iceberg or the SDK change);
-- exact reads send one GET per range, and a sequential read one streamed GET;
-- Append Blobs append at their length only (`AppendPositionConditionNotMet` elsewhere), and a file
-  Iceberg wrote cannot be appended to (`InvalidBlobType`);
-- under exact reads, every phase of every arm family sends what the model counts, request for
-  request, with nothing else and no retries; under Iceberg's, its writes do, and its reads send
-  more.
+- its reads open nothing and ask for exactly their range;
+- Append Blobs append at their length only, a create fails where a blob is, and a file Iceberg
+  wrote cannot be appended to (`InvalidBlobType`);
+- every phase of every arm family sends what the model counts, request for request (a create as
+  above), with nothing else and no retries.
 
 `AzureTest` runs the same contract against Azure when `RMOW_AZURE_ROOT` names a prefix in a
-container. `org.rmow.bench.micro.AzureSpike <abfss://...>` measures latencies: Put Blobs against
-Append Blocks from 64 KiB to 32 MiB, creates and HEADs, GETs of Append Blobs of 1 to 1000 blocks,
-and Iceberg's reads of a 32 MiB file against exact ones. `configs/azure-calibration-exact.json` and
-`-iceberg.json` are the calibration runs, one per read path. Their Azurite twins
-(`-azurite.json`) give the requests each must send.
+container. `org.rmow.bench.micro.AzureSpike <abfss://...>` measures latencies, interleaved: Put
+Blobs, the store's own Append Blocks (conditioned on the length alone) and RMoW's (on the ETag
+too), from 64 KiB to 32 MiB; creates (an empty Append Blob, the store's own appendable file, and
+RMoW's atomic one) and HEADs; GETs of Append Blobs of 1 to 1000 blocks; and Iceberg's ranged read
+of a 32 MiB file against the SDK's. `configs/azure-calibration.json` is the calibration run. Its
+Azurite twin (`-azurite.json`) gives the requests it must send, but for its creates: each costs a
+HEAD there where Azure's costs a rename.
 
-## On the atomicio fork (`-Pfork`)
+## Appends: the fork's atomic operations
 
 The atomicio fork's `SupportsAtomicOperations` is the conditional write its catalog commits
-through, and APPEND is RMoW's primitive. With `store.append` `fork`, on S3 or Azure, RMoW appends
-through it (`org.rmow.bench.fork.ForkAppenders`). Each write returns the next snapshot, holding a
-length and an ETag, and the appender keeps it, so appends chain:
+through, and APPEND is RMoW's primitive. Every store's appender is `AtomicAppender` over it:
+S3FileIO and ADLSFileIO implement it on the fork, and the local stores (`MemFileIO`,
+`PreadFileIO`) here, so local runs take the same path. Each write returns the next snapshot,
+holding a length and an ETag, and the appender keeps it, so appends chain:
 - **An append** is one request, at the snapshot's length and conditioned on its ETag: a PutObject
   on S3 Express, an Append Block on ADLS. Of several writers appending to one version, exactly one
-  lands.
+  lands. Where the store caps an append (Azure's Append Block, 100 MiB), it is several, in order.
 - **A new appendable file** is a CAS from a snapshot that has seen nothing, which assumes the
   object is absent and sends no lookup (every RMoW file has a name of its own):
   - on S3, one PutObject with `If-None-Match: *`;
   - on ADLS, a temporary Append Blob (created, then one Append Block) renamed onto the file with
     `If-None-Match: *`. An Append Blob is created empty, so only the rename makes the create all or
-    nothing; the store's own appender (`append none`) creates the file in place, in two requests.
+    nothing: one request more than the store's own way, an empty Append Blob and its first block.
+  - on the local filesystem, a temporary file renamed onto the file.
 
   The model counts it as one PUT.
 
-That code needs the fork's API, so it is in `src/fork/java`, which only `-Pfork` compiles. A
-`-Pfork` build goes to `target-fork/`, so `target/`, which `bin/run.sh` runs, stays on the
-release:
+`prepare()` reads the content once for its checksum (CRC32C on S3 and locally, MD5 on ADLS), so a
+write's CPU includes it on every store. Emulators lack part of the API, and run RMoW's appendable
+arms on stand-ins (`EmulatorAppenders`, above); a store on a cloud endpoint never uses them.
 
-```bash
-mvn -Pfork test
-```
+The fork's own contract (`SupportsAtomicOperationsContractTest`, from its test jar) runs against
+both local stores (`LocalAtomicContractTest`): creates, replaces and appends pinned to the
+version a snapshot saw, and serial and concurrent races with one winner. `AtomicAppenderTest`
+checks the appender, and that it sends no lookup. Against the services, `S3ExpressTest` and
+`AzureTest` check it; the spikes time it against the stores' own requests.
 
-It builds on `atomicio`'s build (`1.12.0-atomicio-SNAPSHOT`), the one fileio-catalog uses;
-`-Diceberg.version` picks another. `atomicio` has the fixes RMoW needs:
+`atomicio` has the fixes RMoW needs, beyond the API:
 - ADLS reads open nothing until they read, and ask for exactly their range;
-- S3 and ADLS appends to a snapshot send no lookup;
+- S3 and ADLS appends to a snapshot send no lookup, and a create from a snapshot that has seen
+  nothing sends none either;
 - S3's `prepare()` no longer needs commons-io, which Iceberg does not ship.
 
 The two read fixes are upstream performance bugs: the reads fetch more than they need, but return
 the right bytes. So they are on `atomicio`, not `core-fixes`, which holds correctness fixes.
 
-On the fork, Iceberg's own ADLS reads (`adlsReads: iceberg`) send the model's GETs.
-`AzureStoreContract` checks that, and `ForkAppendersTest` checks the appender on an in-memory
-store. The fork appender's runs need the real services: `AzureTest`, since Azurite cannot rename,
-and `S3ExpressTest`. One difference remains: the SDK downloads a sequential read's 4 MiB chunk
-whole, so RMoW's read bytes exceed the model's by about 15% in the test runs.
+Against the release, a run on the fork differs in one byte count: Puffin files name the build
+that wrote them (`created-by`), and `1.12.0-atomicio-SNAPSHOT` is 18 bytes longer than `1.12.0`.
+So MoR-v3's and TailCoW-C's DV files are 18 bytes larger than in runs before 2026-10-26; every
+request, and every other byte, is the same (checked on 7 arms, 2026-10-26).
 
 For latency, a configuration can set more things, and a run can log its requests:
 - **`warmup`** runs a small op log on the in-memory store before the measured run, so the JIT has
@@ -337,8 +345,8 @@ has what they showed.
 | `rmow` | The append layer: `OffsetOutputFile` (the stock writer, with positions starting at the object's length), `RegionWriter`, `FooterCodec` (merging Thrift footers), `VersionedInputFile` (one version's view, with the optional footer prefetch), `LogicalFile` with its two layouts `RmowFile` (appendable) and `SplitFile` (an object per version), and `ParquetReads` (the one read path every arm uses). |
 | `arms` | `MorArm` (with the subclasses `MorV2Arm`, `MorV3Arm`, `CowArm` and `TailCowArm`), `RmowArm`, `TailPolicy`, `DataFileWriter` and `InitialLoad`. |
 | `workload`, `oracle` | The seeded op log and the reference model. |
-| `io` | `MemFileIO`, `PreadFileIO`, `TracingFileIO`, `IoTrace`, `RelocatedFileIO` (a run's logical paths on its own prefix), the SDK recorders (`SdkRecorder`: `S3Recorder`, `AzureRecorder`), and for Azure `AdlsClients` and `ExactAdlsFileIO`. |
-| `append` | `RegionAppender`, `S3Appenders` (S3 Express at a write offset; emulated) and `AzureAppenders` (Append Blobs). |
+| `io` | `MemFileIO` and `PreadFileIO` (with the fork's atomic operations), `TracingFileIO`, `IoTrace`, `RelocatedFileIO` (a run's logical paths on its own prefix), the SDK recorders (`SdkRecorder`: `S3Recorder`, `AzureRecorder`), and for Azure `AdlsClients`. |
+| `append` | `RegionAppender`, `AtomicAppender` (every store's, through the fork's `SupportsAtomicOperations`) and `EmulatorAppenders` (the emulators' stand-ins). |
 | `bench` | `Runner`, `Phases`, `Store` (mem, local, S3 or Azure) and `Main`; `arms.VersionDump` and `rmow.VersionDigest` dump every version for the interop check. |
 | `micro` | JMH micro-benchmarks (`FooterBench`), and the cloud spikes (`S3ExpressSpike`, `AzureSpike`). |
 | `analysis/` | `interop_check.py` (pyarrow and DuckDB), `summary.py`, `plots.py` (figures and a table twin of each), `sweep.py` (runs that differ in row-group size), `layouts.py` (appendable against split files), `compaction.py` (runs that differ in compaction policy: each arm's cheapest policy per read rate and price model), and `compare_runs.py` (exact repeatability). |

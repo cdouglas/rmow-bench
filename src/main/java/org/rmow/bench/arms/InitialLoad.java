@@ -68,8 +68,8 @@ public final class InitialLoad {
 
   /**
    * Copies the initial files under {@code prefix} (setup I/O: untraced). An arm that appends to
-   * them passes its store's appender, which creates objects it can extend (on Azure, Append
-   * Blobs); others pass null.
+   * them passes its store's appender, which creates objects it can extend (on ADLS, Append Blobs)
+   * and keeps their snapshots; others pass null.
    */
   public static List<InitialFile> copy(
       FileIO io, List<InitialFile> files, String prefix, RegionAppender appender)
@@ -83,7 +83,7 @@ public final class InitialLoad {
         IOUtil.readFully(in, bytes, 0, bytes.length);
       }
       if (appender != null) {
-        appender.create(io, location, bytes);
+        appender.create(location, bytes);
       } else {
         try (OutputStream out = io.newOutputFile(location).createOrOverwrite()) {
           out.write(bytes);
