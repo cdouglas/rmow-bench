@@ -142,10 +142,14 @@ leave them out.
     0.8 MB; TailCoW-C 12.2 GETs, 2.0 PUTs, 0.6 MB and 0.1 MB. A full read (`cached`) takes 33
     GETs and 9.0 MB, and 26 GETs and 7.0 MB with `cached-skip`: TailCoW-C's bytes, in 2 GETs
     fewer.
-  - **Open: the writer's scans are stock.** `locate` takes 13.5 GETs a batch against TailCoW-C's
-    8.7, since it fetches dead row groups. Batch files that hold rewritten rows also span wider id
-    ranges, so more files may hold a target. A writer that skips dead row groups, as the reader
-    can, would cut it. It is not built: the writers of every arm read alike (rule 6).
+  - **A writer that skips dead row groups** (`layout.writerSkipsDeadRowGroups`, built
+    2026-10-27, off by default). The MoR family's writers (locate scans, merge reads, compaction)
+    then read no row group the file's deletes cover whole, as the `skipDeadRowGroups` reader
+    does. With it, RMoR-C's `locate` takes 9.2 GETs a batch instead of 13.5 (TailCoW-C: 8.7), and
+    a batch 11.9 GETs instead of 16.2 (TailCoW-C: 12.2), writing the same. It changed no other
+    arm's request or byte, on the calibration's workload and on a 7-arm configuration. It stays
+    off by default, Iceberg as shipped (decided 2026-10-27); configurations that report RMoR set it,
+    with the `cached-skip` reader beside a stock one. None exists yet.
 - [x] **A reader that skips row groups a DV covers whole** (`reads.readers[].skipDeadRowGroups`,
   the `cached-skip` model; built 2026-10-27). Before planning a file's splits, it
   checks the file's deletes, loaded once (through the read's delete cache, so its tasks reuse

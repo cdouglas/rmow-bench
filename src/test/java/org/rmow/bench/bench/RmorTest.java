@@ -129,6 +129,29 @@ class RmorTest {
         .isLessThan(sum(steps, "rmor-c", "read_full", "cached", "bytes_read"));
   }
 
+  /**
+   * A writer that skips the row groups its deletes cover whole reads less to locate and merge
+   * RMoR's rows, and writes the same.
+   */
+  @Test
+  void aWriterThatSkipsDeadRowGroupsReadsLess(@TempDir Path dir) throws IOException {
+    long[] read = new long[2];
+    long[] written = new long[2];
+    for (int i = 0; i < 2; i++) {
+      BenchConfig cfg = config(0);
+      cfg.arms = List.of("rmor-c");
+      cfg.reads.readers = List.of(BenchConfig.ReaderSpec.skipping());
+      cfg.layout.writerSkipsDeadRowGroups = i == 1;
+      Path d = dir.resolve("skip-" + i);
+      Files.createDirectories(d);
+      List<JsonNode> steps = run(cfg, d);
+      read[i] = sum(steps, "rmor-c", "batch", null, "bytes_read");
+      written[i] = sum(steps, "rmor-c", "batch", null, "bytes_written");
+    }
+    assertThat(read[1]).as("batches' reads, skipping").isLessThan(read[0]);
+    assertThat(written[1]).as("batches' writes").isEqualTo(written[0]);
+  }
+
   /** Between 0 and 1, a batch rewrites only the regions it changes enough of. */
   @Test
   void aShareRewritesFewerRegions(@TempDir Path dir) throws IOException {

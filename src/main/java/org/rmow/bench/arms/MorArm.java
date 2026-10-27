@@ -9,12 +9,14 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Consumer;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.MetadataColumns;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.data.Record;
+import org.apache.iceberg.deletes.PositionDeleteIndex;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.InclusiveMetricsEvaluator;
@@ -476,6 +478,12 @@ public abstract class MorArm implements Arm {
     scan(df, seq, liveDeletes, Rows.SCHEMA, filter, rows);
   }
 
+  /**
+   * With {@code writerSkipsDeadRowGroups}, the writer reads no row group the file's deletes cover
+   * whole, and no file whose DV covers every row, as the {@code skipDeadRowGroups} reader plans its
+   * splits: the deletes loaded once, checked against the footer the writer holds. A file of at most
+   * 1 MiB, fetched whole, is skipped only whole.
+   */
   private void scan(
       DataFile df,
       long seq,
@@ -484,17 +492,30 @@ public abstract class MorArm implements Arm {
       Expression filter,
       Consumer<Record> rows)
       throws IOException {
-    Scans.scan(
-        ctx,
-        Reader.writer(ctx.layout()),
-        df,
-        deletesFor(df, seq, liveDeletes),
-        projection,
-        filter,
-        footers.tail(df.location(), df.fileSizeInBytes()),
-        -1,
-        -1,
-        rows);
+    Reader writer = Reader.writer(ctx.layout());
+    DeleteFile[] ds = deletesFor(df, seq, liveDeletes);
+    byte[] tail = footers.tail(df.location(), df.fileSizeInBytes());
+    if (ctx.layout().writerSkipsDeadRowGroups && ds.length > 0) {
+      if (Scans.deadWhole(df, ds)) {
+        return;
+      }
+      if (tail != null) {
+        Map<String, PositionDeleteIndex> loaded = new HashMap<>(); // the deletes, once per scan
+        Set<Long> dead =
+            Scans.deadRowGroups(ctx, writer.footerPrefetchBytes(), df, ds, tail, loaded);
+        if (dead.isEmpty()) {
+          Scans.scan(ctx, writer, df, ds, projection, filter, tail, -1, -1, loaded, rows);
+          return;
+        }
+        for (long[] g : Scans.rowGroups(tail)) {
+          if (!dead.contains(g[2])) {
+            Scans.scan(ctx, writer, df, ds, projection, filter, tail, g[2], g[3], loaded, rows);
+          }
+        }
+        return;
+      }
+    }
+    Scans.scan(ctx, writer, df, ds, projection, filter, tail, -1, -1, rows);
   }
 
   /** The live bytes of one delete file (a DV counts its blob, not its whole Puffin file). */

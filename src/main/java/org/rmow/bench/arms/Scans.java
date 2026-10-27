@@ -7,9 +7,10 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutionException;
@@ -245,12 +246,67 @@ final class Scans {
 
   /** Whether a file's DV covers every row, as its record count says without a read. */
   private static boolean deadWhole(ReadFile f) {
-    for (DeleteFile d : f.deletes()) {
-      if (d.format() == FileFormat.PUFFIN && d.recordCount() >= f.file().recordCount()) {
+    return deadWhole(f.file(), f.deletes());
+  }
+
+  /** Whether {@code df}'s DV covers every row, as its record count says without a read. */
+  static boolean deadWhole(DataFile df, DeleteFile[] deletes) {
+    for (DeleteFile d : deletes) {
+      if (d.format() == FileFormat.PUFFIN && d.recordCount() >= df.recordCount()) {
         return true;
       }
     }
     return false;
+  }
+
+  /** A version's row groups, from its tail: each {first row, rows, start offset, size}. */
+  static List<long[]> rowGroups(byte[] tail) {
+    List<RowGroup> rgs = FooterCodec.read(tail, 0, tail.length - 8).getRow_groups();
+    List<long[]> groups = new ArrayList<>(rgs.size());
+    long first = 0;
+    for (RowGroup rg : rgs) {
+      groups.add(
+          new long[] {
+            first, rg.getNum_rows(), FooterCodec.startOffset(rg), FooterCodec.compressedSize(rg)
+          });
+      first += rg.getNum_rows();
+    }
+    return groups;
+  }
+
+  /**
+   * The start offsets of {@code df}'s row groups that its deletes cover whole: the deletes loaded
+   * once (through {@code deleteCache}, if not null, so later scans reuse them), checked against the
+   * row groups of {@code tail}.
+   */
+  static Set<Long> deadRowGroups(
+      ArmContext ctx,
+      int footerPrefetch,
+      DataFile df,
+      DeleteFile[] deletes,
+      byte[] tail,
+      Map<String, PositionDeleteIndex> deleteCache) {
+    FileScanTask task =
+        new BaseFileScanTask(
+            df,
+            deletes,
+            SCHEMA_JSON,
+            SPEC_JSON,
+            ResidualEvaluator.unpartitioned(Expressions.alwaysTrue()));
+    LengthAwareDeleteFilter filter =
+        new LengthAwareDeleteFilter(
+            ctx.io(), task, Rows.SCHEMA, Rows.SCHEMA, footerPrefetch, deleteCache);
+    PositionDeleteIndex deleted = filter.deletedRowPositions();
+    if (deleted == null || deleted.isEmpty()) {
+      return Set.of();
+    }
+    Set<Long> dead = new HashSet<>();
+    for (long[] g : rowGroups(tail)) {
+      if (coversAll(deleted, g[0], g[1])) {
+        dead.add(g[2]);
+      }
+    }
+    return dead;
   }
 
   /**
@@ -265,23 +321,16 @@ final class Scans {
       List<FileScanTask> splits,
       byte[] tail,
       Map<String, PositionDeleteIndex> deleteCache) {
-    PositionDeleteIndex deleted =
-        new LengthAwareDeleteFilter(
-                ctx.io(), task, Rows.SCHEMA, Rows.SCHEMA, reader.footerPrefetchBytes(), deleteCache)
-            .deletedRowPositions();
-    if (deleted == null || deleted.isEmpty()) {
+    Set<Long> dead =
+        deadRowGroups(
+            ctx, reader.footerPrefetchBytes(), task.file(), task.deletes().toArray(new DeleteFile[0]),
+            tail, deleteCache);
+    if (dead.isEmpty()) {
       return splits;
-    }
-    Map<Long, long[]> rowsAt = new HashMap<>(); // row group start -> {first row, rows}
-    long first = 0;
-    for (RowGroup rg : FooterCodec.read(tail, 0, tail.length - 8).getRow_groups()) {
-      rowsAt.put(FooterCodec.startOffset(rg), new long[] {first, rg.getNum_rows()});
-      first += rg.getNum_rows();
     }
     List<FileScanTask> live = new ArrayList<>(splits.size());
     for (FileScanTask s : splits) {
-      long[] g = rowsAt.get(s.start());
-      if (g == null || !coversAll(deleted, g[0], g[1])) {
+      if (!dead.contains(s.start())) {
         live.add(s);
       }
     }

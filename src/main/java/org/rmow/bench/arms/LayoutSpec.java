@@ -97,6 +97,13 @@ public final class LayoutSpec {
    * TailCoW-C.
    */
   public double rmorRewriteShare = 0;
+  /**
+   * The MoR family's writers (their scans to locate rows, merge reads and compaction) read no row
+   * group the file's deletes cover whole, nor any file whose DV covers every row, as the {@code
+   * skipDeadRowGroups} reader does. Off: as Iceberg's MERGE scans, which fetch such row groups and
+   * drop their rows one by one.
+   */
+  public boolean writerSkipsDeadRowGroups = false;
 
   /** The Parquet writer properties for data files. */
   public Map<String, String> writerProperties() {

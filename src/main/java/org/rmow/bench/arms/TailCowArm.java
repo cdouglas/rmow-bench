@@ -14,10 +14,7 @@ import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.data.Record;
 import org.apache.iceberg.io.InputFile;
-import org.apache.parquet.format.FileMetaData;
-import org.apache.parquet.format.RowGroup;
 import org.rmow.bench.io.MemFileIO;
-import org.rmow.bench.rmow.FooterCodec;
 import org.rmow.bench.workload.OpLog;
 import org.rmow.bench.workload.Rows;
 
@@ -227,18 +224,7 @@ public final class TailCowArm extends MorArm {
     if (df.splitOffsets() == null || df.splitOffsets().size() <= 1) {
       return List.of(new long[] {0, df.recordCount(), -1, -1});
     }
-    byte[] tail = tailOf(k);
-    FileMetaData footer = FooterCodec.read(tail, 0, tail.length - 8);
-    List<long[]> groups = new ArrayList<>(footer.getRow_groupsSize());
-    long first = 0;
-    for (RowGroup rg : footer.getRow_groups()) {
-      groups.add(
-          new long[] {
-            first, rg.getNum_rows(), FooterCodec.startOffset(rg), FooterCodec.compressedSize(rg)
-          });
-      first += rg.getNum_rows();
-    }
-    return groups;
+    return Scans.rowGroups(tailOf(k));
   }
 
   /**
