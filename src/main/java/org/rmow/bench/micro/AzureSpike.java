@@ -8,6 +8,7 @@ import com.azure.storage.blob.models.BlobItem;
 import com.azure.storage.blob.models.BlobRange;
 import com.azure.storage.blob.models.ListBlobsOptions;
 import com.azure.storage.blob.specialized.AppendBlobClient;
+import com.azure.storage.blob.specialized.BlobClientBase;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.BufferedWriter;
 import java.io.ByteArrayInputStream;
@@ -20,8 +21,11 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.SplittableRandom;
 import org.apache.iceberg.azure.adlsv2.ADLSFileIO;
 import org.apache.iceberg.io.RangeReadable;
@@ -50,6 +54,10 @@ import org.rmow.bench.io.AdlsClients;
  *       Append Block of 64 KiB, the store's own way to create an appendable file),
  *       <b>create_sao</b> (the fork's atomic create of 64 KiB: a staged Append Blob, an Append Block
  *       and a rename; not on an emulator, which cannot rename) and <b>head</b>, {@code reps} each;
+ *   <li><b>get_size</b> and <b>get_range</b>: GETs by size, 64 KiB to 32 MiB, doubling, for the
+ *       read rate per MiB: the block blobs the Put Blobs above wrote, read whole, and the same
+ *       sizes read as a range from the middle of a 32 MiB one (as a row group is read), {@code
+ *       reps} each, interleaved over the sizes;
  *   <li><b>get_full</b>, <b>get_tail</b> and <b>get_mid</b>: Append Blobs of 1, 10, 100 and 1000
  *       blocks of 64 KiB, read whole, as their last 64 KiB, and as 64 KiB from the middle;
  *   <li><b>iceberg_open</b> and <b>iceberg_mid</b>: Iceberg's reads of a 32 MiB file through
@@ -78,6 +86,8 @@ public final class AzureSpike {
   private final ObjectMapper json = new ObjectMapper();
   private final SplittableRandom random = new SplittableRandom(1);
   private int objects = 0;
+  // the Put Blobs' block blobs, by size, one per rep
+  private final Map<Integer, List<String>> puts = new TreeMap<>();
 
   private AzureSpike(
       AdlsClients clients,
@@ -144,6 +154,7 @@ public final class AzureSpike {
       AzureSpike spike = new AzureSpike(clients, adls, !endpoint.isEmpty(), prefix, reps, w);
       try {
         spike.putsAndAppends();
+        spike.getsBySize();
         spike.createsAndHeads();
         spike.getsByBlocks();
         spike.icebergReads();
@@ -211,6 +222,7 @@ public final class AzureSpike {
         long t = System.nanoTime();
         clients.blockBlob(loc).upload(BinaryData.fromBytes(body), true);
         record("put", size, 1, i, System.nanoTime() - t);
+        puts.computeIfAbsent(size, k -> new ArrayList<>()).add(loc);
 
         t = System.nanoTime();
         ownLength = appendBlock(own, ownLength, body);
@@ -250,12 +262,33 @@ public final class AzureSpike {
   }
 
   private byte[] get(String location, long offset, long count) {
+    return get(clients.appendBlob(location), offset, count);
+  }
+
+  private static byte[] get(BlobClientBase blob, long offset, long count) {
     ByteArrayOutputStream b = new ByteArrayOutputStream();
-    clients
-        .appendBlob(location)
-        .downloadStreamWithResponse(
-            b, new BlobRange(offset, count), null, null, false, null, Context.NONE);
+    blob.downloadStreamWithResponse(
+        b, new BlobRange(offset, count), null, null, false, null, Context.NONE);
     return b.toByteArray();
+  }
+
+  /** GETs by size, of the Put Blobs' blobs: whole, and as ranges of the largest. */
+  private void getsBySize() throws IOException {
+    int largest = 32 * KIB * KIB;
+    for (int i = 0; i < reps; i++) {
+      BlobClientBase big = clients.blockBlob(puts.get(largest).get(i));
+      for (Map.Entry<Integer, List<String>> e : puts.entrySet()) {
+        int size = e.getKey();
+        long t = System.nanoTime();
+        int n = get(clients.blockBlob(e.getValue().get(i)), 0, size).length;
+        record("get_size", n, 1, i, System.nanoTime() - t);
+
+        t = System.nanoTime();
+        n = get(big, (largest - size) / 2, size).length;
+        record("get_range", n, 1, i, System.nanoTime() - t);
+      }
+      out.flush();
+    }
   }
 
   private void getsByBlocks() throws IOException {

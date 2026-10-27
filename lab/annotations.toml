@@ -46,9 +46,9 @@ select = ["s3x-*"]
 title = "Footer micro-benchmarks (JMH)"
 select = ["source:micro"]
 
-[campaigns.twins-fork]
-title = "The calibration's twins on the fork build, every store appending through SupportsAtomicOperations (docs/AZURE_RUNBOOK.md, docs/S3X_RUNBOOK.md)"
-select = ["azure-calibration-azurite-02879401d0c8/*", "s3x-calibration-local-424bf5d32c80/*"]
+[campaigns.twins-five]
+title = "The calibration's twins with the five arms (RMoR-C and RMoW-C-split in, MoR-v2-file, RMoW-A and -B out), cached-skip and GETs by size (docs/AZURE_RUNBOOK.md, docs/S3X_RUNBOOK.md)"
+select = ["azure-calibration-azurite-fa985c0f0fe1/*", "s3x-calibration-local-7596607f5035/*"]
 
 [[annotate]]
 select = "smoke-*"

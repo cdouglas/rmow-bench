@@ -53,10 +53,9 @@ iceberg`) on builds before 2026-10-26. It needs such a build now, and is optiona
   like 8 vCPUs and 16 GiB (D8s v5), with Java 17, Maven and git, and the atomicio fork's build in
   its local Maven repository (built there, or `~/.m2/repository/org/apache/iceberg` copied from
   here).
-  - **Counters:** instruction counters need a PMU, which many cloud VM sizes do not expose, and
-    `kernel.perf_event_paranoid` at most 2. Without them each manifest says why
-    (`host.thread_counters`), and CPU falls back to thread time. That is enough here: this run
-    checks requests and latencies, and each phase is compared with its own CPU.
+  - **Any VM size:** the run measures wall time, so it needs no instruction counters. It needs the
+    thread CPU clock to agree with the wall clock, which the manifest records
+    (`host.thread_cpu_per_wall`, 1 where they agree).
 - **Credentials** from the VM's managed identity, with **Storage Blob Data Contributor** on the
   account. The SDK's default chain finds them; no configuration holds them.
 - **Cost.** The workload is small: about 10,000 requests per calibration run, and a few thousand
@@ -72,7 +71,6 @@ git clone -b atomicio git@github.com:cdouglas/iceberg.git
 git clone git@github.com:cdouglas/rmow-bench.git && cd rmow-bench
 git checkout <the commit the run is registered against>
 mvn -q package -DskipTests
-cat /proc/sys/kernel/perf_event_paranoid          # counters if <= 2 and the VM has a PMU
 
 ROOT=abfss://<container>@<account>.dfs.core.windows.net/rmow-bench
 
@@ -86,9 +84,10 @@ ROOT=abfss://<container>@<account>.dfs.core.windows.net/rmow-bench
 RMOW_AZURE_ROOT=$ROOT/test mvn test -Dtest=AzureTest
 
 # 2. The spike: Put Blobs, the store's own Append Blocks and RMoW's (the fork's), from 64 KiB to
-#    32 MiB, interleaved; creates (an empty Append Blob, the store's own appendable file, RMoW's
-#    atomic one) and HEADs; GETs of Append Blobs of 1 to 1000 blocks; and Iceberg's ranged read
-#    of a 32 MiB file against the SDK's. Writes results/spike/azure-spike-<UTC>/spike.jsonl,
+#    32 MiB, interleaved; GETs of the Put Blobs' blobs by size, whole and as ranges of a 32 MiB
+#    one; creates (an empty Append Blob, the store's own appendable file, RMoW's atomic one) and
+#    HEADs; GETs of Append Blobs of 1 to 1000 blocks; and Iceberg's ranged read of a 32 MiB file
+#    against the SDK's. Writes results/spike/azure-spike-<UTC>/spike.jsonl,
 #    deletes its objects
 java -cp "target/rmow-bench-0.1.0-SNAPSHOT.jar:target/lib/*" \
   org.rmow.bench.micro.AzureSpike $ROOT/spike --reps 20
@@ -145,6 +144,8 @@ docker stop rmow-azurite
 - **A measured profile.** The spike gives:
   - medians and lognormal sigmas per operation and size, as `store_profiles` holds them;
   - what the fork's writes cost: `append_sao` against `append`, `create_sao` against `create_own`;
+  - the read rate per MiB, the slope of `get_size` and `get_range` over 64 KiB to 32 MiB: the
+    profile assumes it equal to the write rate;
   - a GET's extra latency per appended block, from the 1- to 1000-block blobs;
   - what Iceberg's ranged read costs against the SDK's alone (`iceberg_mid`, `get_mid_32m`).
 - **Where the time went.** `phase_breakdown` splits each phase into encoding, decoding,
@@ -158,52 +159,51 @@ docker stop rmow-azurite
 
 ## Hypotheses (DRAFT, to register before the run)
 
-They overlap the held H1 draft's L1–L4 and the S3 Express draft's X1–X5 in docs/HYPOTHESES.md,
-and should be registered with them, in one dated section, once reviewed. The predicted numbers
+They are drafted for registration, with X1–X6, in docs/HYPOTHESES.md (Added 2026-10-27, before
+the calibration runs), for review. Z4 tests the held H1 draft's L4 on one run. The predicted numbers
 come from the Azurite twins priced with the `azure` profile (`sdk_latency`; below).
 
 ### The twins' predictions
 
 The predictions come from the Azurite twin on the build the cloud run uses, 2026-10-27 (commit
-63b1703, the atomicio fork at af875ccfd1; build snapshot `20261027T041701Z-63b1703b36df-dirty`,
-dirty only with the held H1 draft). It and the local twin are campaign `twins-fork`:
-- `azure-calibration-azurite-02879401d0c8/20261027T041701Z`;
-- `s3x-calibration-local-424bf5d32c80/20261027T042004Z`.
+d6d6f0b plus the uncommitted generator, clock and spike changes, which the build snapshot
+`20261027T073121Z-d6d6f0b44523-dirty` holds as a diff, and the held H1 draft; the atomicio fork
+at af875ccfd1). It and the local twin are campaign `twins-five`:
+- `azure-calibration-azurite-fa985c0f0fe1/20261027T073122Z`;
+- `s3x-calibration-local-7596607f5035/20261027T073342Z`.
 
 The query is `sdk_latency`, profile `azure`. Means are over batches 1–20 and the full-read probes
-after the initial load, under `cached`. CPU is each twin's modeled time on this laptop
-(`phase_work`).
+after the initial load, under `cached` (RMoR-C also under `cached-skip`). CPU is each twin's
+modeled time on this laptop (`phase_work`), on the wall clock (`run_clock`, 1.1117 for this run).
 
-**What it sends.** Every phase sent what the model counts: GETs, HEADs and bytes read, in batches
-and full reads alike. The twin's model requests and bytes equal the local twin's in all 922
-records (`steps_diff`). No batch creates a file in this configuration, so the one way Azurite's
+**What it sends.** Every phase sent what the model counts, 10,136 requests in all, with no
+retries. The twin's model requests and bytes equal the local twin's in all 842 records
+(`steps_diff`), and MoR-v3's, TailCoW-C's and RMoW-C's equal those of the twins they replace in
+every record they share. No batch creates a file in this configuration, so the one way Azurite's
 creates differ from Azure's (a HEAD where Azure renames) does not enter.
 
-| Arm, phase | GETs and HEADs | MB read |
-|---|---|---|
-| MoR-v3, a batch | 29.4 | 0.64 |
-| RMoW-C, a batch | 6.3 | 0.80 |
-| MoR-v3, a full read | 46.0 | 7.2 |
-| RMoW-C, a full read | 24.5 | 6.9 |
+| Arm | A batch: GETs and HEADs | PUTs and appends | MB read | MB written | A full read: GETs | MB read |
+|---|---|---|---|---|---|---|
+| MoR-v3 | 29.4 | 2.0 | 0.64 | 0.08 | 46.0 | 7.2 |
+| TailCoW-C | 13.1 | 2.0 | 0.62 | 0.13 | 28.0 | 7.0 |
+| RMoR-C | 12.3 | 1.4 | 1.56 | 1.02 | 33.0 (`cached-skip`: 26.0) | 9.0 (7.0) |
+| RMoW-C | 6.3 | 1.0 | 0.80 | 0.84 | 24.5 | 6.9 |
+| RMoW-C-split | 5.4 | 2.0 | 3.26 | 0.86 | 21.0 | 6.9 |
 
 **Simulated time on the `azure` profile (ms):**
 
 | Arm | A batch | A full read |
 |---|---|---|
-| MoR-v3 | 1,564 | 2,593 |
-| TailCoW-C | 789 | 1,722 |
-| RMoW-B | 473 | 1,413 |
-| RMoW-C | 588 | 1,532 |
-| **RMoW-C ÷ MoR-v3** | **0.38** | **0.59** |
+| MoR-v3 | 1,554 | 2,549 |
+| TailCoW-C | 780 | 1,684 |
+| RMoR-C | 850 | 2,006 (`cached-skip`: 1,580) |
+| RMoW-C | 560 | 1,510 |
+| RMoW-C-split | 586 | 1,354 |
+| **RMoW-C ÷ MoR-v3** | **0.36** | **0.59** |
 
-They are within 3% of the release build's twins (2026-10-26, exact reads: 0.37 and 0.59).
-
-**The CPU term is probably 11% high.** The laptop's thread CPU clock runs 11.1% fast against its
-wall clock (manifest `host.thread_cpu_per_wall`, 1.111), and `phase_work` turns instructions into
-time with thread CPU time. The wall clock, synchronized with the host, is the likelier to be right.
-With CPU on the wall clock RMoW-C takes 572 and 1,511 ms and MoR-v3 1,558 and 2,569 ms: ratios of
-0.37 and 0.59. Requests dominate on Azure, so the correction is 1–3%; it matters more where CPU
-dominates (S3 Express).
+The ratios are within 3% of the twins they replace (0.37 and 0.59 with CPU on the wall clock;
+0.38 and 0.59 before; deleted, their figures in EXPERIMENTS.md, Retired runs). RMoW-C's batch requests and bytes are the same there; its modeled CPU
+differs by 2%, the measure's spread between runs.
 
 **Iceberg's reads as shipped,** for Z6 only, from the release build's twin
 (`azure-calibration-iceberg-azurite-bbc35d39598f/20261026T055554Z`, retired 2026-10-27; its
@@ -225,7 +225,7 @@ RMoW-C's. Simulated, RMoW-C ÷ MoR-v3 was 0.54 for a batch and 0.91 for a full r
   run is within 25% of its wall time. This is the H1 draft's L4, on Azure.
 - **Z5: RMoW-C beats MoR-v3 where requests dominate.** In the calibration run, RMoW-C's mean
   batch and mean full read (`cached`, one thread) both take less wall time than MoR-v3's.
-  Predicted: 0.38× and 0.59× (0.37× and 0.59× with CPU on the wall clock).
+  Predicted: 0.36× and 0.59×.
 - **Z6: Iceberg's shipped reads cost RMoW more than MoR** (only with a run on a build before
   2026-10-26). In the Iceberg run, RMoW-C's full read is a larger fraction of MoR-v3's than in the
   exact run, predicted 0.91× against 0.59×. Its ranged reads at offsets over-read most: 23× the
@@ -233,3 +233,6 @@ RMoW-C's. Simulated, RMoW-C ÷ MoR-v3 was 0.54 for a batch and 0.91 for a full r
 - **Z7: the fork's conditions cost nothing measurable.** At every size, the median `append_sao`
   is within 10% of the median `append`. A `create_sao` costs about one request more than a
   `create_own`: its median is within 10% of `create_own`'s plus the median of a rename.
+- **Z8: reads cost what the profile assumes per MiB.** The slope of the median `get_size` over 1
+  to 32 MiB is within 50% of the `azure` profile's 25 ms per MiB, and at each size the median
+  `get_range` is within 20% of the median `get_size`.

@@ -19,10 +19,9 @@ service. It answers four questions:
 - **An EC2 instance in the same zone**, so the run measures the store, not the network. Something
   like 8 vCPUs and 16 GiB, with Java 17, Maven and git, and the atomicio fork's build in its local
   Maven repository (built there, or `~/.m2/repository/org/apache/iceberg` copied from here).
-  - **Instance type and counters:** instruction counters need a PMU, which only some EC2 types
-    expose (full-socket and metal sizes) and `kernel.perf_event_paranoid` at most 2. Without them
-    each manifest says why (`host.thread_counters`), and CPU falls back to thread time. That is
-    enough here: this run checks request latencies, not CPU.
+  - **Any instance type:** the run measures wall time, so it needs no instruction counters. It
+    needs the thread CPU clock to agree with the wall clock, which the manifest records
+    (`host.thread_cpu_per_wall`, 1 where they agree).
 - **Credentials** from the instance's role: `s3express:CreateSession`, and object read, write and
   delete on the bucket. The SDK's default chain finds them; no configuration holds them.
 - **Cost.** The workload is small: about 10,000 requests for the calibration run and a few
@@ -38,7 +37,6 @@ git clone -b atomicio git@github.com:cdouglas/iceberg.git
 git clone git@github.com:cdouglas/rmow-bench.git && cd rmow-bench
 git checkout <the commit the run is registered against>
 mvn -q package -DskipTests
-cat /proc/sys/kernel/perf_event_paranoid          # counters if <= 2 and the instance has a PMU
 
 ROOT=s3://<bucket>--<az id>--x-s3/rmow-bench
 export AWS_REGION=<region>
@@ -55,7 +53,8 @@ export AWS_REGION=<region>
 RMOW_S3X_ROOT=$ROOT/test mvn test -Dtest=S3ExpressTest
 
 # 2. The spike: the store's own appends against RMoW's (the fork's), PUTs against RMoW's creates,
-#    from 64 KiB to 32 MiB, interleaved; and GETs of objects of 1 to 1000 appended parts. Writes
+#    from 64 KiB to 32 MiB, interleaved; GETs of the PUTs' objects by size, whole and as ranges of
+#    a 32 MiB one; and GETs of objects of 1 to 1000 appended parts. Writes
 #    results/spike/s3x-spike-<UTC>/spike.jsonl, deletes its objects
 java -cp "target/rmow-bench-0.1.0-SNAPSHOT.jar:target/lib/*" \
   org.rmow.bench.micro.S3ExpressSpike $ROOT/spike --reps 20
@@ -84,8 +83,21 @@ lab ingest
 
 The local twin, `configs/s3x-calibration-local.json`, differs only in the store. It is rerun on
 the build the cloud run uses, so its requests and bytes are what the cloud run must match. The
-current one is `s3x-calibration-local-424bf5d32c80/20261027T042004Z` (campaign `twins-fork`,
-commit 63b1703), rerun if the build changes before the run.
+current one is `s3x-calibration-local-7596607f5035/20261027T073342Z` (campaign `twins-five`;
+commit d6d6f0b plus the changes its build snapshot `20261027T073121Z-d6d6f0b44523-dirty` holds as
+a diff), rerun if the build changes before the run. On the `s3x` profile it simulates (ms; means
+over batches 1–20 and the full reads after the initial load, `cached`, CPU on the wall clock):
+
+| Arm | A batch | A full read |
+|---|---|---|
+| MoR-v3 | 134 | 369 |
+| TailCoW-C | 92 | 305 |
+| RMoR-C | 197 | 390 (`cached-skip`: 311) |
+| RMoW-C | 172 | 290 |
+| RMoW-C-split | 191 | 272 |
+
+CPU is 64–72% of the region arms' batches (MoR-v3's 20%, TailCoW-C's 36%) and 45–53% of every
+full read, so this run checks the model where CPU decides.
 
 ## What the analysis will do
 
@@ -95,6 +107,8 @@ commit 63b1703), rerun if the build changes before the run.
 - **A measured profile.** The spike gives:
   - medians and lognormal sigmas per operation and size, as `store_profiles` holds them;
   - what the fork's conditions cost: `append_sao` against `append`, `create_sao` against `put`;
+  - the read rate per MiB, the slope of `get_size` and `get_range` over 64 KiB to 32 MiB: the
+    profile assumes it equal to the write rate, and it is the largest I/O term of a full read;
   - a GET's extra latency per appended part, from the 1-, 10-, 100- and 1000-part objects.
 - **Where the time went.** `phase_breakdown` splits each phase into encoding, decoding,
   footers, deletes, other CPU, the store client's CPU, waiting on the store, and other waiting.
@@ -104,8 +118,8 @@ commit 63b1703), rerun if the build changes before the run.
 
 ## Hypotheses (DRAFT, to register before the run)
 
-They overlap the held H1 draft's L1–L4 in docs/HYPOTHESES.md, and should be registered with it,
-in one dated section, once reviewed.
+They are drafted for registration, with Z1–Z8, in docs/HYPOTHESES.md (Added 2026-10-27, before
+the calibration runs), for review. X4 tests the held H1 draft's L4 on one run.
 - **X1: the model counts what S3 Express receives.** Every phase's requests and bytes match the
   local twin's exactly. `CreateSession` is the only request the model does not hold.
 - **X2: the profile holds.** Median GET, PUT and append latencies (64 KiB) are within 50% of the
@@ -118,3 +132,7 @@ in one dated section, once reviewed.
   is within 10% of the median `append`, and the median `create_sao` within 10% of the median
   `put`. The requests are the same; only an ETag or absence condition, and the checksum
   `prepare()` computes, differ.
+- **X6: reads cost what the profile assumes per MiB.** The slope of the median `get_size` over 1
+  to 32 MiB is within 50% of the `s3x` profile's 10 ms per MiB, and at each size the median
+  `get_range` is within 20% of the median `get_size`: a row group read as a range costs what an
+  object of its size does.

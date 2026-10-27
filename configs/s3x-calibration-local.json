@@ -25,15 +25,15 @@
     "rowGroupBytes": 1048576,
     "targetFileBytes": 8388608,
     "tailSealBytes": 1048576,
-    "locate": "scan"
+    "locate": "scan",
+    "writerSkipsDeadRowGroups": true
   },
   "arms": [
-    "mor-v2-file",
     "mor-v3",
     "tailcow-c",
-    "rmow-a",
-    "rmow-b",
-    "rmow-c"
+    "rmor-c",
+    "rmow-c",
+    "rmow-c-split"
   ],
   "reads": {
     "every": 5,
@@ -50,6 +50,13 @@
         "footerCache": true,
         "deleteCache": true,
         "footerPrefetchBytes": 65536
+      },
+      {
+        "name": "cached-skip",
+        "footerCache": true,
+        "deleteCache": true,
+        "footerPrefetchBytes": 65536,
+        "skipDeadRowGroups": true
       },
       {
         "name": "cached-p8",

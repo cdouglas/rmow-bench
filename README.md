@@ -205,12 +205,14 @@ not in the model), and latency. Two things check them, given a directory bucket:
   - a run of every arm family matches the model, appends and bytes written included.
 - **`org.rmow.bench.micro.S3ExpressSpike <s3://bucket/prefix>`** measures latencies, interleaved:
   the store's own appends (a write offset alone) against RMoW's (the fork's, conditioned on the
-  ETag too), PUTs against RMoW's creates (conditioned on absence), from 64 KiB to 32 MiB; and GETs
-  (whole, last 64 KiB, middle 64 KiB) of objects of 1 to 1000 appended parts. It writes
+  ETag too), PUTs against RMoW's creates (conditioned on absence), from 64 KiB to 32 MiB; GETs by
+  size, of the PUTs' objects whole and as ranges of a 32 MiB one, for the read rate per MiB; and
+  GETs (whole, last 64 KiB, middle 64 KiB) of objects of 1 to 1000 appended parts. It writes
   `results/spike/s3x-spike-<UTC>/spike.jsonl`.
 
 `configs/s3x-calibration.json` is the first cloud run, to make once the bucket exists: a small
-workload and every default arm, from an EC2 instance in the bucket's zone. Its twin,
+workload and the five arms new campaigns run (MoR-v3, TailCoW-C, RMoR-C, RMoW-C and
+RMoW-C-split), from an EC2 instance in the bucket's zone. Its twin,
 `configs/s3x-calibration-local.json`, differs only in the store. Its requests and bytes are what
 the S3 Express run's model and SDK counts must match exactly, apart from `CreateSession`.
 
@@ -255,8 +257,9 @@ Block. The contract checks that:
 `AzureTest` runs the same contract against Azure when `RMOW_AZURE_ROOT` names a prefix in a
 container. `org.rmow.bench.micro.AzureSpike <abfss://...>` measures latencies, interleaved: Put
 Blobs, the store's own Append Blocks (conditioned on the length alone) and RMoW's (on the ETag
-too), from 64 KiB to 32 MiB; creates (an empty Append Blob, the store's own appendable file, and
-RMoW's atomic one) and HEADs; GETs of Append Blobs of 1 to 1000 blocks; and Iceberg's ranged read
+too), from 64 KiB to 32 MiB; GETs by size, of the Put Blobs' blobs whole and as ranges of a 32 MiB
+one; creates (an empty Append Blob, the store's own appendable file, and RMoW's atomic one) and
+HEADs; GETs of Append Blobs of 1 to 1000 blocks; and Iceberg's ranged read
 of a 32 MiB file against the SDK's. `configs/azure-calibration.json` is the calibration run. Its
 Azurite twin (`-azurite.json`) gives the requests it must send, but for its creates: each costs a
 HEAD there where Azure's costs a rename.

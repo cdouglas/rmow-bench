@@ -109,11 +109,12 @@ leave them out.
   - On the Azurite twin, process CPU exceeds thread CPU by 89–112 ms a phase: garbage
     collection, the JIT and the SDK's I/O threads. So "waiting" includes off-thread work.
   - Build it on the twins now, so the cloud results drop in.
-- [ ] **GETs by size in the spikes:** single-part objects of 64 KiB to 32 MiB, on both stores. The
-  read rate per MiB is assumed, and it is the biggest I/O term in S3 Express full reads. The
-  simulated bars need it.
-- [ ] **Drop the instruction-counter advice from the cloud runbooks.** The cloud runs measure wall
-  time.
+- [x] **GETs by size in the spikes** (done 2026-10-27): `get_size`, the PUTs' single-part objects
+  of 64 KiB to 32 MiB read whole, and `get_range`, the same sizes as ranges of a 32 MiB one, on
+  both stores, interleaved over sizes; checked on versitygw and Azurite. The read rate per MiB is
+  assumed, and it is the biggest I/O term in S3 Express full reads (draft X6, Z8).
+- [x] **Drop the instruction-counter advice from the cloud runbooks** (done 2026-10-27). The cloud
+  runs measure wall time; they need the clocks to agree (`host.thread_cpu_per_wall`).
 
 ## Arms
 
@@ -210,7 +211,9 @@ approach 1.
     it must leave hot ones alone.
   - Measure bytes rewritten per updated row, footer size and read GETs under the region skew.
 - [ ] **Register the hypotheses** before the cloud runs:
-  - the model checks (X1–X5 in S3X_RUNBOOK.md, Z1–Z7 in AZURE_RUNBOOK.md, the held H1 draft);
+  - the model checks: X1–X6 and Z1–Z8, drafted for registration in HYPOTHESES.md (Added
+    2026-10-27, before the calibration runs), awaiting review; the held H1 draft is a later
+    latency campaign, and stays held;
   - the sweeps' predictions.
 
   Comparisons are reported, not judged.
@@ -220,10 +223,11 @@ approach 1.
   - each configuration's local twin rerun on the same build.
 
   The configurations planned so far are only the calibration (`s3x-calibration`,
-  `azure-calibration`). Its twins were rerun on the fork build on 2026-10-27 (campaign
-  `twins-fork`), and the Azure predictions recomputed from them (AZURE_RUNBOOK.md): RMoW-C ÷
-  MoR-v3 is 0.38 for a batch and 0.59 for a full read, as before. The two twins' model requests
-  and bytes match in all 922 records, and every phase on Azurite sent what the model counts.
+  `azure-calibration`), with the five arms. Its twins were rerun on 2026-10-27 (campaign
+  `twins-five`, replacing `twins-fork`), and the Azure predictions recomputed from them
+  (AZURE_RUNBOOK.md): RMoW-C ÷ MoR-v3 is 0.36 for a batch and 0.59 for a full read. The two
+  twins' model requests and bytes match in all 842 records, every phase on Azurite sent what the
+  model counts, and the arms both twin pairs ran match in every record they share.
 - [x] **`phase_work`'s CPU was 11% high on the laptop** (found 2026-10-27; divided by the ratio,
   decided and done 2026-10-27). The thread CPU clock runs 11.1% fast against the wall clock there
   (WSL2; `host.thread_cpu_per_wall` in manifests from 2026-10-26), and `phase_work` turned
@@ -232,10 +236,12 @@ approach 1.
   1.1116), and `phase_work` and `phase_breakdown` divide by it. Modeled CPU fell 10.0%, simulated
   latencies 0.1–10%, and no verdict changed (EXPERIMENTS.md, Findings so far). Havoc's ratio is
   still unmeasured: its runs have no counters, so nothing there used it.
-- [ ] **The calibration configurations gain `rmow-c-split` and `rmor-c`**, and lose the arms new
-  campaigns leave out, after the generator's region skew and update share (decided 2026-10-26).
-  With `rmor-c` they set `writerSkipsDeadRowGroups` and read with `cached-skip` beside a stock
-  reader. Then the twins are rerun and the Azure predictions recomputed.
+- [x] **The calibration configurations gain `rmow-c-split` and `rmor-c`**, and lose the arms new
+  campaigns leave out, after the generator's region skew and update share (decided 2026-10-26,
+  done 2026-10-27). With `rmor-c` they set `writerSkipsDeadRowGroups` and read with `cached-skip`
+  beside the others, stock included. The twins were rerun and the Azure predictions recomputed
+  (`twins-five`). The calibration's workload is the ingest window, unchanged: its op log is the
+  same.
 
 ## Still open from before
 

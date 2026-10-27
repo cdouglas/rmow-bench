@@ -43,6 +43,10 @@ import software.amazon.awssdk.services.s3.model.S3Object;
  *       APPEND ({@link AtomicAppender}: a PutObject at the length, conditioned on the ETag) to
  *       another; PUTs of new objects; and RMoW's creates of new objects, a PUT conditioned on
  *       their absence ({@code If-None-Match: *});
+ *   <li><b>get_size</b> and <b>get_range</b>: GETs by size, 64 KiB to 32 MiB, doubling, for the
+ *       read rate per MiB: the single-part objects the PUTs above wrote, read whole, and the same
+ *       sizes read as a range from the middle of a 32 MiB one (as a row group is read), {@code
+ *       reps} each, interleaved over the sizes;
  *   <li><b>get_full</b>, <b>get_tail</b> and <b>get_mid</b>: objects of 1, 10, 100 and 1000 parts
  *       of 64 KiB (a PUT, then appends), read whole, as their last 64 KiB (a footer prefetch), and
  *       as 64 KiB from the middle, {@code reps} times each.
@@ -130,6 +134,7 @@ public final class S3ExpressSpike {
       S3ExpressSpike spike = new S3ExpressSpike(s3, bucket, prefix, reps, w);
       try {
         spike.appendsAndPuts();
+        spike.getsBySize();
         spike.getsByParts();
       } finally {
         spike.deleteAll();
@@ -219,6 +224,26 @@ public final class S3ExpressSpike {
             });
     io.initialize(Map.of());
     return io;
+  }
+
+  /** GETs by size, of the PUTs' objects: whole, and as ranges of the largest. */
+  private void getsBySize() throws IOException {
+    int largest = 32 * KIB * KIB;
+    for (int i = 0; i < reps; i++) {
+      String big = prefix + "/put-" + largest + "-" + i;
+      for (int size = PART; size <= largest; size *= 2) {
+        String key = prefix + "/put-" + size + "-" + i;
+        long t = System.nanoTime();
+        int n = s3.getObjectAsBytes(b -> b.bucket(bucket).key(key)).asByteArray().length;
+        record("get_size", n, 1, i, System.nanoTime() - t);
+
+        String range = "bytes=" + (largest - size) / 2 + "-" + ((largest - size) / 2 + size - 1);
+        t = System.nanoTime();
+        n = s3.getObjectAsBytes(b -> b.bucket(bucket).key(big).range(range)).asByteArray().length;
+        record("get_range", n, 1, i, System.nanoTime() - t);
+      }
+      out.flush();
+    }
   }
 
   private void getsByParts() throws IOException {

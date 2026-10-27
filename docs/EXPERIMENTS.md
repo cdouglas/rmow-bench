@@ -108,8 +108,8 @@ a new hash under the same label.
 | **layout vs policy** (no new runs) | H3: is RMoW against TailCoW (layout) a smaller difference than TailCoW against MoR-v3 (tail policy), and mostly in read requests? | read from the uncompacted rg-sweep, split and m1 uniform runs | MoR-v3, TailCoW-B and -C, RMoW-B and -C in both layouts | 6 of the above | [lab/pages/layout-vs-policy.md](../lab/pages/layout-vs-policy.md) |
 | **time travel** (reruns) | H4: does an old version read like the current one, and do dead bytes cost reads? | the 7 uncompacted configurations that read old versions, rerun 2026-10-22/23 with the split-offset fix: each time-travel read against the full read of the same state | all that ran | 7 of the above, rerun | [lab/pages/time-travel.md](../lab/pages/time-travel.md) |
 | **store latency** (`configs/sim-*`, and the existing runs) | What would each arm take on a given store? Latency simulated from what each phase records: CPU, requests and bytes. | endive's store profiles (S3 Express, S3, Azure), and a sweep of request latency × throughput; a validation run with latency injected; a 4 MiB recency run with its requests logged | MoR-v3, TailCoW-C, RMoW-B and -C, both layouts | 3 (and the 4 MiB recency and uniform runs) | [lab/pages/store-latency.md](../lab/pages/store-latency.md) |
-| **s3x calibration, local twin** (`configs/s3x-calibration-local.json`) | The requests and bytes the first S3 Express run must reproduce exactly, and its runtime. | the S3 Express calibration's settings (200k rows, 20 batches, 1 MiB row groups) on the local store, with a JIT warmup and four readers (one-footer, cached on 1 and 8 threads, stock); rerun 2026-10-27 on the fork build (campaign `twins-fork`) | MoR-v2-file, MoR-v3, TailCoW-C, RMoW-A, -B and -C | 1 | None: a baseline. 1.5 minutes, 11,706 requests. |
-| **azure calibration, Azurite twin** (`configs/azure-calibration-azurite.json`) | The requests the first Azure run must send, through ADLSFileIO and the Azure SDK, and the predictions it is checked against (docs/AZURE_RUNBOOK.md). | the same settings on Azurite, 2026-10-27, on the fork build (campaign `twins-fork`) | the same | 1 | The runbook's predictions. 2.7 minutes; every phase sent the model's 11,706 requests, and its model requests and bytes equal the local twin's in all 922 records. |
+| **s3x calibration, local twin** (`configs/s3x-calibration-local.json`) | The requests and bytes the first S3 Express run must reproduce exactly, and its runtime. | the S3 Express calibration's settings (200k rows, 20 batches, 1 MiB row groups) on the local store, with a JIT warmup and five readers (one-footer, cached on 1 and 8 threads, cached-skip, stock) and the writer that skips dead row groups; rerun 2026-10-27 with the five arms (campaign `twins-five`) | MoR-v3, TailCoW-C, RMoR-C, RMoW-C and RMoW-C-split | 1 | None: a baseline. 1.1 minutes, 10,136 requests. |
+| **azure calibration, Azurite twin** (`configs/azure-calibration-azurite.json`) | The requests the first Azure run must send, through ADLSFileIO and the Azure SDK, and the predictions it is checked against (docs/AZURE_RUNBOOK.md). | the same settings on Azurite, 2026-10-27, with the five arms (campaign `twins-five`) | the same | 1 | The runbook's predictions. 2.1 minutes; every phase sent the model's 10,136 requests, and its model requests and bytes equal the local twin's in all 842 records. |
 | **scale** (`configs/scale-recency-*`, on havoc) | Do the 4 MiB recency setting's requests, bytes, CPU and simulated latency hold at Iceberg's defaults (P1–P6)? | row group R = tail seal = 4, 16, 64, 128 MiB, with rows, operations per batch and files scaled by R; recency, no compaction, payload checks off, requests logged | MoR-v3, TailCoW-C, RMoW-B and -C in both layouts | 4, 4 in the rerun, 4 on the laptop | [lab/pages/scale.md](../lab/pages/scale.md). CPU decided on the laptop, in instructions: on havoc, foreign load and then noise beyond it left it undecided. |
 | **cpu measure** (`configs/cal-cpu-recency-4m.json`) | How to measure CPU so that one phase can decide a 10% question (M1–M4)? | the measure: thread CPU time against each thread's user-mode instructions and cycles (`perf_event_open`); the 4 MiB scale setting, all six arms, `cached` and `cached-p8`, run twice | all six of the scale campaign | 2 | [lab/pages/cpu-measure.md](../lab/pages/cpu-measure.md) |
 | **dv ablation** (`configs/local-dv-*`) | H3's attribution: how much of RMoW against TailCoW is the layout, and how much the update handling (region rewrites against DVs)? | key distribution (recency, uniform); 4 MiB, no compaction | MoR-v3, CoW, TailCoW-B and -C, RMoW-A, -B and -C, RMoW-A-dv, -B-dv and -C-dv | 3, deleted | Conclusions in [DESIGN.md](DESIGN.md#deletion-vectors-on-an-appendable-file-an-ablation-removed); numbers under Retired runs. |
@@ -142,8 +142,8 @@ The compaction sweep's threshold levels:
 | compaction | local-compact-{aggr,default,lazy}-p5 | recency | 4 MiB | 5 | aggressive, default, lazy | 6 |
 | compaction | local-compact-default-p10 | recency | 4 MiB | 10 | default | 6 |
 | compaction | local-compact-{aggr,default,lazy}-p20 | recency | 4 MiB | 20 | aggressive, default, lazy | 6 |
-| s3x calibration | s3x-calibration-local | recency | 1 MiB | never | — | 6 |
-| azure calibration | azure-calibration-azurite | recency | 1 MiB | never | — | 6 |
+| s3x calibration | s3x-calibration-local | recency | 1 MiB | never | — | 5 |
+| azure calibration | azure-calibration-azurite | recency | 1 MiB | never | — | 5 |
 | store latency | sim-validate-s3x | recency | 1 MiB | 10 | default | 5 |
 | store latency | sim-recency-4m | recency | 4 MiB | never | — | 6 |
 | store latency | sim-recency-4m-noverify | recency | 4 MiB | never | — | 6 |
@@ -308,6 +308,22 @@ What they showed, kept in docs/AZURE_RUNBOOK.md:
   MoR-v3 was 0.54 and 0.91 (draft Z6). It needs a build before 2026-10-26 to rerun.
 - **The local twin** took 1.8 minutes and 10,446 requests, with three readers and before the
   writers read footers per transaction; its rerun takes 11,706.
+
+**Deleted 2026-10-27: the calibration's six-arm twins on the fork build** (campaign
+`twins-fork`), replaced by the five-arm twins (campaign `twins-five`) when the calibration
+dropped MoR-v2-file, RMoW-A and RMoW-B and took RMoR-C and RMoW-C-split:
+- `azure-calibration-azurite-02879401d0c8/20261027T041701Z` and
+  `s3x-calibration-local-424bf5d32c80/20261027T042004Z`, with their build snapshot
+  `20261027T041701Z-63b1703b36df-dirty`, which only they used.
+
+What they showed, kept here and in docs/AZURE_RUNBOOK.md:
+- **Requests.** Every phase on Azurite sent the model's 11,706 requests, and the two twins' model
+  requests and bytes matched in all 922 records. The five-arm twins match them in every record of
+  the arms both ran (MoR-v3, TailCoW-C, RMoW-C).
+- **Simulated on `azure`** (ms, a batch and a full read under `cached`, CPU on the wall clock):
+  MoR-v2-file 1,998 and 2,568, MoR-v3 1,558 and 2,569, TailCoW-C 784 and 1,698, RMoW-A 895 and
+  1,972, RMoW-B 460 and 1,392, RMoW-C 572 and 1,511. RMoW-C ÷ MoR-v3 was 0.37 and 0.59 (0.38 and
+  0.59 with CPU on the thread clock, as the runbook first quoted them).
 
 ## Findings so far
 
@@ -519,12 +535,14 @@ would need its own arms and reader checks.
   drafted in the runbook, to register with the held H1 draft.
 - **Prepared: Azure**, the other side of RMoW's break-even (docs/AZURE_RUNBOOK.md). Requests
   dominate there, so the simulation predicts that RMoW wins outright. It runs through Iceberg's
-  ADLS FileIO, whose reads as shipped open every stream with a GET of up to 4 MiB and over-read
-  ranges at offsets. So the calibration runs twice: with exact reads, to check the simulation,
-  and with Iceberg's, to measure what Iceberg on Azure costs today. It needs a hierarchical-
-  namespace account, a VM in its region and a managed identity. Its Azurite twins give the
-  requests each run must send, and its hypotheses are drafted in the runbook, with the S3
-  Express ones.
+  ADLS FileIO, on the atomicio fork, whose reads ask for exactly their ranges (Iceberg's as
+  shipped open every stream with a GET of up to 4 MiB and over-read ranges at offsets; measuring
+  them needs a build before 2026-10-26). It needs a hierarchical-namespace account, a VM in its
+  region and a managed identity. Its Azurite twin gives the requests it must send, and its
+  hypotheses are drafted in the runbook, with the S3 Express ones.
+- **Both calibrations run the five arms** (MoR-v3, TailCoW-C, RMoR-C, RMoW-C, RMoW-C-split) since
+  2026-10-27, RMoR-C with the writer that skips dead row groups and a `cached-skip` reader beside
+  the others, and their spikes time GETs by size for the read rate per MiB.
 - **Optional, to come back to:**
   - a second seed, to show the request and byte findings are not one op log's;
   - a CDC-like workload with late arrivals;

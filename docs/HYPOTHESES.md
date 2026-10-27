@@ -486,3 +486,88 @@ get no control.
 - H6: the compaction sweep, until now a static report.
 
 A verdict that changes is reported as changed, with its cause.
+
+## Added 2026-10-27, before the calibration runs on S3 Express and Azure (DRAFT, for review)
+
+**Why.** Every latency in the write-ups is simulated, from local requests, bytes and CPU priced
+with endive's store profiles. The model has been checked only against itself (S1, S2). The two
+calibration runs check it against the real services, on either side of RMoW's break-even request
+latency: S3 Express, where CPU dominates, and Azure Blob, where requests do. They decide the
+model and its profiles, not the arms: the arms' comparisons come from the local sweeps, priced
+with what these runs measure.
+
+**Setup** (docs/S3X_RUNBOOK.md, docs/AZURE_RUNBOOK.md).
+- **Configurations:** `configs/s3x-calibration.json` and `configs/azure-calibration.json`. 200,000
+  rows, 20 batches of 2,000 operations, recency keys (the ingest window), 1 MiB row groups, no
+  compaction, `locate: scan`, a JIT warmup, the payload check off, requests logged.
+- **Arms:** MoR-v3, TailCoW-C, RMoR-C (θ = 0), RMoW-C and RMoW-C-split, with
+  `writerSkipsDeadRowGroups`.
+- **Readers:** `one-footer`, `cached`, `cached-skip`, `cached-p8` and `stock`.
+- **Machines:** an EC2 instance in the directory bucket's zone; an Azure VM in the account's
+  region. One run each, after the fork's contract suite and the spike (20 repetitions).
+- **Build:** commit d6d6f0b plus the uncommitted generator, clock and spike changes, which the
+  build snapshot `20261027T073121Z-d6d6f0b44523-dirty` holds as a diff; the atomicio fork at
+  af875ccfd1. The cloud runs check out the commit that holds that diff.
+- **Twins** (campaign `twins-five`): `s3x-calibration-local-7596607f5035/20261027T073342Z` and
+  `azure-calibration-azurite-fa985c0f0fe1/20261027T073122Z`. Their model requests and bytes match
+  in all 842 records, and every phase on Azurite sent what the model counts.
+
+**Not registered here.** The held H1 draft (2026-10-23: L1–L4, H4's abort) is a later latency
+campaign at 1M rows, and its figures come from runs since replaced. X4 and Z4 test its L4 on one
+run each.
+
+**Simulated, from the twins** (ms; means over batches 1–20 and the full reads after the initial
+load, `cached`, CPU on the wall clock; RMoR-C's full read under `cached-skip` in brackets):
+
+| Arm | S3 Express: a batch | a full read | Azure Blob: a batch | a full read |
+|---|---|---|---|---|
+| MoR-v3 | 134 | 369 | 1,554 | 2,549 |
+| TailCoW-C | 92 | 305 | 780 | 1,684 |
+| RMoR-C | 197 | 390 (311) | 850 | 2,006 (1,580) |
+| RMoW-C | 172 | 290 | 560 | 1,510 |
+| RMoW-C-split | 191 | 272 | 586 | 1,354 |
+
+### S3 Express (docs/S3X_RUNBOOK.md)
+
+- **X1: the model counts what S3 Express receives.** Every phase's requests and bytes match the
+  local twin's exactly. `CreateSession` is the only request the model does not hold.
+- **X2: the profile holds.** Median GET, PUT and append latencies (64 KiB) are within 50% of the
+  `s3x` profile's 2.5, 6.5 and 13 ms.
+- **X3: appended parts cost reads little.** A GET of the last 64 KiB of a 1,000-part object
+  takes at most 100 ms more than one of a 1-part object, which is the sweep's 0.1 ms per part.
+- **X4: latency is CPU plus requests.** With the measured profile, each one-thread phase's
+  simulated latency is within 25% of its wall time. This is the H1 draft's L4, on one run.
+- **X5: the fork's conditions cost nothing measurable.** At every size, the median `append_sao`
+  is within 10% of the median `append`, and the median `create_sao` within 10% of the median
+  `put`. The requests are the same; only an ETag or absence condition, and the checksum
+  `prepare()` computes, differ.
+- **X6: reads cost what the profile assumes per MiB.** The slope of the median `get_size` over 1
+  to 32 MiB is within 50% of the `s3x` profile's 10 ms per MiB, and at each size the median
+  `get_range` is within 20% of the median `get_size`: a row group read as a range costs what an
+  object of its size does.
+
+### Azure Blob (docs/AZURE_RUNBOOK.md)
+
+- **Z1: the model counts what Azure receives.** Every phase's `sdk_*` counts match its Azurite
+  twin's, retries and the creates' HEADs and renames aside. They equal the model's: a PUT is one
+  Put Blob, or, for a new RMoW file, a staged Append Blob, one Append Block and a rename; an
+  append is one Append Block.
+- **Z2: the profile holds.** Median GET, Put Blob and Append Block latencies (64 KiB) are within
+  50% of the `azure` profile's 38, 45 and 87.6 ms.
+- **Z3: appended blocks cost reads little.** A GET of the last 64 KiB of a 1,000-block Append Blob
+  takes at most 100 ms more than one of a 1-block blob.
+- **Z4: latency is CPU plus requests.** With the measured profile, each one-thread phase of the
+  run is within 25% of its wall time. This is the H1 draft's L4, on Azure.
+- **Z5: RMoW-C beats MoR-v3 where requests dominate.** In the calibration run, RMoW-C's mean
+  batch and mean full read (`cached`, one thread) both take less wall time than MoR-v3's.
+  Predicted: 0.36× and 0.59×.
+- **Z6: Iceberg's shipped reads cost RMoW more than MoR** (only with a run on a build before
+  2026-10-26). In the Iceberg run, RMoW-C's full read is a larger fraction of MoR-v3's than in the
+  exact run, predicted 0.91× against 0.59×. Its ranged reads at offsets over-read most: 23× the
+  bytes it needs, against MoR-v3's 17×.
+- **Z7: the fork's conditions cost nothing measurable.** At every size, the median `append_sao`
+  is within 10% of the median `append`. A `create_sao` costs about one request more than a
+  `create_own`: its median is within 10% of `create_own`'s plus the median of a rename.
+- **Z8: reads cost what the profile assumes per MiB.** The slope of the median `get_size` over 1
+  to 32 MiB is within 50% of the `azure` profile's 25 ms per MiB, and at each size the median
+  `get_range` is within 20% of the median `get_size`.
