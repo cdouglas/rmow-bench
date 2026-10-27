@@ -25,12 +25,16 @@ git_dirty = "versions.rmow_bench_dirty"
 store = "config.store.type"
 key_dist = "config.workload.keyDist"
 batches = { path = "config.workload.batches", type = "INTEGER" }
+region_rows = { path = "config.workload.regionRows", type = "BIGINT" }
+region_skew = { path = "config.workload.regionSkew", type = "DOUBLE" }
+update_share = { path = "config.workload.updateShare", type = "DOUBLE" }
 rg_bytes = { path = "config.layout.rowGroupBytes", type = "BIGINT" }
 tail_seal_bytes = { path = "config.layout.tailSealBytes", type = "BIGINT" }
 compact_every = { path = "config.layout.compactEvery", type = "INTEGER" }
 compact_delete_ratio = { path = "config.layout.compactDeleteRatio", type = "DOUBLE" }
 compact_garbage_ratio = { path = "config.layout.compactGarbageRatio", type = "DOUBLE" }
 compact_small_rgs = { path = "config.layout.compactSmallRowGroups", type = "INTEGER" }
+rmor_rewrite_share = { path = "config.layout.rmorRewriteShare", type = "DOUBLE" }
 reads_every = { path = "config.reads.every", type = "INTEGER" }
 oplog = "oplog_sha256"
 verify_rows = { path = "config.verifyRows", type = "BOOLEAN" }

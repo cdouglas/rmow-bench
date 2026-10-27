@@ -374,6 +374,25 @@ has what they showed.
 | `rmorRewriteShare` | `rmor-c`'s θ: a batch rewrites a region it changes (a sealed file's row group, or an open tail file) when it updates or deletes at least this share of the region's live rows, counted per batch, and otherwise puts DVs on the rows. 0 (the default) rewrites every region a batch changes; above 1 none, which is `tailcow-c`. |
 | `writerSkipsDeadRowGroups` | The MoR family's writers (their scans to locate rows, merge reads and compaction) read no row group the file's deletes cover whole, nor any file whose DV covers every row, as the `skipDeadRowGroups` reader does. Off (the default) is Iceberg's MERGE scan, which fetches such row groups and drops their rows. In practice only RMoR-C has them: on two configurations, it changed no other arm's request or byte. Configurations that report RMoR set it, with the `cached-skip` reader beside a stock one. |
 
+### The workload (`workload` in the config)
+
+Every arm replays one seeded op log (`OpLogGenerator`): an initial load, then batches of inserts,
+updates and deletes on disjoint rows. Ids grow with insertion, and writes keep rows in roughly id
+order, so a range of ids stands for a region of the table. The manifest records the log's SHA-256.
+
+| Knob | Meaning |
+|---|---|
+| `seed`, `initialRows`, `batches`, `opsPerBatch` | The log's seed and size. |
+| `insertFrac`, `updateFrac`, `deleteFrac` | Each batch's operations, by share. The rows updated and deleted per batch are fixed. |
+| `keyDist` | How updates and deletes pick rows. `RECENCY_EXP` (the ingest window): a row's age in rows, newest first, is exponential with mean `recencyMeanBatches` batches of inserts. `UNIFORM`: every live row alike. `REGIONS`: by region, each with a heat drawn once from the seed, `U^-regionSkew` for a uniform U, so regions ranked by heat follow Zipf's law with exponent `regionSkew`. A region is picked with weight heat times live rows (as of the batch's start), then a row in it. Hot regions can be anywhere and stay hot; a skew of 0 is uniform over live rows. |
+| `regionRows` | Consecutive ids per region (default 100,000). A region stands for a row group: a 4 MiB one holds about 98,000 rows of this schema, a 1 MiB one 10,521, and the initial load's row groups vary by a few percent, so a region need not line up with one. |
+| `regionSkew` | `REGIONS`' Zipf exponent (default 1). On 1M rows and 60 batches of 10,000 operations in regions of 10,521 rows (135 by the end), the hottest tenth of the regions took 12% of the updates at 0, 54% at 1 and 89% at 2. |
+| `updateShare` | The share p of a region's live rows one update statement updates. 0 (the default) makes each update a row of its own. Above 0, a statement takes the region of a row the key distribution picks, under any `keyDist`, and updates p of its live rows (at least one), picked uniformly among those the batch has not touched. The batch's last statement takes what is left of its updates, so p counts only up to updates per batch over `regionRows`. Deletes stay one row each. |
+| `lateMedianBatches`, `lateP99Batches` | Insert lateness in event time (`ts`), lognormal, in batches. |
+
+Logs without regions, the ingest window or uniform keys at an update share of 0, are what they
+were before regions existed (`OpLogGeneratorTest` pins three runs' hashes).
+
 ## Layout of the code
 
 | Package | Contents |

@@ -160,24 +160,40 @@ leave them out.
 
 ## Workload generator
 
-All runs so far used recency keys with a mean of 2 batches, or uniform keys. Each update and
-delete touches one row.
-- [ ] **Regions:** a region size in rows, defaulting to about one row group. A row group's bytes
-  depend on the writer's buffered count and the codec: about a third of a 1 MiB target on disk for
-  this schema, three quarters of 4 MiB. So rows are the steadier unit.
-- [ ] **Skew over regions** (Zipf-like). Each region's heat is drawn once when it appears, from a
-  heavy-tailed distribution. Hot regions can be anywhere and stay hot; cold ones are rarely, but
-  not never, updated. The ingest window is the special case of all heat on the newest region,
-  which is today's recency setting. A knob lowers the skew toward uniform. Uniform itself is
-  plain copy-on-write for the region arms and is not run; the sweep trends toward it until region
-  merging is plainly not worth it, and finds out why.
-- [ ] **Update share:** updates come as statements, each picking a region by the skew and updating
-  a share p of its live rows. Rows updated per batch stay fixed. **Prediction (the user's):**
-  where p is high, a region rewrite pays, and RMoW more than RMoR; at one row per region it does
-  not; a crossover lies between. RMoR-C's θ (`rmorRewriteShare`, a share of a region's live rows
-  per batch) is the knob to sweep against p.
+Until 2026-10-27, all runs used recency keys with a mean of 2 batches, or uniform keys, and each
+update and delete touched one row. The generator now has regions, a skew over them and an update
+share (README, The workload). Logs without them are unchanged: `OpLogGeneratorTest` pins the
+hashes of the calibration's log and of the 1M-row recency and uniform logs.
+- [x] **Regions** (`workload.regionRows`, built 2026-10-27): consecutive ids, default 100,000,
+  about the rows of a 4 MiB row group (98,000; a 1 MiB one holds 10,521). Rows are the steadier
+  unit: a row group's bytes depend on the writer's buffered count and the codec. A region need not
+  line up with a row group: the initial load's vary by a few percent.
+- [x] **Skew over regions** (`keyDist: REGIONS`, `regionSkew`, built 2026-10-27). Each region's
+  heat is `U^-s`, drawn once from the seed and the region, so regions ranked by heat follow
+  Zipf's law with exponent s. A row is picked by region, with weight heat times live rows, then
+  uniformly in it. Hot regions can be anywhere and stay hot; s = 0 is uniform over live rows. The
+  ingest window stays `RECENCY_EXP`. Uniform itself is plain copy-on-write for the region arms and
+  is not run; the sweep trends toward it until region merging is plainly not worth it, and finds
+  out why.
+- [x] **Update share** (`updateShare`, built 2026-10-27): above 0, updates come as statements,
+  each taking the region of a row the key distribution picks (any of them, the ingest window
+  included) and updating a share p of its live rows. Rows updated per batch stay fixed, so a
+  statement is capped by what is left of the batch's updates, and p counts only up to updates per
+  batch over `regionRows`. Deletes stay one row each. **Prediction (the user's):** where p is high,
+  a region rewrite pays, and RMoW more than RMoR; at one row per region it does not; a crossover
+  lies between. RMoR-C's θ (`rmorRewriteShare`, a share of a region's live rows per batch) is the
+  knob to sweep against p.
 - [ ] **Arrival window:** sweep insert lateness (`lateMedianBatches`, `lateP99Batches`). It
   exists but has never been swept.
+
+**The base point leaves the skew and the update share no room** (found 2026-10-27, from the
+generator alone). At 1M rows, 60 batches of 10,000 operations and 4 MiB row groups, the table has
+15 regions of 100,000 rows by the end, and 2,500 single-row updates a batch fall in 12–13 of them
+at any skew from 0 to 2. A statement holds at most 2,500 rows, 2.5% of a region. With regions of
+10,521 rows (1 MiB row groups) there are 135: single-row updates touch 115 a batch at a skew of 0
+or 1 and 73 at 2, and p can reach 24%. To decide before the sweeps: more rows, smaller row
+groups, or fewer updates a batch, so that a batch touches a minority of regions and p can
+approach 1.
 
 ## Experiments
 
