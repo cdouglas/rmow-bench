@@ -226,7 +226,7 @@ N = {
 
 Do the 4 MiB recency setting's requests, bytes, CPU and simulated latency hold at Iceberg's
 defaults, 128 MiB row groups and 512 MiB files? This page reads the scale campaign: four runs on
-havoc, one per row-group size R of 4, 16, 64 and 128 MiB. It decides P1–P6 (docs/HYPOTHESES.md,
+havoc, one per row-group size R of 4, 16, 64 and 128 MiB. It decides P1–P6 (docs/HYPOTHESES.md at 1145f89,
 2026-10-23) where the runs can decide them. A rerun judged CPU per phase
 ([below](#scale-rerun)), and a third campaign measured it in instructions on this laptop
 ([below](#scale-laptop)), which decided P3–P5.
@@ -411,7 +411,7 @@ table(face)
 :tags: [remove-cell]
 
 # The rerun (docker/campaigns/scale-rerun.json), from 247f054: the same configurations, with
-# foreign load sampled every second and writer footers held for one transaction (docs/HYPOTHESES.md,
+# foreign load sampled every second and writer footers held for one transaction (docs/HYPOTHESES.md at 1145f89,
 # 2026-10-24)
 RERUN = {
     4: "scale-recency-rg4m-5cc727c1e4af/20261024T082757Z",
@@ -574,7 +574,7 @@ N2 = {
 ```
 
 The rerun ran the same four configurations on the build that samples foreign load every second
-and holds writer footers for one transaction (docs/HYPOTHESES.md, 2026-10-24). The page pins
+and holds writer footers for one transaction (docs/HYPOTHESES.md at 1145f89, 2026-10-24). The page pins
 its runs by id (`RERUN`). It was to decide P3–P5 on clean phases: those that no load sample
 overlapping them found at 0.25 CPUs of foreign load or more.
 
@@ -682,7 +682,7 @@ twins show noise near its 10% margin.
 ```{code-cell} ipython3
 :tags: [remove-cell]
 
-# The scale campaign on the instruction measure (docs/HYPOTHESES.md, 2026-10-25): the same four
+# The scale campaign on the instruction measure (docs/HYPOTHESES.md at 1145f89, 2026-10-25): the same four
 # configurations on the laptop, from a build snapshot of 9f868af (dirty with a held docs draft)
 LAPTOP = {
     4: "scale-recency-rg4m-5cc727c1e4af/20261025T015547Z",
@@ -818,7 +818,7 @@ N3 = {
 ```
 
 The four configurations ran again, one after another, on this laptop, whose kernel allows the
-instruction counters that havoc's does not (docs/HYPOTHESES.md, 2026-10-25). CPU is measured as
+instruction counters that havoc's does not (docs/HYPOTHESES.md at 1145f89, 2026-10-25). CPU is measured as
 on the page Measuring CPU (lab/pages/cpu-measure.md):
 - **work:** a phase's user-mode instructions;
 - **modeled time:** work at its arm's own pace.
@@ -891,7 +891,7 @@ table(decided.round(3))
 - **P5 held:** every arm's eight-thread read takes {eval}`N3["p5_lo"]`–{eval}`N3["p5_hi"]`×
   MoR-v3's.
 
-## P1–P6 (docs/HYPOTHESES.md)
+## P1–P6 (docs/HYPOTHESES.md at 1145f89)
 
 **P1, P2, P4 and P6 contradicted, in part; P3 and P5 held.** P3–P5 were decided on the
 instruction measure, by the third campaign.
@@ -929,7 +929,7 @@ instruction measure, by the third campaign.
   - RMoW-B and RMoW-B-split store {eval}`N["st_rb"]` GiB each, just over 8 GiB.
   - RMoW-C stores {eval}`N["st_rc"]` GiB and MoR-v3 {eval}`N["st_mor"]` GiB.
 
-The rerun's controls (docs/HYPOTHESES.md, 2026-10-24):
+The rerun's controls (docs/HYPOTHESES.md at 1145f89, 2026-10-24):
 - **C1, the footer change touches only writers: held.** Every probe, and every MoR-v3 batch,
   matches the first campaign's exactly; TailCoW-C's batches take no more requests.
 - **C2, RMoW's writer reads its footers every batch: contradicted as stated, held in substance.**

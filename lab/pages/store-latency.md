@@ -15,7 +15,7 @@ import pandas as pd
 from labbook import figures_module, q, table, theme
 theme()
 
-# The runs this page reads, rerun 2026-10-25 on b6c2605 (docs/HYPOTHESES.md): the logged 4 MiB
+# The runs this page reads, rerun 2026-10-25 on b6c2605 (docs/HYPOTHESES.md at 1145f89): the logged 4 MiB
 # uncompacted recency run without the payload check (every arm and reader model in one run), and
 # the uniform run without compaction. Both count instructions, so CPU is modeled time (work_ms).
 RECENCY = "sim-recency-4m-noverify-aae85e9fd620/20261025T222739Z"
@@ -284,7 +284,7 @@ S2 = ("held" if (eight.error.abs() <= 0.20).all()
 
 Every request sleeps its expected latency, so a phase's wall time is its CPU plus its simulated
 waits, with real overlap across threads. The replay of the run's own log predicts each phase from
-its requests and CPU alone. The predictions were registered beforehand (docs/HYPOTHESES.md,
+its requests and CPU alone. The predictions were registered beforehand (docs/HYPOTHESES.md at 1145f89,
 "before validating the store simulation").
 
 ```{code-cell} ipython3
@@ -485,7 +485,7 @@ The payload check (`verifyRows`) checks every decoded row's payload against the 
 the harness's, not an engine's, and it is the same in every arm. `sim-recency-4m-noverify` was
 `sim-recency-4m` with the check off. Its build also planned a split file's objects per row group,
 as every other file is planned, where the earlier build ran each object as one task. The
-predictions were registered beforehand (docs/HYPOTHESES.md, "before rerunning the logged 4 MiB
+predictions were registered beforehand (docs/HYPOTHESES.md at 1145f89, "before rerunning the logged 4 MiB
 recency setting without payload checks").
 
 | arm | read CPU with the check (s) | without | ratio | batch CPU with (s) | without | ratio |

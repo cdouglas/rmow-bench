@@ -1,573 +1,137 @@
 # Hypotheses
 
-Written 2026-10-20, before any cloud run, so that the results cannot choose what gets reported.
-Each hypothesis names the measurement that decides it. A run that contradicts one is reported as
-such; a hypothesis is revised only in a new, dated section below, never edited in place.
-
-Terms: **MoR-v3** = new data file per batch plus deletion vectors; **RMoW-A/B/C** = region merge on
-write with policies A (rewrite touched row groups), B (trailing merge) and C (tiered); **TailCoW**
-= plain Iceberg rewriting one small tail data file per batch until it reaches the target size.
-
-## H1 — recency-skewed updates
-
-With updates and deletes concentrated on recent rows (`RECENCY_EXP`, mean 2 batches), RMoW-C's
-`read_full` cost (requests, bytes; latency on cloud stores) stays flat as batches accumulate,
-while MoR-v3's grows with the number of data files and DVs until compaction. RMoW-C's per-batch
-write cost (`batch` phase: requests, bytes written including amortized compaction) is within a
-small constant factor (≤ 3×) of MoR-v3's.
-
-*Decided by:* `read_full` and `batch` records against step, on S3 Express.
-
-## H2 — uniform updates
-
-With updates spread uniformly over the table (`UNIFORM`), every batch touches most row groups, so
-RMoW's write cost approaches copy-on-write of the whole table and MoR-v3 is cheaper to write by an
-order of magnitude or more; RMoW keeps its read advantage only until MoR compacts.
-
-*Decided by:* `batch` bytes written per row changed, RMoW-A/C against MoR-v3, local and S3 Express.
-
-## H3 — layout versus policy
-
-The difference between RMoW-C and TailCoW is what the single appendable object buys (fewer
-objects and footers to open, one append instead of a new object per batch); the difference
-between TailCoW and MoR-v3 is what merging the tail buys. We expect the first difference to be
-smaller than the second on object stores with cheap PUTs, and to matter mostly for read requests.
-
-*Decided by:* the same comparisons, per request type.
-
-## H4 — old versions and dead bytes
-
-With bounded ranged reads (the vectored Parquet path), reading an old version of an appendable
-file costs the same requests and bytes as reading a current version of the same size, and the
-dead regions between live row groups add no read bytes. Without a footer cache, an old version's
-footer read on S3 costs one aborted open-ended GET more than a current one (the stream reads past
-the old footer into newer bytes until the reader seeks).
-
-*Decided by:* `read_old` against `read_full` at equal live size, and the trace's skip-through and
-abort counts.
-
-## Known costs going in (from M0 spikes)
-
-- A Parquet footer costs about 1.16 KB per row group at 11 columns and 5.3 KB at 50 columns
-  (`FooterBench` sizes). Every RMoW version rewrites its file's whole footer and every open reads
-  it, so files must bound their row-group count.
-- Stock parquet-java reads a footer with two requests (the 8-byte tail, then the footer) on files
-  over 1 MiB; Iceberg fetches files up to 1 MiB whole in one request.
-
-## Added 2026-10-21, before the split-file runs
-
-**RMoW-*-split** = the same region merge on write, with each version's regions written as a new
-object (a standalone Parquet file) and its footer as a footer-only object naming the objects its
-row groups live in (`ColumnChunk.file_path`), instead of appending both to one object.
-
-### H2 result (local, recorded before H5)
-
-H2 held, as a validating case: under uniform updates every batch touches every row group, and
-RMoW writes what copy-on-write writes, 37.5 MB per batch against CoW's 37.6 and MoR-v3's 0.46
-(`local-m1-uniform-nocompact`, batch 60). `RunnerSmokeTest` now asserts it, for both layouts.
-
-### H5 — regions in separate objects
-
-Against RMoW on appendable objects, with the same policy:
-
-- **Writes** cost one more request per file a batch changes (a region object and a footer object
-  instead of one append), and about the same bytes (each region object adds its own small
-  footer).
-- **Reads** cost the same GETs within one per file read (a footer object up to 1 MiB is fetched
-  whole), and the same bytes.
-- **Space**: once versions older than the retained window expire, what remains is within 1.5× of
-  the live bytes without compaction, where the appendable object keeps every dead region until a
-  rewrite; with compaction, the split files need fewer rewrites for the same bound.
-- **Objects**: each version adds one or two objects per file changed, so the stored object count
-  grows with batches until expiry; the live object count stays within a small multiple of the
-  appendable layout's.
-
-*Decided by:* `batch` requests and bytes, `read_full`/`read_old` GETs and bytes, and the `state`
-records' `stored_bytes - reclaimable_bytes` against `live_bytes`, on the local recency and
-uniform runs (requests and bytes are what S3 would see, `S3StoreTest`).
-
-## Added 2026-10-21, before the compaction sweep
-
-Until now compaction was an input: every 10 batches, at thresholds modeled on Iceberg's
-`RewriteDataFiles` defaults. The sweep makes it an outcome. Each policy is a check period `P`
-(`compactEvery`: 1, 5 or 20 batches, and 10 at the default level) and a threshold level, from
-aggressive to lazy:
-garbage ratio 0.25, 0.5 or 0.75 (RMoW), delete ratio 0.1, 0.3 or 0.5 (MoR) and 4, 8 or 16 small
-row groups (RMoW). Each arm is measured under every policy and under none, and the analysis picks
-each arm's cheapest policy for a read rate and a price model. RMoW compaction now has one trigger
-and one action per goal: space (rewrite an appendable file; move the live row groups out of a
-split file's mostly dead objects) and reads (pack small sealed row groups). It packs only up to
-the size of the writer's own row groups (docs/DESIGN.md#compaction).
-
-### H6 — when to compact
-
-- **RMoW reads barely depend on compaction.** At every policy, RMoW's full-read GETs (mean over
-  probes) are within 2 of its uncompacted run, in either layout. The read gain reported for
-  compacted appendable files (split-vs-append-2026-10-21.md: 10–11 GETs against 17–19) came
-  from packing row groups to about twice the writer's size.
-- **Appendable RMoW needs compaction for space.** Uncompacted, kept/live grows linearly (about
-  8× at batch 60). At `P` = 1 the mean kept/live stays under 1/(1 − g) for garbage ratio g
-  (1.33, 2, 4), and compaction writes fall as g rises.
-- **Split RMoW needs little.** At g = 0.25 moving row groups out of mostly dead objects brings
-  the mean kept/live to 1.3 or less, for under 0.5 MB of compaction writes per batch; at
-  g = 0.75 it moves nothing.
-- **MoR-v3 and TailCoW trade writes for reads.** Their full-read GETs grow between compactions.
-  As `P` falls, their writes per batch (compaction included) rise and their mean full-read GETs
-  fall; `P` = 1 writes the most.
-- **Costs.** On S3 Express prices with a batch every 5 minutes and compute at $0.04 per
-  vCPU-hour, at one full read per batch: split RMoW's cheapest policy costs within 5% of no
-  compaction, and MoR-v3's cheapest policy has `P` ≤ 5.
-
-*Decided by:* `analysis/compaction.py` over the `configs/local-compact-*.json` runs: per arm and
-policy, bytes, requests and CPU per batch (batch and compaction phases), full-read GETs and bytes
-averaged over probes every 3 batches (which sample every phase of each compaction cycle), and
-kept/live averaged over steps.
-
-## Added 2026-10-22, before rerunning the uncompacted runs
-
-Until commit 150cc93, time travel planned old RMoW versions without split offsets, so the stock
-reader's time-travel reads did not measure stock Iceberg (lab/pages/time-travel.md). The seven
-uncompacted configurations that read old versions are rerun with the fix:
-`local-m1-recency-exp-nocompact`, `local-m1-uniform-nocompact`,
-`local-rg-sweep-recency-exp-rg{1,2,4,8}m` and `local-split-recency-exp-nocompact`.
-
-### H4, revisited: what the rerun should show
-
-- **Old versions read like current ones, under both readers.** Every time-travel read costs
-  exactly what the full read of the same table state cost, in every request and byte column, in
-  every arm. The one-footer reader's 0.11% fewer bytes for old RMoW versions goes too.
-- **Nothing else changes.** Every other record matches the earlier run of its configuration
-  exactly (`steps_diff`), except:
-  - the RMoW arms' `read_old` records;
-  - in the two m1 runs, the MoR and TailCoW arms, whose earlier builds predate counting Puffin's
-    `create()` HEAD and run-relative paths (one HEAD per Puffin file, and a few bytes).
-- **H3's numbers do not move.** They come from batch phases, full reads and state.
-
-*Decided by:* the `h4_pairs` view and `steps_diff` against the earlier runs.
-
-## Added 2026-10-23, before rerunning the compacted runs that read old versions
-
-The four compacted configurations with time travel are rerun with the split-offset fix:
-`local-m1-recency-exp-compact10`, `local-m1-uniform-compact10`,
-`local-split-recency-exp-compact10` and `local-split-uniform-compact10`. No hypothesis rides on
-them. In a run that compacts, a time-travel read and the full read of its state read different
-files (history is recorded before compaction), so they make no paired test.
-
-What the reruns should show against the earlier runs (`steps_diff`):
-- **Up to the first compaction (step 10)**, every record matches, except, in the two m1 runs, the
-  MoR and TailCoW arms' build differences (Puffin's HEAD, run-relative paths).
-- **From step 10 on**, the RMoW arms differ, because RMoW compaction changed after these runs
-  (0564114: one trigger per goal, packing up to the writer's row-group size, and split files
-  moving row groups out of mostly dead objects). From step 20 on, so do their `read_old` records,
-  by the fix.
-- **MoR-v3, TailCoW and CoW** match throughout in the split runs: their compaction has not
-  changed. In the m1 runs, CoW matches, and MoR and TailCoW differ only in their build
-  differences.
-
-*Decided by:* `steps_diff` against the earlier runs.
-
-## Added 2026-10-23, before the -dv ablation
-
-H3 attributed the difference between RMoW-C and TailCoW to the single appendable object. The
-local runs showed that most of it comes instead from how RMoW applies updates: it rewrites every
-row group an update touches, where TailCoW deletes with DVs (lab/pages/layout-vs-policy.md). The
-`-dv` arms separate the two. They keep RMoW's layout and tail policies, but delete rows in a
-file's sealed prefix with a DV and append their updated versions to the tail, as TailCoW does.
-So:
-- **RMoW-X-dv against TailCoW-X is the layout alone**: one appendable object with one footer,
-  against data files.
-- **RMoW-X against RMoW-X-dv is the update handling alone**: region rewrites against DVs.
-
-**Runs.** `configs/local-dv-{recency-exp,uniform}-nocompact.json` are the 4 MiB uncompacted
-settings of `local-rg-sweep-recency-exp-rg4m` and `local-m1-uniform-nocompact`. Arms: MoR-v3, CoW,
-TailCoW-B and -C, RMoW-A, -B and -C, and RMoW-A-dv, -B-dv and -C-dv. With version dumps.
-
-### What the ablation should show (recency-skewed updates unless noted)
-
-- **D1: the layout alone costs few bytes.**
-  - RMoW-C-dv writes at most 2× TailCoW-C's bytes per batch (RMoW-C writes 9.7×).
-  - RMoW-A-dv, whose row groups are all sealed (no tail merges), writes at most 2× MoR-v3's.
-- **D2: the update handling carries RMoW's write bytes.** RMoW-C minus RMoW-C-dv accounts for at
-  least 80% of RMoW-C minus TailCoW-C in bytes written per batch. The same holds for B.
-- **D3: the layout alone keeps most of the read savings.** RMoW-C-dv's full read at batch 60 takes
-  at most half TailCoW-C's GETs: one footer and one DV per file instead of one per data file.
-- **D4: under uniform updates, DVs avoid copy-on-write.** The RMoW-dv arms write at most 3× MoR-v3's
-  bytes per batch, against RMoW's 82× (CoW's).
-- **D5: the shared arms match.** Every arm the ablation shares with `local-rg-sweep-recency-exp-rg4m`
-  or `local-m1-uniform-nocompact` matches that run record for record (`steps_diff`). Time travel
-  costs what the current read of the same state cost in every `-dv` arm, as in every other arm
-  (`h4_pairs`).
-
-*Decided by:* `h3_arms` and `h3_diffs`, with the differences extended to the `-dv` arms, and
-`steps_diff`.
-
-## Added 2026-10-23, before rerunning the recency -dv ablation with a delete cache
-
-The ablation's reader models load a file's deletion vector once per split (row group), as
-Iceberg's readers do: `BaseDeleteLoader` never caches a DV. That confounded D3. A third reader
-model, `cached`, loads each data file's deletes once per read, as an engine with a delete cache
-would. `configs/local-dv-recency-exp-nocompact.json` is rerun with readers `one-footer`, `cached`
-and `stock`.
-
-- **D3, revisited.** Under `cached`, RMoW-C-dv's full read at batch 60 takes at most half
-  TailCoW-C's GETs.
-- **The cache changes only what it should.** Under `cached`:
-  - arms without deletes (RMoW, CoW) read exactly as under `one-footer`;
-  - arms with DVs read the same rows with no more GETs.
-- **Nothing else changes.** Every `one-footer` and `stock` record, and every write, matches the
-  earlier run of the configuration (`steps_diff`).
-
-## Added 2026-10-23, before validating the store simulation
-
-Store latency is simulated two ways, with one model (`org.rmow.bench.io.StoreLatency`): injected
-into a run, where each request sleeps its expected latency, and replayed from a run's request
-log (`figures.replay`), which sums each phase's requests and schedules its split tasks on its
-reader's threads. `configs/sim-validate-s3x.json` runs the S3 Express profile injected on the
-in-memory store, logging requests. Its replay must predict its own wall times:
-
-- **S1: one thread.** For every outermost phase on one thread that took at least 20 ms, the
-  replay is within 10% of the measured wall time.
-- **S2: eight threads.** For full reads under the 8-thread `cached` reader, the replay is within
-  20% of the measured wall time.
-
-*Decided by:* `figures.replay` on the run's own log, against `steps.wall_ns`.
-
-## Added 2026-10-23, before rerunning the logged 4 MiB recency setting without payload checks
-
-Two changes since `sim-recency-4m`:
-- **Payload checks off.** The payload check of every decoded row (`verifyRows`) is the harness's,
-  not an engine's. In a small A/B in scratch (400k rows, 10 batches, `cached` reader), full reads
-  took 0.29–0.32× the CPU without it, and batches the same CPU. So the simulated reads of
-  lab/pages/store-latency.md are mostly the harness's CPU. The id-and-version oracle stays.
-- **Split files are planned per row group.** Each object of a footer-only version is planned on
-  its own split offsets, as an appendable file's version is, so a split read runs one task per
-  live row group instead of one per object (`RequestLogTest`).
-
-`configs/sim-recency-4m-noverify.json` is `sim-recency-4m` with `verifyRows` false, run with
-`--log-requests`. Profiles and batch 60 are as in lab/pages/store-latency.md.
-
-- **N1: requests and bytes are unchanged, except stock reads of split files.** Every record matches
-  `sim-recency-4m` in requests and bytes (`steps_diff`), except the split arms' reads under
-  `stock`. Those take more GETs, a footer read per split rather than per object. Under
-  `one-footer`, `cached` and `cached-p8`, the split arms' requests and bytes do not change.
-- **N2: reads lose most of their CPU, batches none.** Each arm's CPU over its one-thread reads
-  (full, recent, old) is at most 0.4× the earlier run's. Batch and compaction CPU are within 5%.
-- **N3: on one thread, RMoW's read advantage grows.** With `cached`, RMoW-C's simulated full read
-  takes at most 0.75× MoR-v3's on S3 Express (it was 0.78×), and at most 0.4× on Azure Blob
-  (0.45×).
-- **N4: on eight threads, parallelism still erases most of it where requests are cheap.** With
-  `cached-p8`, RMoW-C's replayed full read is within 20% of MoR-v3's on S3 Express (it was 1.04×),
-  and at most 0.7× on Azure Blob (0.59×).
-- **N5: split files read in parallel.** With `cached-p8` on S3 Express, RMoW-C-split's replayed full
-  read takes at most 1.5× RMoW-C's (it was 1.9 s against 563 ms).
-
-*Decided by:* `steps_diff` against `sim-recency-4m`, `steps.cpu_ns`, `phase_latency` (one thread)
-and `figures.replay` (eight threads).
-
-## Added 2026-10-23, before the scale campaign on havoc
-
-**Question.** Do the simulated latencies hold at Iceberg's defaults (128 MiB row groups, 512 MiB
-files)? Latency is part per request and part per byte (and CPU). Scaling the files changes the
-balance between the two.
-
-**Setup.** `configs/scale-recency-rg{4,16,64,128}m.json` scale the logged 4 MiB recency setting
-with its row group R, so that each batch has the same structure:
-- 128k × R initial rows: one file of about four row groups;
-- 1,280 × R operations per batch (1% of the initial rows);
-- R-MiB row groups and tail seal, and 4R-MiB files.
-
-Everything else is `sim-recency-4m-noverify`'s:
-- the six arms;
-- the readers `cached`, `cached-p8` and `stock`;
-- 60 batches, no compaction, payload checks off, requests logged.
-
-At 128 MiB, a table of one 512 MiB file and its deltas is a few GiB stored in all. It runs in
-the container on havoc (`docker/campaigns/scale.json`), each configuration on 10 whole cores of
-one NUMA node. CPU there is not comparable with this laptop's, so each prediction compares the
-scale points with each other. Batch 60 and the profiles are as in lab/pages/store-latency.md.
-
-- **P1: the structure does not depend on scale.** For every arm and reader, requests per batch
-  and per full read at batch 60 at 16, 64 and 128 MiB are within 25% of the 4 MiB point's.
-- **P2: bytes scale with the row group.** Bytes written per batch, and bytes read per full read
-  at batch 60, are within 25% of R/4 times the 4 MiB point's.
-- **P3: CPU scales with bytes.** At 128 MiB, CPU per MiB read (full reads, `cached`) and per MiB
-  written (batches) are within 30% of the 4 MiB point's.
-- **P4: on one thread, requests stop mattering.**
-  - At 128 MiB, RMoW-C's simulated full read with `cached` is within 10% of MoR-v3's on S3
-    Express, and at most 0.9× on Azure Blob.
-  - RMoW-C's batches are slower than MoR-v3's on every profile: its extra bytes cost more than
-    the requests it saves.
-- **P5: on eight threads, the largest row group bounds a read.** At 128 MiB, every arm's replayed
-  full read with `cached-p8` is within 25% of MoR-v3's on S3 Express.
-- **P6: it fits.** Summed over arms, each arm's largest `stored_bytes` at 128 MiB is under 24
-  GiB.
-
-*Decided by:* `steps`, `phase_latency` and `figures.replay` over the four runs, with each job's
-foreign load from `results/campaigns/scale/` (a job with foreign load decides nothing about CPU).
-
-## Added 2026-10-23, after a three-batch pilot of the 128 MiB setting: P6 revised
-
-A pilot of `scale-recency-rg128m` on this laptop (3 batches, one probe, results in scratch) sized
-the campaign:
-- each RMoW arm wrote 110 MiB per batch, re-merging the initial load's last, open row group every
-  batch (MoR-v3: 5 MiB), at about 11 s of CPU per batch (MoR-v3: 1.3 s);
-- a one-thread full read of the 490 MiB table took 12–14 s of CPU;
-- the heap peaked at 13.8 GB (`-Xmx24g`, 17.6 GB resident), and the run took 14 minutes.
-
-Over 60 batches that comes to about 7 GiB stored per RMoW arm, so P6 as written (under 24 GiB
-summed over arms) will not hold. P6 stands as registered and will be reported against the runs.
-- **P6, revised:** at 128 MiB, each RMoW arm's largest `stored_bytes` is under 8 GiB, and the sum
-  over arms under 40 GiB.
-
-The campaign's store estimates follow the pilot (`docker/campaigns/scale.json`).
-
-## Added 2026-10-24, before rerunning the scale campaign on clean phases
-
-**Why.** The first scale campaign decided P1, P2 and P6, but not P3–P5: other users' threads ran
-on the cores of three of its four jobs (lab/pages/scale.md). Since then two things have changed:
-- **Monitoring:** the runner samples each job's foreign load every second, and every phase records
-  when it started, so the lab can tell which phases foreign load touched (`phase_load`).
-- **Writer footers:** every arm's writer holds a footer for one batch or compaction only (README,
-  I/O parity rule 6). Before, RMoW's writer kept its footers across batches, so RMoW's batch
-  requests were undercounted.
-
-**Setup.** The same four configurations, `configs/scale-recency-rg{4,16,64,128}m.json` (their
-only change is the knob's new name), on the new build, as `docker/campaigns/scale-rerun.json` on
-havoc. P3–P5 as registered on 2026-10-23 are decided on this rerun. P1, P2 and P6 stand as the
-first campaign decided them; the rerun reports its own values beside them.
-
-**Which CPU counts.** A phase's CPU counts only if the phase is clean: no load sample
-overlapping it reached 0.25 CPUs of foreign load (`phase_load.clean`).
-- **P3** sums CPU and MiB over clean phases only: full reads under `cached` and batches, at 4
-  and at 128 MiB.
-- **P4** compares full reads at batch 60 under `cached`, and decides each comparison only if
-  both arms' reads are clean. Its batch part uses the mean over clean batches.
-- **P5** does the same for `cached-p8` (its split tasks run inside the phase).
-- **Undecided cases.** A prediction is not decided by this rerun if a batch-60 read it needs is
-  not clean, or if fewer than half of a run's batches are. Its run is then repeated.
-
-**Controls**, which check the code change and the rule, not the format:
-- **C1: the footer change touches only writers.**
-  - Every probe's requests and bytes, under every reader, equal the first campaign's exactly.
-  - So do MoR-v3's batches: it opens each file once per batch.
-  - TailCoW-C's batches take at most the first campaign's requests: its merge read can reuse a
-    footer its locate scan read.
-- **C2: RMoW's writer now reads its footers every batch.**
-  - RMoW-B's and RMoW-C's batches take 3–4 more requests than in the first campaign: two live
-    files, each footer read as parquet-java reads it (two requests), or fetched whole while the
-    file is at most 1 MiB (one).
-  - Their split variants take 2 more: two footer-only objects, each fetched whole.
-  - Bytes written do not change.
-- **C3: clean means clean.** In clean probes, each split arm's full-read CPU under `cached` is
-  within 3% of its appendable twin's. The two read the same bytes, and in the first campaign's
-  4 MiB job, before its foreign load, they agreed within 1%. If they do not agree, the noise is
-  not foreign load, and P3–P5 stay undecided.
-
-## Added 2026-10-24, before calibrating the CPU measure
-
-**Why.** The scale rerun left P3–P5 undecided. In clean phases, twin reads' thread CPU still
-differed by up to 9% (lab/pages/scale.md). Exploratory runs on this laptop, kept in scratch,
-traced the noise to the clock:
-- **The same read, back to back:** three runs of one read took a median 4–11% apart in thread
-  CPU time, and once twice as long.
-- **Nothing in the JVM helped.** A heap collection before each phase made the twins agree less
-  (standard deviation 22%, against 5–7%). Keeping the cheapest of three runs, a fixed pre-touched
-  heap, and user-mode time each left them 3–8% apart.
-- **Instructions did not move.** A thread's user-mode instructions put the twins within 0.6%.
-  Its cycles, 5% apart, still move with what the core shares.
-
-So the measure becomes:
-- **Work:** a phase's user-mode instructions, its thread's and its read pool's (`ThreadCounters`,
-  through `perf_event_open`).
-- **Time,** for simulated latency: work × the median cycles per instruction of that arm's phases
-  of that kind (and reader) in the run, ÷ the run's median clock (`phase_work.work_ms`).
-- **Left out:** kernel time, 1–6% of thread CPU, which is mostly the local store's reads.
-
-**Setup.** `configs/cal-cpu-recency-4m.json` is the scale campaign's 4 MiB setting with:
-- all six arms;
-- the readers `cached` and `cached-p8`;
-- a probe every 5 batches, and requests logged.
-
-It runs twice on this laptop, one run after the other.
-
-**Predictions.** Their thresholds come from the scratch runs; these runs check them.
-- **M1: twins agree in work.** At every probe, each split arm's full-read instructions are
-  within 1% of its appendable twin's, under both readers. Across batches, the ratio of a split
-  arm's batch instructions to its twin's has a standard deviation under 0.5%.
-- **M2: work repeats across runs.** From batch 10 on, every full read and batch counts within 2%
-  of the same phase's instructions in the other run.
-- **M3: modeled time is steady enough to decide.** Twins' `work_ms` for full reads under `cached`
-  are within 2% at every probe: the rerun's C3, on the new measure.
-- **M4: pace is steady.** Each arm's cycles per instruction for full reads under `cached` varies
-  by under 5% across a run's probes (coefficient of variation).
-
-## Added 2026-10-25, before the scale campaign on the instruction measure, on this laptop
-
-**Setup.** The four scale configurations, `configs/scale-recency-rg{4,16,64,128}m.json`, run one
-after another on this laptop, from a build snapshot of `dafdc1a`. havoc's kernel does not allow
-counters (`perf_event_paranoid` 4). CPU is measured as in lab/pages/cpu-measure.md:
-- **work:** a phase's user-mode instructions;
-- **modeled time:** work at its arm's own pace (`work_ms`).
-
-The laptop has no foreign-load monitor. Instructions do not depend on foreign load, and the
-noise floors below absorb what it does to pace.
-
-**Noise floors.** Each run gives its own, from its twins, which do the same work:
-- **F_read:** the largest |split ÷ appendable − 1| of modeled time for full reads under
-  `cached`, over the run's probes and both pairs;
-- **F_batch:** the same for the mean modeled batch time over the run's batches;
-- **F_p8:** the same for full reads under `cached-p8`, in the replay on S3 Express
-  (`figures.replay(cpu="work")`).
-
-A comparison against a threshold decides only if the measured value lies further from the
-threshold than the floor. Within the floor, it is undecided.
-
-**How P3–P5 (2026-10-23) are decided:**
-- **P3, in work.** Instructions per MiB read (full reads under `cached`, every probe after the
-  initial load) and per MiB written (batches) at 128 MiB are within 30% of the 4 MiB point's. A
-  phase's pace may change with scale too, so modeled time per MiB is reported beside it, but
-  does not decide.
-- **P4, in modeled time,** in `phase_latency` with `work_ms` in place of `cpu_ms`, at 128 MiB:
-  - RMoW-C's full read at batch 60 under `cached` is within 10% of MoR-v3's on S3 Express, and
-    at most 0.9× on Azure Blob, each against F_read.
-  - RMoW-C's mean batch time is above MoR-v3's on every profile it can run on, against F_batch.
-- **P5, in the replay with `cpu="work"`,** at 128 MiB: every arm's full read at batch 60 under
-  `cached-p8` is within 25% of MoR-v3's on S3 Express, against F_p8.
-
-**Controls:**
-- **C1: the measure changes no I/O.** Every probe and batch matches the scale rerun's requests
-  and bytes exactly (`steps_diff`).
-- **C2: every phase is counted.** Every timed phase of the four runs has instructions, and every
-  manifest says counters were available.
-
-## Added 2026-10-25, before rerunning the core experiments on the current build
-
-**Why.** The core experiments ran on 2026-10-21 to 23 (m1, rg-sweep, split-vs-append, compaction,
-store latency), on builds that predate four changes:
-- **Writer footers:** writers hold a footer for one transaction (README, I/O parity rule 6).
-  Before, RMoW's writer kept its footers across batches, so its batch requests were undercounted.
-- **Readers:** the `cached` and `cached-p8` reader models. The m1, rg-sweep and split runs had
-  only `one-footer` and `stock`, and the compaction sweep only `one-footer`.
-- **Split planning:** split files are planned per row group.
-- **CPU:** measured in instructions, with the payload check off (lab/pages/cpu-measure.md).
-
-The rerun is for a write-up of the results, so every result it quotes comes from one build.
-
-**Setup.** The 22 `configs/local-*` configurations, plus `sim-validate-s3x` and
-`sim-recency-4m-noverify`, are unchanged except:
-- `verifyRows` is off;
-- the readers are `one-footer`, `cached`, `cached-p8` and `stock`.
-
-They run one after another on this laptop, from a build snapshot, with requests logged. The
-rg-sweep and uncompacted split runs also dump their versions, for row-group sizes, as before.
-
-**Controls**, against the old runs of the m1, rg-sweep, split and sim configurations (builds
-`cfe40b2`, `17476f3`, `55938de`, `967db79`). The only write-path change since them is writer
-footers.
-- **K1: MoR-family batches are unchanged.**
-  - Every MoR-v2 (file and partition), MoR-v3 and CoW batch matches its old run's requests and
-    bytes exactly.
-  - TailCoW-B's and -C's batches take at most the old run's requests, and write the same bytes.
-- **K2: RMoW's writer now reads its footers.** Every RMoW batch takes one footer read per file
-  live at its start more than its old run, and writes the same bytes. A footer read is two
-  requests for a file over 1 MiB that is not footer-only, and one for a footer-only object or a
-  file of at most 1 MiB.
-- **K3: readers that did not change read the same.** Every probe of a non-split arm under
-  `one-footer` and `stock` matches its old run's requests and bytes exactly.
-
-The compaction sweep's old runs (`aac3bdf`) predate the commit that added its triggers, so they
-get no control.
-
-**What it re-decides.** H2–H6 as registered, on the reruns, where their write-ups decided them:
-- H2: lab/pages/run.md;
-- H3: layout-vs-policy;
-- H4: time-travel;
-- H5: split-vs-append, until now a static report;
-- H6: the compaction sweep, until now a static report.
-
-A verdict that changes is reported as changed, with its cause.
-
-## Added 2026-10-27, before the calibration runs on S3 Express and Azure (DRAFT, for review)
-
-**Why.** Every latency in the write-ups is simulated, from local requests, bytes and CPU priced
-with endive's store profiles. The model has been checked only against itself (S1, S2). The two
-calibration runs check it against the real services, on either side of RMoW's break-even request
-latency: S3 Express, where CPU dominates, and Azure Blob, where requests do. They decide the
-model and its profiles, not the arms: the arms' comparisons come from the local sweeps, priced
-with what these runs measure.
-
-**Setup** (docs/S3X_RUNBOOK.md, docs/AZURE_RUNBOOK.md).
-- **Configurations:** `configs/s3x-calibration.json` and `configs/azure-calibration.json`. 200,000
-  rows, 20 batches of 2,000 operations, recency keys (the ingest window), 1 MiB row groups, no
-  compaction, `locate: scan`, a JIT warmup, the payload check off, requests logged.
-- **Arms:** MoR-v3, TailCoW-C, RMoR-C (θ = 0), RMoW-C and RMoW-C-split, with
-  `writerSkipsDeadRowGroups`.
-- **Readers:** `one-footer`, `cached`, `cached-skip`, `cached-p8` and `stock`.
-- **Machines:** an EC2 instance in the directory bucket's zone; an Azure VM in the account's
-  region. One run each, after the fork's contract suite and the spike (20 repetitions).
-- **Build:** commit 1cb7160, whose code, configurations and lab views equal what the twins ran
-  (build snapshot `20261027T073121Z-d6d6f0b44523-dirty`, d6d6f0b and a diff), and the atomicio
-  fork at af875ccfd1. The cloud runs check out 1cb7160 or a later commit that changes no code.
-- **Twins** (campaign `twins-five`): `s3x-calibration-local-7596607f5035/20261027T073342Z` and
-  `azure-calibration-azurite-fa985c0f0fe1/20261027T073122Z`. Their model requests and bytes match
-  in all 842 records, and every phase on Azurite sent what the model counts.
-
-**Not registered here.** The held H1 draft (2026-10-23: L1–L4, H4's abort) is a later latency
-campaign at 1M rows, and its figures come from runs since replaced. X4 and Z4 test its L4 on one
-run each.
-
-**Simulated, from the twins** (ms; means over batches 1–20 and the full reads after the initial
-load, `cached`, CPU on the wall clock; RMoR-C's full read under `cached-skip` in brackets):
+What the benchmark expects each run to show, written before the run. A result that contradicts a
+hypothesis is reported as contradicted. A hypothesis is never edited once registered; a revision
+is a new dated entry.
+
+The hypotheses registered from 2026-10-20 to 2026-10-27 (H1–H6, and each campaign's predictions
+and controls) are this file as of commit 1145f89 ([on GitHub](https://github.com/cdouglas/rmow-bench/blob/1145f89a36fa60af56aefc9233991f1d03755ae2/docs/HYPOTHESES.md); `git show
+1145f89:docs/HYPOTHESES.md`), and the write-ups up to 2026-10-27 cite them there. The commits'
+times show each came before the runs it was decided on. What they settled is summarized below.
+
+## The question
+
+Treating a Parquet region (a row group) as the unit of a write adds write latency to cut read
+latency. The benchmark measures that trade-off, writes against reads, in latency, requests and
+bytes, for each way of encoding an update, on each store and workload.
+
+**The encodings** (the arms new campaigns run; README, Arms):
+
+| Arm | A changed region goes | Its old copy is hidden by |
+|---|---|---|
+| `mor-v3` | nowhere: updated rows go to the batch's new data file | DVs on rows |
+| `tailcow-c` | the same, with small tail files merged by a tiered policy | DVs on rows |
+| `rmor-c` | rewritten into the batch's new data file (regional merge-on-read) | a DV covering the old row group |
+| `rmor-c-footer` | the same | a new footer appended to its file, without the old row group |
+| `rmow-c` | appended to its own object | the object's new footer |
+
+RMoR-C with footers sits between: against RMoR-C it changes only what hides the old copy, and
+against RMoW-C only where the rewritten region goes. It needs appendable files, as RMoW-C does.
+
+`rmow-c-split` (a region written as a new object, the old hidden by a footer-only object naming
+the objects its row groups live in) was dropped on 2026-10-27: its footers point across objects
+through `ColumnChunk.file_path`, which the Parquet spec disowns and no reader assembles. RMoR-C
+writes a rewritten region to a new file in a form every reader reads.
+
+**The workloads:** where updates fall (the ingest window, or a Zipf skew over regions), how many
+of a region's rows one update statement changes (the update share), how late inserts arrive, and
+the row-group size (README, The workload).
+
+**The measures,** per phase (a batch; a full, recent and old read):
+- requests (the objects a write creates track its PUTs), bytes read and bytes written, which are
+  exact and the same on every store;
+- wall time, measured in the cloud and simulated locally from requests, bytes and CPU;
+- where the time went: each phase split into its stages (encoding, decoding, footers, deletes,
+  other CPU, waiting on the store; `phase_breakdown`).
+
+CPU matters as a bottleneck, not for its own sake.
+
+## Settled before 2026-10-27
+
+From local runs, where requests and bytes are exact (HYPOTHESES.md at 1145f89, EXPERIMENTS.md):
+- **The ingest window** (1M rows, 4 MiB row groups): RMoW-C takes 0.21× MoR-v3's requests per
+  batch and writes 13× its bytes. Its full read stays flat (16 GETs at batch 10, 19 at batch 60)
+  while MoR-v3's grows (32 to 132). Simulated, its batch takes 2.1× MoR-v3's time on S3 Express
+  and 0.50× on Azure Blob; its full read 0.69× and 0.33×.
+- **Uniform updates** make the region arms copy-on-write: 0.996–0.997× CoW's bytes (H2).
+- **Old versions** read like current ones, under every reader, and dead bytes cost reads nothing
+  (H4). On S3, an old version's footer probe streams past the version's end until the reader
+  closes: a cost of appending, qualitative, not measured.
+- **Space:** uncompacted, an appendable file keeps 7.8–8.3× its live bytes by batch 60, so it
+  needs compaction (H6).
+
+## Before the calibration runs (2026-10-27, DRAFT, for review)
+
+**What they decide:** whether the simulation's prices hold on the real stores, and the direction
+of the trade-off on each. S3 Express and Azure Blob sit on either side of RMoW's break-even
+request latency.
+
+**Setup** (docs/S3X_RUNBOOK.md, docs/AZURE_RUNBOOK.md): `configs/s3x-calibration.json` and
+`configs/azure-calibration.json`, the five arms (both RMoR-C arms at θ = 0, with the writer that
+skips dead row groups). The workload is the ingest window: 200,000 rows, 20 batches of 2,000
+operations, 1 MiB row groups, no compaction. One run each, on a machine in the store's zone or
+region, from the build the twins ran: build snapshot `20261027T175613Z-1145f89a36fa-dirty`, which
+the commit "RMoR-C with footers, a variant that hides old row groups without DVs" holds. The twins
+are `s3x-calibration-local-8433ccfd4620/20261027T175847Z` and
+`azure-calibration-azurite-a96fd56de2f0/20261027T175614Z` (campaign `twins`).
+
+**Requests and bytes, from the twins** (exact, and the same on both stores; means over batches
+1–20 and the full reads after the initial load, under `cached`, RMoR-C's also under
+`cached-skip`):
+
+| Arm | A batch: requests | of them PUTs and appends | MB read | MB written | A full read: requests | MB read |
+|---|---|---|---|---|---|---|
+| MoR-v3 | 31.4 | 2.0 | 0.64 | 0.08 | 46.0 | 7.2 |
+| TailCoW-C | 15.1 | 2.0 | 0.62 | 0.13 | 28.0 | 7.0 |
+| RMoR-C | 13.7 | 1.4 | 1.56 | 1.02 | 33.0 (26.0) | 9.0 (7.0) |
+| RMoR-C with footers | 10.2 | 1.4 | 1.54 | 1.02 | 24.0 | 7.0 |
+| RMoW-C | 7.3 | 1.0 | 0.80 | 0.84 | 24.5 | 6.9 |
+
+Under the stock reader a full read takes 104 requests for MoR-v3, 87 for TailCoW-C, 108 for
+RMoR-C, 63 for RMoR-C with footers and 70.5 for RMoW-C.
+
+**Measured, not judged:** each store's request latencies by operation and size, its read rate per
+MiB, the extra latency per appended part, and what the fork's conditional writes cost against the
+store's own (the spikes).
+
+**Predicted, from the twins** (each arm's mean batch and mean full read under `cached`, over
+MoR-v3's):
 
 | Arm | S3 Express: a batch | a full read | Azure Blob: a batch | a full read |
 |---|---|---|---|---|
-| MoR-v3 | 134 | 369 | 1,554 | 2,549 |
-| TailCoW-C | 92 | 305 | 780 | 1,684 |
-| RMoR-C | 197 | 390 (311) | 850 | 2,006 (1,580) |
-| RMoW-C | 172 | 290 | 560 | 1,510 |
-| RMoW-C-split | 191 | 272 | 586 | 1,354 |
+| TailCoW-C | 0.69 | 0.89 | 0.50 | 0.66 |
+| RMoR-C | 1.54 | 1.03 (`cached-skip` 0.79) | 0.55 | 0.78 (0.62) |
+| RMoR-C with footers | 1.43 | 0.76 | 0.54 | 0.58 |
+| RMoW-C | 1.37 | 0.80 | 0.36 | 0.59 |
 
-### S3 Express (docs/S3X_RUNBOOK.md)
+Across three twin runs with identical requests and bytes (EXPERIMENTS.md, Retired runs), the S3
+Express ratios moved by up to 0.12 and Azure's by at most 0.02: instructions repeat within 0.4%,
+but their pace (cycles per instruction, per run) moved by up to 12%. Every ratio C3 judges here
+stayed at least 16% from 1 in all three; TailCoW-C's S3 Express full read ranged from 0.82 to
+0.89, and is not judged.
 
-- **X1: the model counts what S3 Express receives.** Every phase's requests and bytes match the
-  local twin's exactly. `CreateSession` is the only request the model does not hold.
-- **X2: the profile holds.** Median GET, PUT and append latencies (64 KiB) are within 50% of the
-  `s3x` profile's 2.5, 6.5 and 13 ms.
-- **X3: appended parts cost reads little.** A GET of the last 64 KiB of a 1,000-part object
-  takes at most 100 ms more than one of a 1-part object, which is the sweep's 0.1 ms per part.
-- **X4: latency is CPU plus requests.** With the measured profile, each one-thread phase's
-  simulated latency is within 25% of its wall time. This is the H1 draft's L4, on one run.
-- **X5: the fork's conditions cost nothing measurable.** At every size, the median `append_sao`
-  is within 10% of the median `append`, and the median `create_sao` within 10% of the median
-  `put`. The requests are the same; only an ETag or absence condition, and the checksum
-  `prepare()` computes, differ.
-- **X6: reads cost what the profile assumes per MiB.** The slope of the median `get_size` over 1
-  to 32 MiB is within 50% of the `s3x` profile's 10 ms per MiB, and at each size the median
-  `get_range` is within 20% of the median `get_size`: a row group read as a range costs what an
-  object of its size does.
+- **C1: the model counts what each store receives** (a control). Every phase's requests and
+  bytes equal its twin's. On Azure, the SDK's counts equal its Azurite twin's, but for creates,
+  which cost a rename on Azure and a HEAD on Azurite. S3 Express's `CreateSession` is outside the
+  model.
+- **C2: a phase's time is its CPU plus its requests' latencies.** Priced with the store's
+  measured latencies, each one-thread phase's simulated time is within 25% of its wall time.
+- **C3: the trade-off falls where the twins put it.** Each ratio in the table lands on the same
+  side of 1 in the cloud run's wall times, wherever the prediction is at least 10% from 1. So on
+  S3 Express the region arms' batches are slower than MoR-v3's and their full reads faster
+  (RMoR-C's only under `cached-skip`); on Azure, both are faster.
+- **C4: CPU is the bottleneck only of the region arms' batches on S3 Express.** In
+  `phase_breakdown`, CPU is more than half of the region arms' batch wall time on S3 Express
+  (RMoR-C's, RMoR-C's with footers and RMoW-C's: 66–74% simulated), and less than a third of every
+  phase's on Azure (at most 24%).
 
-### Azure Blob (docs/AZURE_RUNBOOK.md)
+## Next: the local sweeps (to register before they run)
 
-- **Z1: the model counts what Azure receives.** Every phase's `sdk_*` counts match its Azurite
-  twin's, retries and the creates' HEADs and renames aside. They equal the model's: a PUT is one
-  Put Blob, or, for a new RMoW file, a staged Append Blob, one Append Block and a rename; an
-  append is one Append Block.
-- **Z2: the profile holds.** Median GET, Put Blob and Append Block latencies (64 KiB) are within
-  50% of the `azure` profile's 38, 45 and 87.6 ms.
-- **Z3: appended blocks cost reads little.** A GET of the last 64 KiB of a 1,000-block Append Blob
-  takes at most 100 ms more than one of a 1-block blob.
-- **Z4: latency is CPU plus requests.** With the measured profile, each one-thread phase of the
-  run is within 25% of its wall time. This is the H1 draft's L4, on Azure.
-- **Z5: RMoW-C beats MoR-v3 where requests dominate.** In the calibration run, RMoW-C's mean
-  batch and mean full read (`cached`, one thread) both take less wall time than MoR-v3's.
-  Predicted: 0.36× and 0.59×.
-- **Z6: Iceberg's shipped reads cost RMoW more than MoR** (only with a run on a build before
-  2026-10-26). In the Iceberg run, RMoW-C's full read is a larger fraction of MoR-v3's than in the
-  exact run, predicted 0.91× against 0.59×. Its ranged reads at offsets over-read most: 23× the
-  bytes it needs, against MoR-v3's 17×.
-- **Z7: the fork's conditions cost nothing measurable.** At every size, the median `append_sao`
-  is within 10% of the median `append`. A `create_sao` costs about one request more than a
-  `create_own`: its median is within 10% of `create_own`'s plus the median of a rename.
-- **Z8: reads cost what the profile assumes per MiB.** The slope of the median `get_size` over 1
-  to 32 MiB is within 50% of the `azure` profile's 25 ms per MiB, and at each size the median
-  `get_range` is within 20% of the median `get_size`.
+From a base point, one axis at a time, for the five arms. The base point is not yet chosen: at 1M
+rows and 4 MiB row groups the table has 15 regions, and a batch's single-row updates touch 12–13
+of them at any skew, so neither the skew nor the update share has room (ROADMAP.md).
+- **The update share (the user's prediction):** where a statement updates a high share p of a
+  region's rows, a region rewrite pays, and RMoW more than RMoR; at one row per region it does
+  not; a crossover lies between. RMoR-C's θ is swept against p.
+- **The skew:** as the skew over regions falls toward uniform, the region arms' writes rise
+  toward copy-on-write, and a crossover with MoR-v3 lies between the ingest window and uniform.

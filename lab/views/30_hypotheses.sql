@@ -1,4 +1,4 @@
--- H3 and H4 (docs/HYPOTHESES.md) from the local runs: docs/measurements/layout-vs-policy-2026-10-22.md
+-- H3 and H4 (docs/HYPOTHESES.md at 1145f89) from the local runs: docs/measurements/layout-vs-policy-2026-10-22.md
 -- and docs/measurements/time-travel-2026-10-22.md.
 
 -- H4: a time-travel read at step s reads the table as it was after batch s - travelBack, the state

@@ -152,7 +152,7 @@ N = {
 
 This page collects the numbers a write-up of these results quotes. Each comes from one build,
 and is decided, with its context, on the page it links to. The core experiments are the rerun
-of 2026-10-25 on `b6c2605` (docs/HYPOTHESES.md); the scale campaign is the instruction-measure
+of 2026-10-25 on `b6c2605` (docs/HYPOTHESES.md at 1145f89); the scale campaign is the instruction-measure
 campaign on `9f868af`. Simulated latencies are simulated: requests, bytes and modeled CPU,
 priced with a store profile (Store latency, simulated). The S3 Express run that would anchor
 them has not happened (docs/S3X_RUNBOOK.md).

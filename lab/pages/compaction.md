@@ -28,7 +28,7 @@ globals().update(vars(fig.compaction_analysis(BUILD, ARMS, READERS)))
 
 When should each arm compact? This page reads the compaction sweep: eleven policies of one
 workload, from no compaction to every batch at the most aggressive thresholds. It decides H6
-(docs/HYPOTHESES.md) as registered, on the `one-footer` reader, and gives the costs under the
+(docs/HYPOTHESES.md at 1145f89) as registered, on the `one-footer` reader, and gives the costs under the
 `cached` reader too.
 
 ## Setup
@@ -163,7 +163,7 @@ table(CHEAPEST["one-footer"])
   RMoW-B's full read takes {eval}`N["b_rng"]` GETs at every policy, against MoR-v3's
   {eval}`N["mor_r"]` from no compaction to every batch.
 
-## H6 (docs/HYPOTHESES.md)
+## H6 (docs/HYPOTHESES.md at 1145f89)
 
 Decided on the `one-footer` reader, as registered. Savings within the noise band
 ({eval}`N["band"]`, from CPU alone) count as none.

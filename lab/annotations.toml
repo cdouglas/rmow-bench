@@ -31,7 +31,7 @@ title = "The scale campaign rerun, foreign load per phase and writer footers per
 select = ["where:label LIKE 'scale-%' AND git_sha LIKE '247f054%'"]
 
 [campaigns.scale-laptop]
-title = "The scale campaign on the instruction measure, on the laptop (docs/HYPOTHESES.md, 2026-10-25)"
+title = "The scale campaign on the instruction measure, on the laptop (docs/HYPOTHESES.md at 1145f89, 2026-10-25)"
 select = ["where:label LIKE 'scale-%' AND git_sha LIKE '9f868af%'"]
 
 [campaigns.cpu-measure]
@@ -46,9 +46,9 @@ select = ["s3x-*"]
 title = "Footer micro-benchmarks (JMH)"
 select = ["source:micro"]
 
-[campaigns.twins-five]
-title = "The calibration's twins with the five arms (RMoR-C and RMoW-C-split in, MoR-v2-file, RMoW-A and -B out), cached-skip and GETs by size (docs/AZURE_RUNBOOK.md, docs/S3X_RUNBOOK.md)"
-select = ["azure-calibration-azurite-fa985c0f0fe1/*", "s3x-calibration-local-7596607f5035/*"]
+[campaigns.twins]
+title = "The calibration's twins: MoR-v3, TailCoW-C, RMoR-C, RMoR-C with footers and RMoW-C, cached-skip and GETs by size (docs/AZURE_RUNBOOK.md, docs/S3X_RUNBOOK.md)"
+select = ["azure-calibration-azurite-a96fd56de2f0/*", "s3x-calibration-local-8433ccfd4620/*"]
 
 [[annotate]]
 select = "smoke-*"

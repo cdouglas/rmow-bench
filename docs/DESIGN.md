@@ -219,7 +219,7 @@ other objects, so planning is per object.
 
 Compaction is maintenance, so when to run it is a result, not an input: the benchmark runs each
 arm under a range of policies, and `analysis/compaction.py` picks each arm's cheapest one for a
-read rate and a price model (H6 in [HYPOTHESES.md](HYPOTHESES.md)). A policy is a check period
+read rate and a price model (H6 in [HYPOTHESES.md at 1145f89](https://github.com/cdouglas/rmow-bench/blob/1145f89a36fa60af56aefc9233991f1d03755ae2/docs/HYPOTHESES.md)). A policy is a check period
 (`compactEvery`) and thresholds. RMoW compaction has one trigger and one action per goal:
 
 - **Space.**

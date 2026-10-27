@@ -14,7 +14,7 @@ built there. The approach is the shield harness's (`~/work/shield/shield-rs/dock
 | `run.sh` | `build`, `cores`, `start`, `status`, `logs`, `stop`, `run`, `shell` |
 | `campaign.py` | the runner inside the container: placement, launch, the foreign-load watch, resume; `status` on the host |
 | `cores.py` | shield's report of topology and idle cores, with a proposed `CPUSET` |
-| `campaigns/*.json` | `scale` (Iceberg's defaults, docs/HYPOTHESES.md), `scale-rerun` (the same, judged per phase), `pipeline` (a check of the image, minutes) |
+| `campaigns/*.json` | `scale` (Iceberg's defaults, docs/HYPOTHESES.md at 1145f89), `scale-rerun` (the same, judged per phase), `pipeline` (a check of the image, minutes) |
 
 ## Running a campaign
 

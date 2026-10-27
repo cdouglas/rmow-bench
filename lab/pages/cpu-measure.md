@@ -15,7 +15,7 @@ import pandas as pd
 from labbook import q, table, theme
 theme()
 
-# The calibration of the CPU measure (docs/HYPOTHESES.md, 2026-10-24): configs/cal-cpu-recency-4m.json
+# The calibration of the CPU measure (docs/HYPOTHESES.md at 1145f89, 2026-10-24): configs/cal-cpu-recency-4m.json
 # run twice on this laptop, from build snapshots of the uncommitted measure (dirty)
 RUNS = [
     "cal-cpu-recency-4m-a2ae25ccf63c/20261025T010900Z",
@@ -104,7 +104,7 @@ N = {
 How should CPU be measured, so that one phase's CPU can decide a question with a 10% margin?
 The scale rerun found that thread CPU time cannot: twin reads, which do the same work, differed
 by up to 9% in clean phases (lab/pages/scale.md). This page reads two runs of one configuration
-on this laptop, with each thread's performance counters, and decides M1–M4 (docs/HYPOTHESES.md,
+on this laptop, with each thread's performance counters, and decides M1–M4 (docs/HYPOTHESES.md at 1145f89,
 2026-10-24).
 
 ## Setup
@@ -206,7 +206,7 @@ table(kernel.assign(arm=kernel.arm.map(labels)).pivot(index="arm", columns="what
       .round(3).reset_index())
 ```
 
-## M1–M4 (docs/HYPOTHESES.md)
+## M1–M4 (docs/HYPOTHESES.md at 1145f89)
 
 **Work is steady; modeled time is not as steady as predicted.**
 - **M1, twins agree in work: held.** Full reads within {eval}`N["ins_worst_c"]`

@@ -10,25 +10,32 @@ write-up covers them.
 **The idea:** treat a Parquet region (a row group) as the unit of a write. That adds write
 latency, to cut read latency. In view-maintenance terms (Olteanu), it moves cost from enumerating
 the table to integrating each update. The analysis asks three things:
-1. **Where the merged region goes:** appended to its object (RMoW-C), or a new object (RMoW-C-split).
+1. **Where the merged region goes, and what hides its old copy:** appended to its object, a new
+   footer hiding the old (RMoW-C); a new data file and a new footer on the old file (RMoR-C with
+   footers, added 2026-10-27); or a new data file and a DV (RMoR-C).
 2. **How it compares with the baseline,** Iceberg's merge-on-read (MoR-v3).
-3. **How it compares with the hybrids:** TailCoW-C (MoR, with its tail files merged) and RMoR-C (a region
-   merged into a new data file, its old copy hidden by a DV).
+3. **How it compares with the hybrid** TailCoW-C (MoR, with its tail files merged).
 
 | Arm | The merged region goes | The old region is hidden by |
 |---|---|---|
 | `mor-v3` | nowhere: updated rows go to a new file | DVs on rows |
 | `tailcow-c` | nowhere, outside the tail | DVs on rows |
 | `rmow-c` | appended to the same object | the new footer |
-| `rmow-c-split` | a new object | the new footer, which points across objects |
-| `rmor-c` (to build) | a new data file | a DV covering the old row group |
+| `rmor-c` | a new data file | a DV covering the old row group |
+| `rmor-c-footer` | a new data file | a footer appended to its file, without the old row group |
 
 The other arms stay in the code, since the published write-ups use their runs, but new campaigns
-leave them out.
+leave them out. `rmow-c-split` (a region in a new object, the old hidden by a footer-only object
+naming the objects its row groups live in) was dropped on 2026-10-27: such a footer points across
+objects through `ColumnChunk.file_path`, which the Parquet spec disowns and no reader assembles
+(DESIGN.md, Split files). RMoR-C writes a rewritten region to a new file in a form every reader
+reads.
 
 **How results are reported:**
 - **Measured, not modelled.** Cloud runs report each phase's wall time; local runs report
   requests, bytes and simulated time.
+- **Requests, as well as latency and bytes,** on both sides of the trade-off: a store bills them,
+  and they bound throughput. The objects a write creates track its PUTs.
 - **Attributed.** Each phase and sub-phase is split into CPU and waiting, shown as stacked bars, so
   readers can see where their own improvements over Iceberg's Java code would cut. Parquet
   encoding, for example, is the CPU of RMoW's write.
@@ -90,8 +97,8 @@ leave them out.
     (EXPERIMENTS.md, Builds). versitygw and Azurite match the model in every phase, with the
     stand-ins' counts.
   - [ ] **Against the stores' own writes, in the cloud:** the spikes now time the store's own
-    appends and creates beside RMoW's, interleaved (draft hypotheses X5 and Z7). That leaves
-    nothing native in the runs, only in the spikes.
+    appends and creates beside RMoW's, interleaved, measured but not judged (HYPOTHESES.md).
+    That leaves nothing native in the runs, only in the spikes.
 - [x] **Where time goes, measured** (done 2026-10-26). Each phase splits its
   thread's time by kind of work (`Spans`), as wall and CPU time, each exclusive of the others:
   `io` (every call into the store), `encode` (Parquet encoding), `decode` (Parquet decoding in
@@ -112,7 +119,7 @@ leave them out.
 - [x] **GETs by size in the spikes** (done 2026-10-27): `get_size`, the PUTs' single-part objects
   of 64 KiB to 32 MiB read whole, and `get_range`, the same sizes as ranges of a 32 MiB one, on
   both stores, interleaved over sizes; checked on versitygw and Azurite. The read rate per MiB is
-  assumed, and it is the biggest I/O term in S3 Express full reads (draft X6, Z8).
+  assumed, and it is the biggest I/O term in S3 Express full reads.
 - [x] **Drop the instruction-counter advice from the cloud runbooks** (done 2026-10-27). The cloud
   runs measure wall time; they need the clocks to agree (`host.thread_cpu_per_wall`).
 
@@ -151,6 +158,18 @@ leave them out.
     arm's request or byte, on the calibration's workload and on a 7-arm configuration. It stays
     off by default, Iceberg as shipped (decided 2026-10-26); configurations that report RMoR set it,
     with the `cached-skip` reader beside a stock one. None exists yet.
+- [x] **RMoR-C with footers** (`rmor-c-footer`, built 2026-10-27). RMoR-C's rewrites at θ = 0,
+  each old row group hidden by a footer appended to its file, listing its other row groups,
+  instead of a DV. Against RMoR-C it changes only what hides the old copy; against RMoW-C only
+  where the rewritten region goes. Its data files are created as objects the store can extend (on
+  ADLS an Append Blob, three requests where Iceberg's Put Blob is one), and each append is a new
+  version of the file, with its length, split offsets and metrics, as RMoW's are. It writes no
+  delete file, so no reader has a dead row group to fetch or skip. Rows after an elided row group
+  move up in their file, which would leave a DV on its other rows stale, so θ must be 0; a θ sweep
+  would need its DVs rewritten as row groups leave. Compaction's delete-ratio trigger sees no dead
+  rows in it (its dead bytes are old row groups, as an appendable RMoW file's are), so compaction
+  never rewrites it for space. `RmorTest` checks it writes RMoR-C's data files, appends where
+  RMoR-C writes DV files, and reads nothing a skipping reader would skip.
 - [x] **A reader that skips row groups a DV covers whole** (`reads.readers[].skipDeadRowGroups`,
   the `cached-skip` model; built 2026-10-27). Before planning a file's splits, it
   checks the file's deletes, loaded once (through the read's delete cache, so its tasks reuse
@@ -210,13 +229,10 @@ approach 1.
   - Compaction's packing of small row groups (`compactSmallRowGroups`) would undo the isolation, so
     it must leave hot ones alone.
   - Measure bytes rewritten per updated row, footer size and read GETs under the region skew.
-- [ ] **Register the hypotheses** before the cloud runs:
-  - the model checks: X1–X6 and Z1–Z8, drafted for registration in HYPOTHESES.md (Added
-    2026-10-27, before the calibration runs), awaiting review; the held H1 draft is a later
-    latency campaign, and stays held;
-  - the sweeps' predictions.
-
-  Comparisons are reported, not judged.
+- [ ] **Register the hypotheses** before the cloud runs. HYPOTHESES.md was refocused on
+  2026-10-27 on the write and read trade-off; the earlier ones are the file at commit 1145f89.
+  - the calibration's C1–C4, drafted, awaiting review;
+  - the sweeps' predictions, once the base point is chosen.
 - [ ] **Cloud campaign,** on the fork build with the five arms, on S3 Express and Azure:
   - the base point;
   - settings on either side of each crossover the local sweeps find;
@@ -224,10 +240,12 @@ approach 1.
 
   The configurations planned so far are only the calibration (`s3x-calibration`,
   `azure-calibration`), with the five arms. Its twins were rerun on 2026-10-27 (campaign
-  `twins-five`, replacing `twins-fork`), and the Azure predictions recomputed from them
-  (AZURE_RUNBOOK.md): RMoW-C ÷ MoR-v3 is 0.36 for a batch and 0.59 for a full read. The two
-  twins' model requests and bytes match in all 842 records, every phase on Azurite sent what the
-  model counts, and the arms both twin pairs ran match in every record they share.
+  `twins`, after three earlier pairs), and the predictions recomputed from them
+  (AZURE_RUNBOOK.md, HYPOTHESES.md): on Azure RMoW-C ÷ MoR-v3 is 0.36 for a batch and 0.59 for a
+  full read, RMoR-C with footers' 0.54 and 0.58. The two twins' model requests and bytes match in
+  all 862 records, every phase on Azurite sent what the model counts (RMoR-C with footers'
+  creates aside), and the other arms match the earlier twins in every shared record. Across the
+  runs the S3 Express ratios moved by up to 0.12, through the CPU's pace per run.
 - [x] **`phase_work`'s CPU was 11% high on the laptop** (found 2026-10-27; divided by the ratio,
   decided and done 2026-10-27). The thread CPU clock runs 11.1% fast against the wall clock there
   (WSL2; `host.thread_cpu_per_wall` in manifests from 2026-10-26), and `phase_work` turned
@@ -241,11 +259,11 @@ approach 1.
   done 2026-10-27). With `rmor-c` they set `writerSkipsDeadRowGroups` and read with `cached-skip`
   beside the others, stock included. The twins were rerun and the Azure predictions recomputed
   (`twins-five`). The calibration's workload is the ingest window, unchanged: its op log is the
-  same.
+  same. On 2026-10-27 they dropped `rmow-c-split` again, with the arm, and took `rmor-c-footer`
+  (above).
 
 ## Still open from before
 
 - A second seed, and repetitions.
-- H4's abort on S3, from the GET bytes the SDK declares.
 - docker/README.md says the repository has no remote; it has one (`self`).
 - A server core's pace on havoc, if an admin allows counters.

@@ -126,7 +126,7 @@ N = {
 }
 ```
 
-H3 (docs/HYPOTHESES.md) splits RMoW's difference from MoR-v3 into two steps:
+H3 (docs/HYPOTHESES.md at 1145f89) splits RMoW's difference from MoR-v3 into two steps:
 
 - **The layout step** (RMoW against TailCoW): what the single appendable object buys. That means
   fewer objects and footers to open, and one append instead of a new object per batch.
@@ -137,7 +137,7 @@ that it matters mostly for read requests. It is decided by comparing the two, re
 request type.
 
 This page reads local runs of uncompacted configurations, rerun on 2026-10-25 on the current
-build (docs/HYPOTHESES.md, 2026-10-25). Against the runs this page first read:
+build (docs/HYPOTHESES.md at 1145f89, 2026-10-25). Against the runs this page first read:
 - MoR-v3's batches and every non-split probe are unchanged;
 - RMoW's batches take one footer read more per live file, which earlier builds left out (README,
   I/O parity rule 6);
@@ -404,7 +404,7 @@ WHERE r.label LIKE 'local-rg-sweep-%' OR r.label = 'local-split-recency-exp-noco
   GET, because the newest rows are one small tail data file, fetched whole. RMoW needs
   {eval}`N["recent_rmow"]`: a footer and a row group. MoR-v3 needs {eval}`N["recent_mor"]`.
 
-## H3 (docs/HYPOTHESES.md)
+## H3 (docs/HYPOTHESES.md at 1145f89)
 
 **Mixed.**
 
@@ -434,7 +434,7 @@ WHERE r.label LIKE 'local-rg-sweep-%' OR r.label = 'local-split-recency-exp-noco
 
 - **One seed, local.** Requests and bytes are deterministic, and the 4 MiB rg-sweep and split
   runs match exactly. The reruns of 2026-10-25 match the earlier runs, except where the
-  writer-footer rule changes RMoW's, CoW's and TailCoW's batches (docs/HYPOTHESES.md, controls
+  writer-footer rule changes RMoW's, CoW's and TailCoW's batches (docs/HYPOTHESES.md at 1145f89, controls
   K1–K3). There is no latency.
 - **No compaction.** Compaction cuts MoR-v3's and TailCoW's read GETs, which shrinks the policy
   step's read savings. See the compaction sweep (H6).

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Decides when to compact, per arm, from runs of one workload that differ only in the compaction
-policy (configs/local-compact-*.json; H6 in docs/HYPOTHESES.md).
+policy (configs/local-compact-*.json; H6 in docs/HYPOTHESES.md at 1145f89).
 
 A policy is the check period P (layout.compactEvery; 0: never) and the thresholds. For each run
 and arm, per batch over the whole run: bytes, PUT-class and GET-class requests, bytes read and

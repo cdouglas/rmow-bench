@@ -81,7 +81,7 @@ N = {
 
 What does RMoW pay for putting each version's regions in new objects instead of appending to
 one? The `split-vs-append` campaign compares the two layouts of RMoW-B and RMoW-C, and decides
-H5 (`docs/HYPOTHESES.md`). It reads three runs: recency-skewed updates without compaction and
+H5 (`docs/HYPOTHESES.md` at 1145f89). It reads three runs: recency-skewed updates without compaction and
 with compaction every 10 batches, and uniform updates with compaction. They are the rerun of
 2026-10-25 on the current build, which replaced the static report's
 (`docs/measurements/split-vs-append-2026-10-21.md`).
@@ -158,7 +158,7 @@ All are recency-skewed updates without compaction, RMoW-B and RMoW-C, unless the
   must write what copy-on-write writes, in either layout. Over batches 1–9, before the first
   compaction, each RMoW arm wrote {eval}`N["uni_cow"]`× CoW's bytes.
 
-## H5 (docs/HYPOTHESES.md)
+## H5 (docs/HYPOTHESES.md at 1145f89)
 
 - **Writes: held for PUTs and bytes; contradicted for requests in all.** One more PUT-class
   request per changed file and the same bytes, as predicted. But split files now take

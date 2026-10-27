@@ -16,7 +16,7 @@ above which RMoW pays, and how the workload moves that latency.
 | [README.md](../README.md) | What RMoW is, how to build and run, and the reference tables of arms and knobs. |
 | [docs/PLAN.md](PLAN.md) | The plan as approved on 2026-10-20, with milestones. Its default matrix is not what ran ([below](#what-every-experiment-shares)). |
 | [docs/DESIGN.md](DESIGN.md) | The format-level findings: writer rules, footer order, split files, compaction. |
-| [docs/HYPOTHESES.md](HYPOTHESES.md) | H1–H6, each written down before the runs that decide it. |
+| [docs/HYPOTHESES.md](HYPOTHESES.md) | The question (the write and read trade-off), what is settled, and the hypotheses of the runs to come, each written down before them: the calibration's C1–C4 (draft). The earlier H1–H6 and campaign predictions are [the file at 1145f89](https://github.com/cdouglas/rmow-bench/blob/1145f89a36fa60af56aefc9233991f1d03755ae2/docs/HYPOTHESES.md). |
 | [docs/ROADMAP.md](ROADMAP.md) | The outstanding work, and the decisions that shaped it. |
 | `docs/measurements/` | One write-up per experiment. Write-ups from 2026-10-22 on are lab pages (`lab/pages/`), whose tables and numbers are computed from the runs. |
 | `lab/` | The results database and pages (labbook). `lab jupyter` opens them as notebooks and `lab serve` as a site. `lab/pages/experiments.md` regenerates this page's parameter tables from the runs. |
@@ -35,6 +35,7 @@ All arms replay the same op log from the same initial-load file. The ids are the
 | `cow` | copy-on-write | a new data file per batch | every touched data file rewritten whole |
 | `tailcow-b`, `tailcow-c` | copy-on-write tail | merged into open tail **data files** by policy B or C | deletion vectors, except in tail files being merged |
 | `rmor-c` | regional merge-on-read | as `tailcow-c` | every row group (of a sealed file) or open tail file a batch changes enough of (`rmorRewriteShare`, θ) rewritten: a row group's rows go into the batch's new data file and a DV covers the old row group; an open tail file is rewritten whole and takes its place. Below θ, deletion vectors. |
+| `rmor-c-footer` | regional merge-on-read, footers | as `tailcow-c`, in files the store can extend | as `rmor-c` at θ = 0, each old row group hidden by a footer appended to its file instead of a DV (built 2026-10-27) |
 | `rmow-a`, `rmow-b`, `rmow-c` | RMoW, appendable | a row group appended to the tail **object**, merged with open tail row groups by policy A, B or C | every touched row group rewritten as a new region of its object |
 | `rmow-b-split`, `rmow-c-split` | RMoW, split | as `rmow-*`, but each version's regions go to a new object and its footer to a footer-only object | the same |
 | `rmow-*-dv` | RMoW with DVs (ablation, removed) | as `rmow-*` | deletion vectors on each object's stable prefix (its sealed row groups); open tail row groups were still rewritten. Removed after the dv ablation ([DESIGN.md](DESIGN.md#deletion-vectors-on-an-appendable-file-an-ablation-removed)). |
@@ -108,8 +109,8 @@ a new hash under the same label.
 | **layout vs policy** (no new runs) | H3: is RMoW against TailCoW (layout) a smaller difference than TailCoW against MoR-v3 (tail policy), and mostly in read requests? | read from the uncompacted rg-sweep, split and m1 uniform runs | MoR-v3, TailCoW-B and -C, RMoW-B and -C in both layouts | 6 of the above | [lab/pages/layout-vs-policy.md](../lab/pages/layout-vs-policy.md) |
 | **time travel** (reruns) | H4: does an old version read like the current one, and do dead bytes cost reads? | the 7 uncompacted configurations that read old versions, rerun 2026-10-22/23 with the split-offset fix: each time-travel read against the full read of the same state | all that ran | 7 of the above, rerun | [lab/pages/time-travel.md](../lab/pages/time-travel.md) |
 | **store latency** (`configs/sim-*`, and the existing runs) | What would each arm take on a given store? Latency simulated from what each phase records: CPU, requests and bytes. | endive's store profiles (S3 Express, S3, Azure), and a sweep of request latency × throughput; a validation run with latency injected; a 4 MiB recency run with its requests logged | MoR-v3, TailCoW-C, RMoW-B and -C, both layouts | 3 (and the 4 MiB recency and uniform runs) | [lab/pages/store-latency.md](../lab/pages/store-latency.md) |
-| **s3x calibration, local twin** (`configs/s3x-calibration-local.json`) | The requests and bytes the first S3 Express run must reproduce exactly, and its runtime. | the S3 Express calibration's settings (200k rows, 20 batches, 1 MiB row groups) on the local store, with a JIT warmup and five readers (one-footer, cached on 1 and 8 threads, cached-skip, stock) and the writer that skips dead row groups; rerun 2026-10-27 with the five arms (campaign `twins-five`) | MoR-v3, TailCoW-C, RMoR-C, RMoW-C and RMoW-C-split | 1 | None: a baseline. 1.1 minutes, 10,136 requests. |
-| **azure calibration, Azurite twin** (`configs/azure-calibration-azurite.json`) | The requests the first Azure run must send, through ADLSFileIO and the Azure SDK, and the predictions it is checked against (docs/AZURE_RUNBOOK.md). | the same settings on Azurite, 2026-10-27, with the five arms (campaign `twins-five`) | the same | 1 | The runbook's predictions. 2.1 minutes; every phase sent the model's 10,136 requests, and its model requests and bytes equal the local twin's in all 842 records. |
+| **s3x calibration, local twin** (`configs/s3x-calibration-local.json`) | The requests and bytes the first S3 Express run must reproduce exactly, and its runtime. | the S3 Express calibration's settings (200k rows, 20 batches, 1 MiB row groups) on the local store, with a JIT warmup and five readers (one-footer, cached on 1 and 8 threads, cached-skip, stock) and the writer that skips dead row groups; rerun 2026-10-27 with the five arms new campaigns run (campaign `twins`) | MoR-v3, TailCoW-C, RMoR-C, RMoR-C with footers and RMoW-C | 1 | None: a baseline. 1.2 minutes, 10,222 requests. |
+| **azure calibration, Azurite twin** (`configs/azure-calibration-azurite.json`) | The requests the first Azure run must send, through ADLSFileIO and the Azure SDK, and the predictions it is checked against (docs/AZURE_RUNBOOK.md). | the same settings on Azurite, 2026-10-27, with the five arms (campaign `twins`) | the same | 1 | The runbook's predictions. 2.2 minutes; every phase sent the model's 10,222 requests (RMoR-C with footers' creates aside, three requests each there), and its model requests and bytes equal the local twin's in all 862 records. |
 | **scale** (`configs/scale-recency-*`, on havoc) | Do the 4 MiB recency setting's requests, bytes, CPU and simulated latency hold at Iceberg's defaults (P1–P6)? | row group R = tail seal = 4, 16, 64, 128 MiB, with rows, operations per batch and files scaled by R; recency, no compaction, payload checks off, requests logged | MoR-v3, TailCoW-C, RMoW-B and -C in both layouts | 4, 4 in the rerun, 4 on the laptop | [lab/pages/scale.md](../lab/pages/scale.md). CPU decided on the laptop, in instructions: on havoc, foreign load and then noise beyond it left it undecided. |
 | **cpu measure** (`configs/cal-cpu-recency-4m.json`) | How to measure CPU so that one phase can decide a 10% question (M1–M4)? | the measure: thread CPU time against each thread's user-mode instructions and cycles (`perf_event_open`); the 4 MiB scale setting, all six arms, `cached` and `cached-p8`, run twice | all six of the scale campaign | 2 | [lab/pages/cpu-measure.md](../lab/pages/cpu-measure.md) |
 | **dv ablation** (`configs/local-dv-*`) | H3's attribution: how much of RMoW against TailCoW is the layout, and how much the update handling (region rewrites against DVs)? | key distribution (recency, uniform); 4 MiB, no compaction | MoR-v3, CoW, TailCoW-B and -C, RMoW-A, -B and -C, RMoW-A-dv, -B-dv and -C-dv | 3, deleted | Conclusions in [DESIGN.md](DESIGN.md#deletion-vectors-on-an-appendable-file-an-ablation-removed); numbers under Retired runs. |
@@ -199,7 +200,7 @@ data showed:
   - in the two m1 runs, the MoR and TailCoW arms, whose builds predate counting Puffin's HEAD and
     run-relative paths.
 
-  That is what docs/HYPOTHESES.md registered on 2026-10-22: no difference outside those.
+  That is what docs/HYPOTHESES.md at 1145f89 registered on 2026-10-22: no difference outside those.
 
 **Deleted 2026-10-23: the dv ablation's three runs**, with the `-dv` arms themselves (docs/DESIGN.md):
 - `local-dv-recency-exp-nocompact` twice (readers `one-footer` and `stock`; then also `cached`);
@@ -243,7 +244,7 @@ compaction rework (0564114). What their data showed (recency, 4 MiB, at batch 60
 These are the numbers in split-vs-append-2026-10-21.md's compaction tables, which the compaction
 sweep had already superseded. The lab's Layouts page now shows the reruns.
 
-The reruns match them as registered in docs/HYPOTHESES.md (2026-10-23), with no difference
+The reruns match them as registered in docs/HYPOTHESES.md at 1145f89 (2026-10-23), with no difference
 outside the expected kinds:
 - the RMoW arms from step 10, the first compaction, on;
 - the m1 runs' MoR and TailCoW build differences.
@@ -263,7 +264,7 @@ result (`lab/annotations.toml`).
   `local-split-*` (3) and `local-compact-*` (11);
 - `sim-validate-s3x` (`30a4ea0533b8`) and `sim-recency-4m-noverify` (`f412f1efff2d`).
 
-The reruns from b6c2605 replace them (docs/HYPOTHESES.md, 2026-10-25). Twelve build snapshots
+The reruns from b6c2605 replace them (docs/HYPOTHESES.md at 1145f89, 2026-10-25). Twelve build snapshots
 went with them, which only they used: `20261021T1922{59,302,305}Z-aac3bdff873a-dirty`,
 `20261022T224505Z-cfe40b2f65bf`, `20261023T0422{19,24,28}Z-cfe40b2f65bf-dirty`,
 `20261023T045645Z-cfe40b2f65bf-dirty`, `20261023T06175{1,5}Z-17476f3567dc`,
@@ -305,7 +306,7 @@ What they showed, kept in docs/AZURE_RUNBOOK.md:
   read, now 0.38 and 0.59.
 - **Iceberg's reads as shipped** sent 47.1 and 79.5 GETs and 7.4 and 122.9 MB for MoR-v3's batch
   and full read, and 11.6 and 49.0 GETs and 24.1 and 157.9 MB for RMoW-C's. Simulated, RMoW-C ÷
-  MoR-v3 was 0.54 and 0.91 (draft Z6). It needs a build before 2026-10-26 to rerun.
+  MoR-v3 was 0.54 and 0.91 (draft Z6, in HYPOTHESES.md at 1145f89). It needs a build before 2026-10-26 to rerun.
 - **The local twin** took 1.8 minutes and 10,446 requests, with three readers and before the
   writers read footers per transaction; its rerun takes 11,706.
 
@@ -325,6 +326,33 @@ What they showed, kept here and in docs/AZURE_RUNBOOK.md:
   1,972, RMoW-B 460 and 1,392, RMoW-C 572 and 1,511. RMoW-C ÷ MoR-v3 was 0.37 and 0.59 (0.38 and
   0.59 with CPU on the thread clock, as the runbook first quoted them).
 
+**Deleted 2026-10-27: the calibration's five- and four-arm twins** (campaigns `twins-five` and
+`twins-four`): the five-arm pair replaced by the four-arm one when RMoW-C-split was dropped, and
+that by the current pair (campaign `twins`) when RMoR-C with footers joined:
+- `azure-calibration-azurite-fa985c0f0fe1/20261027T073122Z` and
+  `s3x-calibration-local-7596607f5035/20261027T073342Z`, with their build snapshot
+  `20261027T073121Z-d6d6f0b44523-dirty`;
+- `azure-calibration-azurite-0ba3de47df6e/20261027T172447Z` and
+  `s3x-calibration-local-5c721acefc31/20261027T172650Z`, with their build snapshot
+  `20261027T172446Z-1145f89a36fa-dirty`. Each snapshot was used only by its pair.
+
+What they showed:
+- **Requests and bytes.** Each pair matched within itself (842 and 676 records), and the arms the
+  twins share matched in every record, so neither the variant nor dropping RMoW-C-split changed
+  another arm. Azurite sent the model's 10,136 and 8,665 requests, with no retries. RMoW-C-split's
+  batch took 5.4 GETs and HEADs, 2.0 PUTs, 3.26 MB read and 0.86 MB written, its full read 21.0
+  GETs and 6.9 MB.
+- **Simulated** (ms, a batch and a full read under `cached`, CPU on the wall clock; RMoR-C under
+  `cached-skip` in brackets). Five arms, on `azure`: MoR-v3 1,554 and 2,549, TailCoW-C 780 and
+  1,684, RMoR-C 850 and 2,006 (1,580), RMoW-C 560 and 1,510, RMoW-C-split 586 and 1,354; on
+  `s3x`: 134 and 369, 92 and 305, 197 and 390 (311), 172 and 290, 191 and 272. Four arms, on
+  `azure`: 1,561 and 2,567, 784 and 1,689, 876 and 2,020 (1,587), 574 and 1,504; on `s3x`: 136 and
+  389, 92 and 319, 215 and 386 (298), 177 and 280.
+- **The CPU's pace varies by run.** With identical requests and bytes, the S3 Express ratios to
+  MoR-v3 moved by up to 0.12 between these and the current twins (RMoR-C's batch, 1.47 to 1.59),
+  Azure's by at most 0.02. Instructions repeated within 0.4%; cycles per instruction, taken per
+  run, moved by up to 12%.
+
 ## Findings so far
 
 **CPU on the wall clock (2026-10-27).** The laptop's thread CPU clock runs 11.1% fast against its
@@ -340,7 +368,7 @@ MoR-v3 saving 4%.
 
 All are local runs: requests and bytes are exact, latency is not measured.
 
-**The core experiments were rerun on 2026-10-25 on the current build** (docs/HYPOTHESES.md):
+**The core experiments were rerun on 2026-10-25 on the current build** (docs/HYPOTHESES.md at 1145f89):
 writer footers held per transaction, the `cached` reader models, split files planned per row
 group, the payload check off, and CPU in instructions. The bullets from m1 to store latency
 below give the reruns' figures; lab/pages/summary.md collects every number a write-up quotes.
@@ -499,6 +527,9 @@ Against the runs they replaced (controls K1–K3):
 
 ## The hypotheses
 
+H1–H6 are HYPOTHESES.md as of commit 1145f89; the refocused file (2026-10-27) carries
+what they settled, and the calibration's C1–C4, open until the cloud runs.
+
 | | Claim, in short | Status |
 |---|---|---|
 | H1 | Recency-skewed updates: RMoW-C's full read stays flat, its writes within 3× MoR-v3's | **Open.** Decided on S3 Express, which has not run. |
@@ -511,13 +542,13 @@ Against the runs they replaced (controls K1–K3):
 ## What is next
 
 The outstanding work is tracked in [ROADMAP.md](ROADMAP.md), with the decisions of 2026-10-26:
-the five arms, the workload axes, and SAO for every store. The list below is as of 2026-10-25.
+the arms new campaigns run, the workload axes, and SAO for every store. The list below is as of 2026-10-25.
 
 The goal is a blog post on appending regions to Parquet: compacting regions, and when an
 appendable object beats Iceberg's merge-on-read. ORC is out of scope (decided 2026-10-25): it
 would need its own arms and reader checks.
 
-- **Now: the core experiments rerun on the current build** (docs/HYPOTHESES.md, 2026-10-25):
+- **Now: the core experiments rerun on the current build** (docs/HYPOTHESES.md at 1145f89, 2026-10-25):
   the 22 `local-*` configurations and the two `sim-*` ones. They fix the gaps below: writer
   footers, the `cached` reader models, split planning, the payload check, and CPU in
   instructions. Controls K1–K3 check them against the old runs, and H2–H6 are re-decided on them.
@@ -540,13 +571,12 @@ would need its own arms and reader checks.
   them needs a build before 2026-10-26). It needs a hierarchical-namespace account, a VM in its
   region and a managed identity. Its Azurite twin gives the requests it must send, and its
   hypotheses are drafted in the runbook, with the S3 Express ones.
-- **Both calibrations run the five arms** (MoR-v3, TailCoW-C, RMoR-C, RMoW-C, RMoW-C-split) since
-  2026-10-27, RMoR-C with the writer that skips dead row groups and a `cached-skip` reader beside
+- **Both calibrations run the five arms new campaigns run** (MoR-v3, TailCoW-C, RMoR-C, RMoR-C
+  with footers, RMoW-C) since 2026-10-27, RMoR-C with the writer that skips dead row groups and a `cached-skip` reader beside
   the others, and their spikes time GETs by size for the read rate per MiB.
 - **Optional, to come back to:**
   - a second seed, to show the request and byte findings are not one op log's;
   - a CDC-like workload with late arrivals;
-  - updating the held H1 draft (docs/HYPOTHESES.md), whose figures come from the old runs;
   - a server core's pace on havoc. P3–P5 were decided on this laptop; havoc could check them once
     an admin allows counters (`sysctl -w kernel.perf_event_paranoid=2`; it is 4);
   - docker/README.md still says the repository has no remote; it has one (`self`, on GitHub), so

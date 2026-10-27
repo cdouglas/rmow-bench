@@ -83,20 +83,24 @@ lab ingest
 
 The local twin, `configs/s3x-calibration-local.json`, differs only in the store. It is rerun on
 the build the cloud run uses, so its requests and bytes are what the cloud run must match. The
-current one is `s3x-calibration-local-7596607f5035/20261027T073342Z` (campaign `twins-five`;
-commit 1cb7160, whose code equals what it ran), rerun if the code changes before the run. On the `s3x` profile it simulates (ms; means
-over batches 1–20 and the full reads after the initial load, `cached`, CPU on the wall clock):
+current one is `s3x-calibration-local-8433ccfd4620/20261027T175847Z` (campaign `twins`; build
+snapshot `20261027T175613Z-1145f89a36fa-dirty`, which the commit "RMoR-C with footers, a variant
+that hides old row groups without DVs" holds), rerun if the code changes before the run. On the
+`s3x` profile it simulates (ms; means over batches 1–20 and the full reads after the initial load,
+`cached`, CPU on the wall clock):
 
 | Arm | A batch | A full read |
 |---|---|---|
-| MoR-v3 | 134 | 369 |
-| TailCoW-C | 92 | 305 |
-| RMoR-C | 197 | 390 (`cached-skip`: 311) |
-| RMoW-C | 172 | 290 |
-| RMoW-C-split | 191 | 272 |
+| MoR-v3 | 133 | 398 |
+| TailCoW-C | 92 | 356 |
+| RMoR-C | 205 | 409 (`cached-skip`: 315) |
+| RMoR-C with footers | 190 | 302 |
+| RMoW-C | 182 | 317 |
 
-CPU is 64–72% of the region arms' batches (MoR-v3's 20%, TailCoW-C's 36%) and 45–53% of every
-full read, so this run checks the model where CPU decides.
+CPU is 66–74% of the region arms' batches (MoR-v3's 20%, TailCoW-C's 36%) and 49–58% of every
+full read, so this run checks the model where CPU decides. Across three twin runs with the same
+requests and bytes, these times moved by up to 12% against MoR-v3's: the CPU's pace (cycles per
+instruction) varies from run to run.
 
 ## What the analysis will do
 
@@ -115,23 +119,11 @@ full read, so this run checks the model where CPU decides.
 - **The model.** Replay the calibration run with the measured profile, and compare each one-thread
   phase's simulated latency with its measured wall time (`wall_ns`).
 
-## Hypotheses (DRAFT, to register before the run)
+## Hypotheses
 
-They are drafted for registration, with Z1–Z8, in docs/HYPOTHESES.md (Added 2026-10-27, before
-the calibration runs), for review. X4 tests the held H1 draft's L4 on one run.
-- **X1: the model counts what S3 Express receives.** Every phase's requests and bytes match the
-  local twin's exactly. `CreateSession` is the only request the model does not hold.
-- **X2: the profile holds.** Median GET, PUT and append latencies (64 KiB) are within 50% of the
-  `s3x` profile's 2.5, 6.5 and 13 ms.
-- **X3: appended parts cost reads little.** A GET of the last 64 KiB of a 1,000-part object
-  takes at most 100 ms more than one of a 1-part object, which is the sweep's 0.1 ms per part.
-- **X4: latency is CPU plus requests.** With the measured profile, each one-thread phase's
-  simulated latency is within 25% of its wall time. This is the H1 draft's L4, on one run.
-- **X5: the fork's conditions cost nothing measurable.** At every size, the median `append_sao`
-  is within 10% of the median `append`, and the median `create_sao` within 10% of the median
-  `put`. The requests are the same; only an ETag or absence condition, and the checksum
-  `prepare()` computes, differ.
-- **X6: reads cost what the profile assumes per MiB.** The slope of the median `get_size` over 1
-  to 32 MiB is within 50% of the `s3x` profile's 10 ms per MiB, and at each size the median
-  `get_range` is within 20% of the median `get_size`: a row group read as a range costs what an
-  object of its size does.
+C1–C4 in docs/HYPOTHESES.md (before the calibration runs, drafted 2026-10-27): the model counts
+what S3 Express receives (C1), a phase takes its CPU plus its requests' latencies (C2), the
+trade-off falls where the twin puts it (C3: the region arms' batches slower than MoR-v3's, their
+full reads faster), and CPU is the bottleneck of the region arms' batches here (C4). The spike's
+numbers are measured, not judged: request latencies by operation and size, the read rate per MiB,
+the extra latency per appended part, and `append_sao` and `create_sao` against `append` and `put`.

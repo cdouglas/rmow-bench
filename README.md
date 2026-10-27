@@ -32,7 +32,8 @@ Four documents go with this one:
   varied and found, and where each hypothesis stands. Start here.
 - [docs/PLAN.md](docs/PLAN.md): the plan, with its milestones.
 - [docs/DESIGN.md](docs/DESIGN.md): the format-level findings and the writer's rules.
-- [docs/HYPOTHESES.md](docs/HYPOTHESES.md): the hypotheses, fixed before any cloud run.
+- [docs/HYPOTHESES.md](docs/HYPOTHESES.md): the question, what is settled, and the hypotheses of
+  the runs to come, each fixed before them (the earlier ones: the file at commit 1145f89).
 
 ## Build and run
 
@@ -211,8 +212,8 @@ not in the model), and latency. Two things check them, given a directory bucket:
   `results/spike/s3x-spike-<UTC>/spike.jsonl`.
 
 `configs/s3x-calibration.json` is the first cloud run, to make once the bucket exists: a small
-workload and the five arms new campaigns run (MoR-v3, TailCoW-C, RMoR-C, RMoW-C and
-RMoW-C-split), from an EC2 instance in the bucket's zone. Its twin,
+workload and the five arms new campaigns run (MoR-v3, TailCoW-C, RMoR-C, RMoR-C with footers and
+RMoW-C), from an EC2 instance in the bucket's zone. Its twin,
 `configs/s3x-calibration-local.json`, differs only in the store. Its requests and bytes are what
 the S3 Express run's model and SDK counts must match exactly, apart from `CreateSession`.
 
@@ -338,6 +339,7 @@ For latency, a configuration can set more things, and a run can log its requests
 | `cow` | a new data file per batch | every touched data file is rewritten whole |
 | `tailcow-b`, `tailcow-c` | merged into open tail *data files* by policy B or C | DVs, except in tail files being merged |
 | `rmor-c` | as `tailcow-c` | regional merge-on-read: a batch rewrites each region it changes when it changes at least θ (`rmorRewriteShare`) of the region's live rows. A sealed file's row group goes, with the batch's changes, into the batch's new data file, and a DV covers the old row group; an open tail file is rewritten whole and takes its place in the tail. Below θ, DVs. A file with no live row left leaves the table. θ = 0 rewrites every region a batch changes; above 1 it is `tailcow-c`. The format is Iceberg's, and no store needs to append |
+| `rmor-c-footer` | as `rmor-c`, its data files created as objects the store can extend | `rmor-c`'s rewrites at θ = 0, each old row group hidden by a footer appended to its file, listing the file's other row groups, instead of a DV. Each append is a new version of the data file (length, split offsets, metrics), as RMoW's are. No delete files; the rows after an elided row group move up in their file, which is why θ must be 0 |
 | `rmow-a`, `rmow-b`, `rmow-c` | appended to the tail object as a row group, merged with open tail *row groups* by policy A, B or C | every touched row group is rewritten as a region of its own object (row-group copy-on-write) |
 | `rmow-a-split`, `rmow-b-split`, `rmow-c-split` | as `rmow-*`, but each version's regions go to a new object, and its footer to a footer-only object naming the objects its row groups live in (`file_path`) | the same row-group copy-on-write; no append, so standard S3 and GCS can run them, and whole objects become deletable as versions expire ([docs/DESIGN.md](docs/DESIGN.md#regions-in-separate-objects-split-files)) |
 
@@ -348,8 +350,10 @@ The tail policies (`TailPolicy`) are:
 
 RMoW against TailCoW therefore isolates the layout, a single appendable object against separate
 data files. TailCoW against MoR-v3 isolates the tail-merge policy. RMoR-C against TailCoW-C
-isolates update handling (regions rewritten against DVs on rows), and RMoR-C against RMoW-C where
-a rewritten region goes (a new data file with a DV on the old, against appended to its object). RMoW against RMoW-split
+isolates update handling (regions rewritten against DVs on rows). RMoR-C with footers isolates the
+two parts of RMoR-C against RMoW-C: against RMoR-C, what hides the old row group (a new footer
+against a DV); against RMoW-C, where the rewritten region goes (a new data file against appended to
+its object). RMoW against RMoW-split
 isolates append: the same policy, footer and reads, with history kept inside one object or spread
 over objects that can be deleted.
 

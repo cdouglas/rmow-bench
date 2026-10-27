@@ -14,7 +14,7 @@ from labbook import palette, q, table, theme
 theme()
 
 # The runs this page reads: the uncompacted configurations that read old versions, rerun on
-# 2026-10-25 from b6c2605 (docs/HYPOTHESES.md, 2026-10-25).
+# 2026-10-25 from b6c2605 (docs/HYPOTHESES.md at 1145f89, 2026-10-25).
 RUNS = [
     "local-m1-recency-exp-nocompact-3e13131d9629/20261025T204243Z",
     "local-m1-uniform-nocompact-717579acbd22/20261025T210333Z",
@@ -95,7 +95,7 @@ N = {
 }
 ```
 
-H4 (docs/HYPOTHESES.md) predicts two things:
+H4 (docs/HYPOTHESES.md at 1145f89) predicts two things:
 
 - **Reads.** With bounded ranged reads, an old version of an appendable file reads like a current
   version of the same size, and its dead regions add no read bytes.
@@ -104,7 +104,7 @@ H4 (docs/HYPOTHESES.md) predicts two things:
 
 The seven uncompacted configurations that read old versions were rerun for this page once time
 travel planned old RMoW versions with their own split offsets (commit 150cc93). They were rerun
-again on 2026-10-25, on the current build, with four reader models (docs/HYPOTHESES.md). The first
+again on 2026-10-25, on the current build, with four reader models (docs/HYPOTHESES.md at 1145f89). The first
 runs did not plan old versions that way, which made the stock reader's comparison measure the
 harness. They are deleted, and [what they showed](#earlier-runs) is recorded below.
 
@@ -120,7 +120,7 @@ harness. They are deleted, and [what they showed](#earlier-runs) is recorded bel
 **Workload.** The runs share the m1 workload: 1M initial rows, then 60 batches of 10k operations,
 70% inserts, 25% updates and 5% deletes.
 
-**Builds.** All are commit b6c2605, rerun on 2026-10-25 (docs/HYPOTHESES.md):
+**Builds.** All are commit b6c2605, rerun on 2026-10-25 (docs/HYPOTHESES.md at 1145f89):
 - the rg-sweep and split runs came from `results/builds/20261025T165102Z-b6c26055757b-dirty`;
 - the m1 runs came from `…20261025T204242Z-b6c26055757b-dirty`.
 
@@ -257,7 +257,7 @@ without split offsets (a snapshot's entry would carry them)".
   in the rg-sweep and split-vs-append write-ups.
 
 **The reruns against them.** `steps_diff` compared each rerun with its earlier run, record by
-record. docs/HYPOTHESES.md (2026-10-22) registered, before the reruns, that only two kinds of
+record. docs/HYPOTHESES.md at 1145f89 (2026-10-22) registered, before the reruns, that only two kinds of
 record would differ:
 - the RMoW arms' `read_old`;
 - in the two m1 runs, the MoR and TailCoW arms, whose earlier builds predate counting Puffin's
@@ -316,7 +316,7 @@ The m1 runs' other differences are their MoR and TailCoW arms' HEADs and bytes, 
   - **The one-footer reader is unaffected.** It issues no open-ended GET for footers under its
     64 KiB prefetch. Under it, no read aborted.
 
-## H4 (docs/HYPOTHESES.md)
+## H4 (docs/HYPOTHESES.md at 1145f89)
 
 - **Old versions read like current ones: held, under every reader model.** All
   {eval}`N["rmow_pairs"]` pairs over RMoW files cost exactly what the current read of the same

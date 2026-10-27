@@ -55,7 +55,7 @@ N = {
 How does the row-group size trade RMoW's writes against its reads? The `rg-sweep` campaign
 runs the `local-m1` recency workload with compaction off and `rowGroupBytes` and
 `tailSealBytes` both 1, 2, 4 and 8 MiB. Its runs are the rerun of 2026-10-25 on the current
-build (docs/HYPOTHESES.md), which replaced those of the static report
+build (docs/HYPOTHESES.md at 1145f89), which replaced those of the static report
 (`docs/measurements/rg-sweep-recency-2026-10-21.md`). Reads are the last probe's, under the
 one-footer reader. The x axis is log 2.
 

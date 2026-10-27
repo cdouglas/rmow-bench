@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compares arms across runs, one table per run: what H5 is decided by (docs/HYPOTHESES.md).
+"""Compares arms across runs, one table per run: what H5 is decided by (docs/HYPOTHESES.md at 1145f89).
 
 Per arm, at the last step: bytes and requests per batch (and compaction's, per batch), the last
 probe's full read under the primary reader, stored and kept bytes (kept: what remains once every

@@ -17,9 +17,11 @@ records requests, bytes and CPU per arm, step and phase.
   every config knob (`layout.*`, `reads.*`).
 - **[docs/ROADMAP.md](docs/ROADMAP.md)** is the outstanding work and what was decided about it.
   Keep it current as items land.
-- **[docs/HYPOTHESES.md](docs/HYPOTHESES.md)** holds H1–H6. **[docs/DESIGN.md](docs/DESIGN.md)**
-  holds the format-level findings and the writer's rules. **[docs/PLAN.md](docs/PLAN.md)** is the
-  original plan, whose default matrix was not what ran.
+- **[docs/HYPOTHESES.md](docs/HYPOTHESES.md)** holds the question (the write and read trade-off),
+  what is settled, and the hypotheses of the runs to come; the earlier H1–H6 and each campaign's
+  predictions are the file as of commit 1145f89, which the older write-ups cite.
+  **[docs/DESIGN.md](docs/DESIGN.md)** holds the format-level findings and the writer's rules.
+  **[docs/PLAN.md](docs/PLAN.md)** is the original plan, whose default matrix was not what ran.
 - **Write-ups**, one per experiment, are lab pages (`lab/pages/<name>.md`), so the data stay in
   context: their tables, charts and quoted numbers are computed from the runs. Those before
   2026-10-22 are `docs/measurements/<experiment>-<date>.md`.
@@ -117,7 +119,10 @@ bin/matrix.sh --build configs/local-compact-*.json   # several, from a build sna
   to any arm's read or write path must keep them, and the tests that check them must pass.
 - **Hypotheses come before the runs that decide them.** Add each one to `docs/HYPOTHESES.md` in a
   new dated section, before running. Never edit an earlier one in place; record a revision as a
-  new section. Report a contradicted hypothesis as contradicted.
+  new section. Report a contradicted hypothesis as contradicted. Keep them few, and about the
+  question: writes against reads in latency, requests and bytes, and where each phase's time
+  went. What a run only measures (a store's latencies, a control's counts) is
+  listed as measured, not judged.
 
 ## Adding an experiment
 

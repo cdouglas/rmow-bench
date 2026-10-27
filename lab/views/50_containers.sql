@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS load (run_id VARCHAR, t0 DOUBLE, t1 DOUBLE, own_cpus 
 -- The foreign load during each timed phase of a run with load samples: the samples whose
 -- interval overlaps the phase's. A phase is clean when no overlapping sample reached 0.25 CPUs
 -- of foreign load, which half a CPU taken from the job's own (0.5) or a busy sibling (1) exceed;
--- only a clean phase's CPU decides anything (docs/HYPOTHESES.md). Nested phases are matched on
+-- only a clean phase's CPU decides anything (docs/HYPOTHESES.md at 1145f89). Nested phases are matched on
 -- their own intervals. The phase's own CPU, bytes and requests come along; to join another view
 -- by phase, match reader with IS NOT DISTINCT FROM, since batches and compactions have none.
 CREATE VIEW phase_load AS
