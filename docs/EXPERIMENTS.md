@@ -34,6 +34,7 @@ All arms replay the same op log from the same initial-load file. The ids are the
 | `mor-v3` | merge-on-read | the same | deletion vectors in one Puffin file per batch |
 | `cow` | copy-on-write | a new data file per batch | every touched data file rewritten whole |
 | `tailcow-b`, `tailcow-c` | copy-on-write tail | merged into open tail **data files** by policy B or C | deletion vectors, except in tail files being merged |
+| `rmor-c` | regional merge-on-read | as `tailcow-c` | every row group (of a sealed file) or open tail file a batch changes enough of (`rmorRewriteShare`, θ) rewritten: a row group's rows go into the batch's new data file and a DV covers the old row group; an open tail file is rewritten whole and takes its place. Below θ, deletion vectors. |
 | `rmow-a`, `rmow-b`, `rmow-c` | RMoW, appendable | a row group appended to the tail **object**, merged with open tail row groups by policy A, B or C | every touched row group rewritten as a new region of its object |
 | `rmow-b-split`, `rmow-c-split` | RMoW, split | as `rmow-*`, but each version's regions go to a new object and its footer to a footer-only object | the same |
 | `rmow-*-dv` | RMoW with DVs (ablation, removed) | as `rmow-*` | deletion vectors on each object's stable prefix (its sealed row groups); open tail row groups were still rewritten. Removed after the dv ablation ([DESIGN.md](DESIGN.md#deletion-vectors-on-an-appendable-file-an-ablation-removed)). |
@@ -46,6 +47,9 @@ The tail policies (`TailPolicy`), shared by TailCoW and RMoW:
 Each pair of families isolates one choice:
 - **RMoW against TailCoW** isolates the layout: one appendable object against separate data files.
 - **TailCoW against MoR-v3** isolates the tail-merge policy.
+- **RMoR-C against TailCoW-C** isolates update handling: regions rewritten, against DVs on rows.
+- **RMoR-C against RMoW-C** isolates where a rewritten region goes: a new data file with a DV on
+  the old, against appended to its object with a new footer.
 - **RMoW against RMoW-split** isolates append: the same policy and footer, with history kept in
   one object or spread over objects that can be deleted.
 

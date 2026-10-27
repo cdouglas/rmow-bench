@@ -19,6 +19,7 @@ import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.InclusiveMetricsEvaluator;
 import org.apache.iceberg.io.DeleteWriteResult;
+import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.types.Conversions;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.ContentFileUtil;
@@ -258,17 +259,24 @@ public abstract class MorArm implements Arm {
     }
     String location = String.format("%s/data/%s.parquet", ctx.root(), name);
     List<Record> records = new ArrayList<>(rows.size());
+    List<Long> ids = new ArrayList<>(rows.size());
     for (long[] r : rows) {
       records.add(Rows.record(r[0], ctx.log().ts(r[0]), (int) r[1]));
+      ids.add(r[0]);
     }
     DataFile df = DataFileWriter.write(ctx.io(), location, records, ctx.layout().writerProperties());
+    return addFile(df, seq, ids);
+  }
+
+  /** Adds {@code df}, which holds the rows {@code ids} in this order, as a live data file. */
+  protected int addFile(DataFile df, long seq, List<Long> ids) {
     int k = files.size();
     files.add(df);
     fileSeqs.add(seq);
     removedRows.add(0);
     live.set(k);
-    for (int pos = 0; pos < rows.size(); pos++) {
-      int id = (int) rows.get(pos)[0];
+    for (int pos = 0; pos < ids.size(); pos++) {
+      int id = ids.get(pos).intValue();
       fileOfId[id] = k;
       posOfId[id] = pos;
     }
@@ -323,6 +331,31 @@ public abstract class MorArm implements Arm {
     List<Record> out = new ArrayList<>();
     DataFile df = files.get(k);
     scan(df, fileSeqs.get(k), deletes, Expressions.alwaysTrue(), out::add);
+    return out;
+  }
+
+  /**
+   * The live rows of one split of data file {@code k} (its deletes applied), {@code [start, start +
+   * length)}, which holds one row group, opened with {@code tail}: from {@code held}, the file the
+   * writer fetched whole, or, if null, from storage.
+   */
+  protected List<Record> readLive(int k, InputFile held, byte[] tail, long start, long length)
+      throws IOException {
+    List<Record> out = new ArrayList<>();
+    DataFile df = files.get(k);
+    Scans.scan(
+        ctx,
+        Reader.writer(ctx.layout()),
+        df,
+        deletesFor(df, fileSeqs.get(k), deletes),
+        Rows.SCHEMA,
+        Expressions.alwaysTrue(),
+        held != null ? held : ctx.io().newInputFile(df.location(), df.fileSizeInBytes() - tail.length),
+        tail,
+        start,
+        length,
+        null,
+        out::add);
     return out;
   }
 

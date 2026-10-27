@@ -8,6 +8,7 @@ SELECT * FROM (VALUES
     (4, 'cow', 'cow', 'circle', 'CoW', false),
     (5, 'tailcow-b', 'cow', 'square', 'TailCoW-B', false),
     (6, 'tailcow-c', 'cow', 'triangle-up', 'TailCoW-C', true),
+    (10, 'rmor-c', 'rmor', 'triangle-up', 'RMoR-C', true),
     (7, 'rmow-a', 'rmow', 'circle', 'RMoW-A', false),
     (8, 'rmow-b', 'rmow', 'square', 'RMoW-B', true),
     (9, 'rmow-c', 'rmow', 'triangle-up', 'RMoW-C', true),

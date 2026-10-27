@@ -117,20 +117,42 @@ leave them out.
 
 ## Arms
 
-- [ ] **RMoR-C** (`rmor-c`, on `MorArm` like `TailCowArm`). Inserts as TailCoW-C's. A touched row
-  group is rewritten into the batch's new data file, and a DV covers the old row group's
-  positions. The format is unchanged, and it needs no append, so it runs on any store.
-  - Each pair isolates one choice:
-    - RMoR-C against TailCoW-C: update handling;
-    - RMoR-C against RMoW-C: where the region goes.
-  - **Proposed, not yet agreed:** a threshold θ. A batch rewrites a touched row group when it
-    updates at least θ of its rows, and otherwise puts DVs on the rows. θ = 0 is pure RMoR and
-    θ > 1 is MoR-v3, so sweeping θ against the update share finds the crossover.
-- [ ] **A reader that skips row groups a DV covers whole,** before fetching them. Iceberg's Java
-  reader skips row groups only on statistics, dictionaries and bloom filters (`ReadConf`), and
-  applies deletes row by row. So stock Iceberg would fetch a dead row group and drop every row.
-  The benchmark's readers follow it (`Scans` → `ParquetReads.open` → the delete filter). RMoR
-  reports under both. Which engines skip dead row groups is not checked.
+- [x] **RMoR-C** (`rmor-c`, built 2026-10-27). It is `TailCowArm` with a rewrite share
+  θ (`layout.rmorRewriteShare`, default 0, counted per batch, decided 2026-10-27). Inserts are
+  TailCoW-C's. A batch rewrites a region it changes, outside the files it merges, when it updates
+  or deletes at least θ of the region's live rows:
+  - **a sealed file's row group:** its rows, with the batch's changes, go into the batch's new
+    data file with its inserts, which the tail policy merges as it merges any, and a DV covers the
+    old row group;
+  - **an open tail file,** the tail policy's unit: rewritten whole as a new data file, which takes
+    its place in the tail, as RMoW-C's open row groups do;
+  - **a file with no live row left** leaves the table rather than take a DV covering it.
+
+  Below θ the rows get DVs. θ = 0 rewrites every region a batch changes. Above 1 it is TailCoW-C,
+  request for request (`RmorTest`), not MoR-v3 as proposed. The format is unchanged, and no store
+  needs to append.
+  - The writer reads the footer of each sealed file of several row groups it changes, once per
+    batch. A file of at most 1 MiB is fetched whole to plan, and its row groups read from what was
+    fetched.
+  - A first version put each batch's rewritten row groups in a regions file of their own. Those
+    small, hot, multi-row-group files were fetched whole up to three times a batch (50 of 66 MB
+    read in 20 batches). The batch's data file holds them now.
+  - **On the calibration's workload, in memory** (scratch run, 2026-10-27): a batch takes 16.2
+    GETs, 1.4 PUTs, 1.6 MB read and 1.0 MB written. RMoW-C takes 6.3 GETs, 1 append, 0.8 MB and
+    0.8 MB; TailCoW-C 12.2 GETs, 2.0 PUTs, 0.6 MB and 0.1 MB. A full read (`cached`) takes 33
+    GETs and 9.0 MB, and 26 GETs and 7.0 MB with `cached-skip`: TailCoW-C's bytes, in 2 GETs
+    fewer.
+  - **Open: the writer's scans are stock.** `locate` takes 13.5 GETs a batch against TailCoW-C's
+    8.7, since it fetches dead row groups. Batch files that hold rewritten rows also span wider id
+    ranges, so more files may hold a target. A writer that skips dead row groups, as the reader
+    can, would cut it. It is not built: the writers of every arm read alike (rule 6).
+- [x] **A reader that skips row groups a DV covers whole** (`reads.readers[].skipDeadRowGroups`,
+  the `cached-skip` model; built 2026-10-27). Before planning a file's splits, it
+  checks the file's deletes, loaded once (through the read's delete cache, so its tasks reuse
+  them), against the row groups of the footer it reads. It plans no split for a dead row group,
+  and none for a file whose DV covers every row. It needs `footerCache`. A file of at most 1 MiB,
+  fetched whole, is skipped only whole. Iceberg's reader (`ReadConf`) fetches dead row groups
+  and drops every row, so RMoR reports under both. Which engines skip them is not checked.
 
 ## Workload generator
 

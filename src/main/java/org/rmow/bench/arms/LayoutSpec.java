@@ -90,6 +90,13 @@ public final class LayoutSpec {
    * that size (0: never).
    */
   public int compactSmallRowGroups = 8;
+  /**
+   * RMoR ({@code rmor-c}): a batch rewrites a region it changes (a sealed file's row group, or an
+   * open tail file) when it updates or deletes at least this share of the region's live rows, and
+   * otherwise puts DVs on the rows it changes. 0: every region it changes; above 1: none, which is
+   * TailCoW-C.
+   */
+  public double rmorRewriteShare = 0;
 
   /** The Parquet writer properties for data files. */
   public Map<String, String> writerProperties() {

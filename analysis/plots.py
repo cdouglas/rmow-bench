@@ -31,7 +31,7 @@ import pandas as pd  # noqa: E402
 # Reference palette: the first five categorical slots, in order (validated adjacent pairs,
 # light surface; aqua, yellow and magenta are under 3:1, so lines are direct-labeled and tabled)
 FAMILY = {"mor": "#2a78d6", "cow": "#eb6834", "rmow": "#1baf7a",
-          "rmowsplit": "#e87ba4"}
+          "rmowsplit": "#e87ba4", "rmor": "#8a63d2"}
 ARMS = {  # arm -> (family, marker, label)
     "mor-v2-file": ("mor", "o", "MoR v2 file"),
     "mor-v2-partition": ("mor", "s", "MoR v2 partition"),
@@ -39,6 +39,7 @@ ARMS = {  # arm -> (family, marker, label)
     "cow": ("cow", "o", "CoW"),
     "tailcow-b": ("cow", "s", "TailCoW-B"),
     "tailcow-c": ("cow", "^", "TailCoW-C"),
+    "rmor-c": ("rmor", "^", "RMoR-C"),
     "rmow-a": ("rmow", "o", "RMoW-A"),
     "rmow-b": ("rmow", "s", "RMoW-B"),
     "rmow-c": ("rmow", "^", "RMoW-C"),
@@ -46,7 +47,7 @@ ARMS = {  # arm -> (family, marker, label)
     "rmow-b-split": ("rmowsplit", "s", "RMoW-B-split"),
     "rmow-c-split": ("rmowsplit", "^", "RMoW-C-split"),
 }
-HEADLINE = ["mor-v3", "tailcow-c", "rmow-b", "rmow-c", "rmow-b-split", "rmow-c-split"]
+HEADLINE = ["mor-v3", "tailcow-c", "rmor-c", "rmow-b", "rmow-c", "rmow-b-split", "rmow-c-split"]
 INK, INK2, MUTED = "#0b0b0b", "#52514e", "#898781"
 SURFACE, GRID, AXIS = "#fcfcfb", "#e1e0d9", "#c3c2b7"
 

@@ -15,6 +15,12 @@ import java.util.concurrent.ExecutorService;
  * @param footerPrefetchBytes the tail each footer read prefetches (0: stock parquet-java, which
  *     takes two requests, the 8-byte tail and then the footer)
  * @param splitTargetBytes files are split into scan tasks of about this size
+ * @param skipDeadRowGroups before planning a file's splits, check its deletes against the row
+ *     groups of the footer it reads, and plan none for a row group they cover whole, nor for a file
+ *     whose DV covers every row. Iceberg's reader skips row groups only on statistics, dictionaries
+ *     and bloom filters, and applies deletes row by row, so it fetches a dead row group and drops
+ *     every row. Needs {@code footerCache}; a file of at most 1 MiB, fetched whole, is skipped only
+ *     whole
  * @param pool runs a read's scan tasks; null runs them one after another
  */
 public record Reader(
@@ -23,10 +29,19 @@ public record Reader(
     boolean deleteCache,
     int footerPrefetchBytes,
     long splitTargetBytes,
+    boolean skipDeadRowGroups,
     ExecutorService pool) {
+
+  public Reader {
+    if (skipDeadRowGroups && !footerCache) {
+      throw new IllegalArgumentException(
+          "Reader " + name + ": skipDeadRowGroups needs footerCache, the footer it plans from");
+    }
+  }
 
   /** How writers read (locate scans, merges, compaction): sequential, with the layout's prefetch. */
   static Reader writer(LayoutSpec layout) {
-    return new Reader("writer", false, false, layout.footerPrefetchBytes, Long.MAX_VALUE, null);
+    return new Reader(
+        "writer", false, false, layout.footerPrefetchBytes, Long.MAX_VALUE, false, null);
   }
 }

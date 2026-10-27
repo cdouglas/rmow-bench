@@ -92,6 +92,13 @@ public final class BenchConfig {
     public long splitTargetBytes = 128L << 20;
     /** Run a read's scan tasks on this many threads. */
     public int parallelism = 1;
+    /**
+     * Plan no split for a row group the file's deletes cover whole, nor any for a file whose DV
+     * covers every row, as an engine could from the footer it reads (needs {@code footerCache};
+     * {@link org.rmow.bench.arms.Reader}). Iceberg's reader fetches such row groups and drops
+     * their rows one by one.
+     */
+    public boolean skipDeadRowGroups = false;
 
     /**
      * Stock Iceberg readers today: one split per row group, each re-reading the file's footer
@@ -122,6 +129,14 @@ public final class BenchConfig {
       ReaderSpec r = oneFooter();
       r.name = "cached";
       r.deleteCache = true;
+      return r;
+    }
+
+    /** As {@link #cached}, and no row group read that the file's deletes cover whole. */
+    public static ReaderSpec skipping() {
+      ReaderSpec r = cached();
+      r.name = "cached-skip";
+      r.skipDeadRowGroups = true;
       return r;
     }
   }

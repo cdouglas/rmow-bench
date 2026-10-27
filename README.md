@@ -310,7 +310,12 @@ For latency, a configuration can set more things, and a run can log its requests
   compiled the paths first. It changes no request or byte (`RunnerSmokeTest`).
 - **`reads.readers`** can list a reader model with `parallelism` above 1, to read on several
   threads as an engine does. With `deleteCache` (the `cached` model), it loads each data file's
-  deletes once per read rather than once per split, as an engine with a delete cache would.
+  deletes once per read rather than once per split, as an engine with a delete cache would. With
+  `skipDeadRowGroups` (the `cached-skip` model; it needs `footerCache`), it plans no split for a
+  row group the file's deletes cover whole, nor any for a file whose DV covers every row, checking
+  the deletes, loaded once, against the footer it reads. Iceberg's reader fetches such row groups
+  and drops their rows one by one, so RMoR-C's reads are reported under both. A file of at most
+  1 MiB, fetched whole, is skipped only whole.
 - **`store.latency`** injects a simulated store's latency into every measured request: median
   latencies by kind (GET and HEAD, PUT and DELETE, append) with their lognormal sigmas, an extra
   GET latency per appended part, and transfer times per MiB. Each request sleeps its expected
@@ -329,6 +334,7 @@ For latency, a configuration can set more things, and a run can log its requests
 | `mor-v3` | the same | deletion vectors in a Puffin file per batch; a data file's DV is replaced, merged with its predecessor |
 | `cow` | a new data file per batch | every touched data file is rewritten whole |
 | `tailcow-b`, `tailcow-c` | merged into open tail *data files* by policy B or C | DVs, except in tail files being merged |
+| `rmor-c` | as `tailcow-c` | regional merge-on-read: a batch rewrites each region it changes when it changes at least θ (`rmorRewriteShare`) of the region's live rows. A sealed file's row group goes, with the batch's changes, into the batch's new data file, and a DV covers the old row group; an open tail file is rewritten whole and takes its place in the tail. Below θ, DVs. A file with no live row left leaves the table. θ = 0 rewrites every region a batch changes; above 1 it is `tailcow-c`. The format is Iceberg's, and no store needs to append |
 | `rmow-a`, `rmow-b`, `rmow-c` | appended to the tail object as a row group, merged with open tail *row groups* by policy A, B or C | every touched row group is rewritten as a region of its own object (row-group copy-on-write) |
 | `rmow-a-split`, `rmow-b-split`, `rmow-c-split` | as `rmow-*`, but each version's regions go to a new object, and its footer to a footer-only object naming the objects its row groups live in (`file_path`) | the same row-group copy-on-write; no append, so standard S3 and GCS can run them, and whole objects become deletable as versions expire ([docs/DESIGN.md](docs/DESIGN.md#regions-in-separate-objects-split-files)) |
 
@@ -338,7 +344,9 @@ The tail policies (`TailPolicy`) are:
 - **C:** tiered: `tierFanout` open units of one level merge into one unit a level up.
 
 RMoW against TailCoW therefore isolates the layout, a single appendable object against separate
-data files. TailCoW against MoR-v3 isolates the tail-merge policy. RMoW against RMoW-split
+data files. TailCoW against MoR-v3 isolates the tail-merge policy. RMoR-C against TailCoW-C
+isolates update handling (regions rewritten against DVs on rows), and RMoR-C against RMoW-C where
+a rewritten region goes (a new data file with a DV on the old, against appended to its object). RMoW against RMoW-split
 isolates append: the same policy, footer and reads, with history kept inside one object or spread
 over objects that can be deleted.
 
@@ -363,6 +371,7 @@ has what they showed.
 | `locate` | `oracle` (the default) takes row positions from an in-memory index, at no cost. `scan` finds them the way a MERGE would, in a timed `locate` phase checked against the index. MoR scans `id` and `_pos` of every file whose `id` bounds may hold a target; RMoW looks the ids up in its footers' row-group statistics. |
 | `reads.readers` | The reader models every probe runs under, on the same table state. The first is primary. `one-footer` (the default) opens each file at one version and reads that version's one footer once, in one request (a 64 KiB prefetch), then only the row groups it needs. `stock` is stock Iceberg today: one split per row group (`FileScanTask.split`), each split re-reading the footer with two requests. Each model also sets `splitTargetBytes` and `parallelism`, the threads a read's split tasks run on. |
 | `compactEvery` | Check the compaction triggers every this many batches (0 means never). MoR-family arms bin-pack files smaller than `compactSmallFileFraction` of the target and files whose delete ratio is at least `compactDeleteRatio`, as Iceberg's `RewriteDataFiles` does. RMoW triggers on space and on reads separately: it rewrites an appendable file, or moves the live row groups out of a split file's objects, whose dead bytes are at least `compactGarbageRatio` of their length; and it packs small sealed row groups once a file holds `compactSmallRowGroups` of them ([docs/DESIGN.md](docs/DESIGN.md#compaction)). When to compact is an outcome: see `analysis/compaction.py`. |
+| `rmorRewriteShare` | `rmor-c`'s θ: a batch rewrites a region it changes (a sealed file's row group, or an open tail file) when it updates or deletes at least this share of the region's live rows, counted per batch, and otherwise puts DVs on the rows. 0 (the default) rewrites every region a batch changes; above 1 none, which is `tailcow-c`. |
 
 ## Layout of the code
 

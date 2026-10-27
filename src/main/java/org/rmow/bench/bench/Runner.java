@@ -167,7 +167,13 @@ public final class Runner {
       }
       readers.add(
           new Reader(
-              r.name, r.footerCache, r.deleteCache, r.footerPrefetchBytes, r.splitTargetBytes, pool));
+              r.name,
+              r.footerCache,
+              r.deleteCache,
+              r.footerPrefetchBytes,
+              r.splitTargetBytes,
+              r.skipDeadRowGroups,
+              pool));
     }
     BenchConfig.LatencySpec ls = cfg.store.latency;
     StoreLatency latency =
@@ -260,6 +266,7 @@ public final class Runner {
       case "rmow-c-split" -> new RmowArm(ctx, TailPolicy.Kind.C, true);
       case "tailcow-b" -> new TailCowArm(ctx, TailPolicy.Kind.B);
       case "tailcow-c" -> new TailCowArm(ctx, TailPolicy.Kind.C);
+      case "rmor-c" -> new TailCowArm(ctx, TailPolicy.Kind.C, ctx.layout().rmorRewriteShare);
       case "cow" -> new CowArm(ctx);
       default -> throw new IllegalArgumentException("Unknown arm: " + name);
     };

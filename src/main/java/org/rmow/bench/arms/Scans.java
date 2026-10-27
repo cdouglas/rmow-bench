@@ -7,6 +7,7 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
@@ -32,9 +33,11 @@ import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.ResidualEvaluator;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.IOUtil;
+import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.io.RangeReadable;
 import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.parquet.format.FileMetaData;
+import org.apache.parquet.format.RowGroup;
 import org.rmow.bench.bench.ThreadCounters;
 import org.rmow.bench.io.IoTrace;
 import org.rmow.bench.io.Spans;
@@ -113,6 +116,28 @@ final class Scans {
       Map<String, PositionDeleteIndex> deleteCache,
       Consumer<Record> rows)
       throws IOException {
+    // storage holds what is below a cached tail (for a split file's object, the tail is not in
+    // storage at all, and the virtual file may be longer than the object)
+    long stored = df.fileSizeInBytes() - (tail == null ? 0 : tail.length);
+    scan(ctx, reader, df, deletes, projection, filter, ctx.io().newInputFile(df.location(), stored),
+        tail, start, length, deleteCache, rows);
+  }
+
+  /** @param stored the file's bytes below {@code tail}, as the scan opens them */
+  static void scan(
+      ArmContext ctx,
+      Reader reader,
+      DataFile df,
+      DeleteFile[] deletes,
+      Schema projection,
+      Expression filter,
+      InputFile stored,
+      byte[] tail,
+      long start,
+      long length,
+      Map<String, PositionDeleteIndex> deleteCache,
+      Consumer<Record> rows)
+      throws IOException {
     FileScanTask task =
         new BaseFileScanTask(
             df, deletes, SCHEMA_JSON, SPEC_JSON, ResidualEvaluator.unpartitioned(filter));
@@ -123,15 +148,8 @@ final class Scans {
     Evaluator residual =
         filter == Expressions.alwaysTrue() ? null : new Evaluator(required.asStruct(), filter);
     InternalRecordWrapper wrapper = new InternalRecordWrapper(required.asStruct());
-    // storage holds what is below a cached tail (for a split file's object, the tail is not in
-    // storage at all, and the virtual file may be longer than the object)
-    long stored = df.fileSizeInBytes() - (tail == null ? 0 : tail.length);
     VersionedInputFile in =
-        new VersionedInputFile(
-            ctx.io().newInputFile(df.location(), stored),
-            df.fileSizeInBytes(),
-            tail,
-            reader.footerPrefetchBytes());
+        new VersionedInputFile(stored, df.fileSizeInBytes(), tail, reader.footerPrefetchBytes());
     try (Spans.Span decode = Spans.open(Spans.Kind.DECODE);
         CloseableIterable<Record> rs =
             deleteFilter.filter(ParquetReads.open(in, required, filter, start, length))) {
@@ -187,6 +205,9 @@ final class Scans {
     List<Callable<TableHash>> tasks = new ArrayList<>();
     Map<String, PositionDeleteIndex> deletes = reader.deleteCache() ? new ConcurrentHashMap<>() : null;
     for (ReadFile f : files) {
+      if (reader.skipDeadRowGroups() && deadWhole(f)) {
+        continue; // its DV covers every row
+      }
       FileScanTask task =
           new BaseFileScanTask(
               f.file(), f.deletes(), SCHEMA_JSON, SPEC_JSON, ResidualEvaluator.unpartitioned(filter));
@@ -201,6 +222,9 @@ final class Scans {
         if (reader.footerCache() && splits.size() > 1) {
           // the version's one footer, read once and shared by every split of the file
           tail = readTail(ctx, reader, f.file().location(), f.file().fileSizeInBytes());
+          if (reader.skipDeadRowGroups() && f.deletes().length > 0) {
+            splits = liveSplits(ctx, reader, task, splits, tail, deletes);
+          }
         }
       }
       byte[] footer = tail;
@@ -217,6 +241,60 @@ final class Scans {
       }
     }
     return run(ctx, reader, tasks);
+  }
+
+  /** Whether a file's DV covers every row, as its record count says without a read. */
+  private static boolean deadWhole(ReadFile f) {
+    for (DeleteFile d : f.deletes()) {
+      if (d.format() == FileFormat.PUFFIN && d.recordCount() >= f.file().recordCount()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * The splits of a file whose row groups its deletes do not cover whole: the deletes loaded once
+   * to plan (through the read's delete cache, if it has one, so its tasks reuse them), checked
+   * against the row groups of the footer the read holds.
+   */
+  private static List<FileScanTask> liveSplits(
+      ArmContext ctx,
+      Reader reader,
+      FileScanTask task,
+      List<FileScanTask> splits,
+      byte[] tail,
+      Map<String, PositionDeleteIndex> deleteCache) {
+    PositionDeleteIndex deleted =
+        new LengthAwareDeleteFilter(
+                ctx.io(), task, Rows.SCHEMA, Rows.SCHEMA, reader.footerPrefetchBytes(), deleteCache)
+            .deletedRowPositions();
+    if (deleted == null || deleted.isEmpty()) {
+      return splits;
+    }
+    Map<Long, long[]> rowsAt = new HashMap<>(); // row group start -> {first row, rows}
+    long first = 0;
+    for (RowGroup rg : FooterCodec.read(tail, 0, tail.length - 8).getRow_groups()) {
+      rowsAt.put(FooterCodec.startOffset(rg), new long[] {first, rg.getNum_rows()});
+      first += rg.getNum_rows();
+    }
+    List<FileScanTask> live = new ArrayList<>(splits.size());
+    for (FileScanTask s : splits) {
+      long[] g = rowsAt.get(s.start());
+      if (g == null || !coversAll(deleted, g[0], g[1])) {
+        live.add(s);
+      }
+    }
+    return live;
+  }
+
+  private static boolean coversAll(PositionDeleteIndex deleted, long first, long rows) {
+    for (long p = first; p < first + rows; p++) {
+      if (!deleted.isDeleted(p)) {
+        return false;
+      }
+    }
+    return true;
   }
 
   /**
@@ -277,13 +355,23 @@ final class Scans {
     if (length > EAGER_BYTES) {
       return readTail(ctx, reader, location, length);
     }
+    return tailOf(readWhole(ctx, location, length));
+  }
+
+  /** A file of at most 1 MiB, fetched whole in one request, as Iceberg fetches it. */
+  static byte[] readWhole(ArmContext ctx, String location, long length) throws IOException {
     byte[] all = new byte[(int) length];
     try (SeekableInputStream in =
         new VersionedInputFile(ctx.io().newInputFile(location, length), length).newStream()) {
       ((RangeReadable) in).readFully(0, all, 0, all.length);
     }
-    int footer = ByteBuffer.wrap(all, all.length - 8, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
-    return Arrays.copyOfRange(all, all.length - footer - 8, all.length);
+    return all;
+  }
+
+  /** A whole Parquet file's tail: its footer, the footer's length and the magic. */
+  static byte[] tailOf(byte[] file) {
+    int footer = ByteBuffer.wrap(file, file.length - 8, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
+    return Arrays.copyOfRange(file, file.length - footer - 8, file.length);
   }
 
   /**
