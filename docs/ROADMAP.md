@@ -167,7 +167,7 @@ delete touches one row.
     it must leave hot ones alone.
   - Measure bytes rewritten per updated row, footer size and read GETs under the region skew.
 - [ ] **Register the hypotheses** before the cloud runs:
-  - the model checks (X1–X4 in S3X_RUNBOOK.md, Z1–Z4 in AZURE_RUNBOOK.md, the held H1 draft);
+  - the model checks (X1–X5 in S3X_RUNBOOK.md, Z1–Z7 in AZURE_RUNBOOK.md, the held H1 draft);
   - the sweeps' predictions.
 
   Comparisons are reported, not judged.
@@ -177,7 +177,18 @@ delete touches one row.
   - each configuration's local twin rerun on the same build.
 
   The configurations planned so far are only the calibration (`s3x-calibration`,
-  `azure-calibration-{exact,iceberg}`). Its S3 Express twin (2026-10-23) is stale.
+  `azure-calibration`). Its twins were rerun on the fork build on 2026-10-27 (campaign
+  `twins-fork`), and the Azure predictions recomputed from them (AZURE_RUNBOOK.md): RMoW-C ÷
+  MoR-v3 is 0.38 for a batch and 0.59 for a full read, as before. The two twins' model requests
+  and bytes match in all 922 records, and every phase on Azurite sent what the model counts.
+- [ ] **`phase_work`'s CPU is probably 11% high on the laptop** (found 2026-10-27). The thread
+  CPU clock runs 11.1% fast against the wall clock there (WSL2; `host.thread_cpu_per_wall` in
+  manifests from 2026-10-26), and `phase_work` turns instructions into time with thread CPU time
+  (`ghz` = cycles per user-mode nanosecond). So every simulated latency's CPU term from the
+  laptop is in thread-clock time, if the wall clock is the right one, as its synchronization with
+  the host suggests. On Azure the predictions move 1–3%; on S3 Express, where CPU dominates, more.
+  To decide: divide `phase_work` by the ratio (it changes the published simulated numbers), and
+  check havoc's ratio.
 - [ ] **The calibration configurations gain `rmow-c-split`** (and `rmor-c` once it exists), and
   lose the arms new campaigns leave out.
 

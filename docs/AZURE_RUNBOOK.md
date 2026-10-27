@@ -162,42 +162,54 @@ They overlap the held H1 draft's L1–L4 and the S3 Express draft's X1–X5 in d
 and should be registered with them, in one dated section, once reviewed. The predicted numbers
 come from the Azurite twins priced with the `azure` profile (`sdk_latency`; below).
 
-**The predictions below come from twins on the release build** (2026-10-26, before the fork
-became the only build). Their exact reads (`ExactAdlsFileIO`) sent the requests the fork's reads
-send now, though fewer bytes for sequential reads. They are to be recomputed from
-`azure-calibration-azurite` rerun on the build the cloud run uses, and the Iceberg-as-shipped
-columns dropped unless that run is made too.
-
 ### The twins' predictions
 
-The Azurite twins of 2026-10-26 (campaign `azure-twins`, build snapshot
-`20261026T055316Z-9713a7c52d0c-dirty`) are:
-- `azure-calibration-exact-azurite-fa06fdb7634c/20261026T055317Z`;
-- `azure-calibration-iceberg-azurite-bbc35d39598f/20261026T055554Z`.
+The predictions come from the Azurite twin on the build the cloud run uses, 2026-10-27 (commit
+63b1703, the atomicio fork at af875ccfd1; build snapshot `20261027T041701Z-63b1703b36df-dirty`,
+dirty only with the held H1 draft). It and the local twin are campaign `twins-fork`:
+- `azure-calibration-azurite-02879401d0c8/20261027T041701Z`;
+- `s3x-calibration-local-424bf5d32c80/20261027T042004Z`.
 
 The query is `sdk_latency`, profile `azure`. Means are over batches 1–20 and the full-read probes
-after the initial load, under `cached`. CPU is each twin's modeled time on this laptop.
+after the initial load, under `cached`. CPU is each twin's modeled time on this laptop
+(`phase_work`).
 
-**What each read path sends:**
+**What it sends.** Every phase sent what the model counts: GETs, HEADs and bytes read, in batches
+and full reads alike. The twin's model requests and bytes equal the local twin's in all 922
+records (`steps_diff`). No batch creates a file in this configuration, so the one way Azurite's
+creates differ from Azure's (a HEAD where Azure renames) does not enter.
 
-| Arm, phase | GETs: model → exact → Iceberg's | MB read: model → exact → Iceberg's |
+| Arm, phase | GETs and HEADs | MB read |
 |---|---|---|
-| MoR-v3, a batch | 29.4 → 29.4 → 47.1 | 0.64 → 0.64 → 7.4 |
-| RMoW-C, a batch | 6.3 → 6.3 → 11.6 | 0.80 → 0.80 → 24.1 |
-| MoR-v3, a full read | 46.0 → 46.0 → 79.5 | 7.2 → 7.2 → 122.9 |
-| RMoW-C, a full read | 24.5 → 24.5 → 49.0 | 6.9 → 6.9 → 157.9 |
-
-With exact reads every phase sends what the model counts; writes are the same under both.
+| MoR-v3, a batch | 29.4 | 0.64 |
+| RMoW-C, a batch | 6.3 | 0.80 |
+| MoR-v3, a full read | 46.0 | 7.2 |
+| RMoW-C, a full read | 24.5 | 6.9 |
 
 **Simulated time on the `azure` profile (ms):**
 
-| Arm | A batch, exact | A full read, exact | A batch, Iceberg's | A full read, Iceberg's |
-|---|---|---|---|---|
-| MoR-v3 | 1,556 | 2,585 | 2,556 | 6,935 |
-| TailCoW-C | 786 | 1,704 | 1,250 | 5,627 |
-| RMoW-B | 454 | 1,408 | 964 | 5,769 |
-| RMoW-C | 573 | 1,514 | 1,370 | 6,282 |
-| **RMoW-C ÷ MoR-v3** | **0.37** | **0.59** | **0.54** | **0.91** |
+| Arm | A batch | A full read |
+|---|---|---|
+| MoR-v3 | 1,564 | 2,593 |
+| TailCoW-C | 789 | 1,722 |
+| RMoW-B | 473 | 1,413 |
+| RMoW-C | 588 | 1,532 |
+| **RMoW-C ÷ MoR-v3** | **0.38** | **0.59** |
+
+They are within 3% of the release build's twins (2026-10-26, exact reads: 0.37 and 0.59).
+
+**The CPU term is probably 11% high.** The laptop's thread CPU clock runs 11.1% fast against its
+wall clock (manifest `host.thread_cpu_per_wall`, 1.111), and `phase_work` turns instructions into
+time with thread CPU time. The wall clock, synchronized with the host, is the likelier to be right.
+With CPU on the wall clock RMoW-C takes 572 and 1,511 ms and MoR-v3 1,558 and 2,569 ms: ratios of
+0.37 and 0.59. Requests dominate on Azure, so the correction is 1–3%; it matters more where CPU
+dominates (S3 Express).
+
+**Iceberg's reads as shipped,** for Z6 only, from the release build's twin
+(`azure-calibration-iceberg-azurite-bbc35d39598f/20261026T055554Z`, retired 2026-10-27; its
+numbers are kept here and in EXPERIMENTS.md, Retired runs): 47.1 and 79.5 GETs and 7.4
+and 122.9 MB for MoR-v3's batch and full read, 11.6 and 49.0 GETs and 24.1 and 157.9 MB for
+RMoW-C's. Simulated, RMoW-C ÷ MoR-v3 was 0.54 for a batch and 0.91 for a full read.
 
 ### Draft hypotheses
 
@@ -213,7 +225,7 @@ With exact reads every phase sends what the model counts; writes are the same un
   run is within 25% of its wall time. This is the H1 draft's L4, on Azure.
 - **Z5: RMoW-C beats MoR-v3 where requests dominate.** In the calibration run, RMoW-C's mean
   batch and mean full read (`cached`, one thread) both take less wall time than MoR-v3's.
-  Predicted: 0.37× and 0.59×.
+  Predicted: 0.38× and 0.59× (0.37× and 0.59× with CPU on the wall clock).
 - **Z6: Iceberg's shipped reads cost RMoW more than MoR** (only with a run on a build before
   2026-10-26). In the Iceberg run, RMoW-C's full read is a larger fraction of MoR-v3's than in the
   exact run, predicted 0.91× against 0.59×. Its ranged reads at offsets over-read most: 23× the

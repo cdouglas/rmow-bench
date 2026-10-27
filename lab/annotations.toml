@@ -46,9 +46,9 @@ select = ["s3x-*"]
 title = "Footer micro-benchmarks (JMH)"
 select = ["source:micro"]
 
-[campaigns.azure-twins]
-title = "Azure: the calibration's Azurite twins, exact and Iceberg's reads (docs/AZURE_RUNBOOK.md)"
-select = ["where:label LIKE 'azure-calibration-%-azurite' AND status = 'finished'"]
+[campaigns.twins-fork]
+title = "The calibration's twins on the fork build, every store appending through SupportsAtomicOperations (docs/AZURE_RUNBOOK.md, docs/S3X_RUNBOOK.md)"
+select = ["azure-calibration-azurite-02879401d0c8/*", "s3x-calibration-local-424bf5d32c80/*"]
 
 [[annotate]]
 select = "smoke-*"
