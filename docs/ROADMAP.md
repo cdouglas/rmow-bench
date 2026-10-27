@@ -148,7 +148,7 @@ leave them out.
     does. With it, RMoR-C's `locate` takes 9.2 GETs a batch instead of 13.5 (TailCoW-C: 8.7), and
     a batch 11.9 GETs instead of 16.2 (TailCoW-C: 12.2), writing the same. It changed no other
     arm's request or byte, on the calibration's workload and on a 7-arm configuration. It stays
-    off by default, Iceberg as shipped (decided 2026-10-27); configurations that report RMoR set it,
+    off by default, Iceberg as shipped (decided 2026-10-26); configurations that report RMoR set it,
     with the `cached-skip` reader beside a stock one. None exists yet.
 - [x] **A reader that skips row groups a DV covers whole** (`reads.readers[].skipDeadRowGroups`,
   the `cached-skip` model; built 2026-10-27). Before planning a file's splits, it
@@ -174,7 +174,8 @@ delete touches one row.
 - [ ] **Update share:** updates come as statements, each picking a region by the skew and updating
   a share p of its live rows. Rows updated per batch stay fixed. **Prediction (the user's):**
   where p is high, a region rewrite pays, and RMoW more than RMoR; at one row per region it does
-  not; a crossover lies between.
+  not; a crossover lies between. RMoR-C's θ (`rmorRewriteShare`, a share of a region's live rows
+  per batch) is the knob to sweep against p.
 - [ ] **Arrival window:** sweep insert lateness (`lateMedianBatches`, `lateP99Batches`). It
   exists but has never been swept.
 
@@ -215,8 +216,10 @@ delete touches one row.
   the host suggests. On Azure the predictions move 1–3%; on S3 Express, where CPU dominates, more.
   To decide: divide `phase_work` by the ratio (it changes the published simulated numbers), and
   check havoc's ratio.
-- [ ] **The calibration configurations gain `rmow-c-split`** (and `rmor-c` once it exists), and
-  lose the arms new campaigns leave out.
+- [ ] **The calibration configurations gain `rmow-c-split` and `rmor-c`**, and lose the arms new
+  campaigns leave out, after the generator's region skew and update share (decided 2026-10-26).
+  With `rmor-c` they set `writerSkipsDeadRowGroups` and read with `cached-skip` beside a stock
+  reader. Then the twins are rerun and the Azure predictions recomputed.
 
 ## Still open from before
 
