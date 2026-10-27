@@ -84,8 +84,7 @@ lab ingest
 The local twin, `configs/s3x-calibration-local.json`, differs only in the store. It is rerun on
 the build the cloud run uses, so its requests and bytes are what the cloud run must match. The
 current one is `s3x-calibration-local-7596607f5035/20261027T073342Z` (campaign `twins-five`;
-commit d6d6f0b plus the changes its build snapshot `20261027T073121Z-d6d6f0b44523-dirty` holds as
-a diff), rerun if the build changes before the run. On the `s3x` profile it simulates (ms; means
+commit 1cb7160, whose code equals what it ran), rerun if the code changes before the run. On the `s3x` profile it simulates (ms; means
 over batches 1–20 and the full reads after the initial load, `cached`, CPU on the wall clock):
 
 | Arm | A batch | A full read |

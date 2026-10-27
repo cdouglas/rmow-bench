@@ -165,10 +165,10 @@ come from the Azurite twins priced with the `azure` profile (`sdk_latency`; belo
 
 ### The twins' predictions
 
-The predictions come from the Azurite twin on the build the cloud run uses, 2026-10-27 (commit
-d6d6f0b plus the uncommitted generator, clock and spike changes, which the build snapshot
-`20261027T073121Z-d6d6f0b44523-dirty` holds as a diff, and the held H1 draft; the atomicio fork
-at af875ccfd1). It and the local twin are campaign `twins-five`:
+The predictions come from the Azurite twin on the build the cloud run uses, 2026-10-27: commit
+1cb7160, whose code, configurations and lab views equal what the twin ran (build snapshot
+`20261027T073121Z-d6d6f0b44523-dirty`, d6d6f0b and a diff), and the atomicio fork at
+af875ccfd1. The cloud run checks out 1cb7160 or a later commit that changes no code. It and the local twin are campaign `twins-five`:
 - `azure-calibration-azurite-fa985c0f0fe1/20261027T073122Z`;
 - `s3x-calibration-local-7596607f5035/20261027T073342Z`.
 

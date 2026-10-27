@@ -505,9 +505,9 @@ with what these runs measure.
 - **Readers:** `one-footer`, `cached`, `cached-skip`, `cached-p8` and `stock`.
 - **Machines:** an EC2 instance in the directory bucket's zone; an Azure VM in the account's
   region. One run each, after the fork's contract suite and the spike (20 repetitions).
-- **Build:** commit d6d6f0b plus the uncommitted generator, clock and spike changes, which the
-  build snapshot `20261027T073121Z-d6d6f0b44523-dirty` holds as a diff; the atomicio fork at
-  af875ccfd1. The cloud runs check out the commit that holds that diff.
+- **Build:** commit 1cb7160, whose code, configurations and lab views equal what the twins ran
+  (build snapshot `20261027T073121Z-d6d6f0b44523-dirty`, d6d6f0b and a diff), and the atomicio
+  fork at af875ccfd1. The cloud runs check out 1cb7160 or a later commit that changes no code.
 - **Twins** (campaign `twins-five`): `s3x-calibration-local-7596607f5035/20261027T073342Z` and
   `azure-calibration-azurite-fa985c0f0fe1/20261027T073122Z`. Their model requests and bytes match
   in all 842 records, and every phase on Azurite sent what the model counts.
