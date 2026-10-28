@@ -229,10 +229,10 @@ approach 1.
   - Compaction's packing of small row groups (`compactSmallRowGroups`) would undo the isolation, so
     it must leave hot ones alone.
   - Measure bytes rewritten per updated row, footer size and read GETs under the region skew.
-- [ ] **Register the hypotheses** before the cloud runs. HYPOTHESES.md was refocused on
-  2026-10-27 on the write and read trade-off; the earlier ones are the file at commit 1145f89.
-  - the calibration's C1–C4, drafted, awaiting review;
-  - the sweeps' predictions, once the base point is chosen.
+- [ ] **Register the hypotheses** before the runs that decide them. HYPOTHESES.md was refocused
+  on 2026-10-27 on the write and read trade-off; the earlier ones are the file at commit 1145f89.
+  - [x] the calibration's C1–C4 (registered 2026-10-27);
+  - [ ] the sweeps' predictions, once the base point is chosen.
 - [ ] **Cloud campaign,** on the fork build with the five arms, on S3 Express and Azure:
   - the base point;
   - settings on either side of each crossover the local sweeps find;

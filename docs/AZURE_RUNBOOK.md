@@ -159,7 +159,7 @@ docker stop rmow-azurite
 
 ## Hypotheses
 
-C1–C4 in docs/HYPOTHESES.md (before the calibration runs, drafted 2026-10-27): the model counts
+C1–C4 in docs/HYPOTHESES.md (before the calibration runs, registered 2026-10-27): the model counts
 what Azure receives (C1), a phase takes its CPU plus its requests' latencies (C2), the trade-off
 falls where the twin puts it (C3: the region arms' batches and full reads faster than MoR-v3's),
 and CPU is a third or less of every phase here (C4). The spike's numbers are measured, not

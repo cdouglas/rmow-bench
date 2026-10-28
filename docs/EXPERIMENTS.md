@@ -16,7 +16,7 @@ above which RMoW pays, and how the workload moves that latency.
 | [README.md](../README.md) | What RMoW is, how to build and run, and the reference tables of arms and knobs. |
 | [docs/PLAN.md](PLAN.md) | The plan as approved on 2026-10-20, with milestones. Its default matrix is not what ran ([below](#what-every-experiment-shares)). |
 | [docs/DESIGN.md](DESIGN.md) | The format-level findings: writer rules, footer order, split files, compaction. |
-| [docs/HYPOTHESES.md](HYPOTHESES.md) | The question (the write and read trade-off), what is settled, and the hypotheses of the runs to come, each written down before them: the calibration's C1–C4 (draft). The earlier H1–H6 and campaign predictions are [the file at 1145f89](https://github.com/cdouglas/rmow-bench/blob/1145f89a36fa60af56aefc9233991f1d03755ae2/docs/HYPOTHESES.md). |
+| [docs/HYPOTHESES.md](HYPOTHESES.md) | The question (the write and read trade-off), what is settled, and the hypotheses of the runs to come, each written down before them: the calibration's C1–C4 (registered 2026-10-27). The earlier H1–H6 and campaign predictions are [the file at 1145f89](https://github.com/cdouglas/rmow-bench/blob/1145f89a36fa60af56aefc9233991f1d03755ae2/docs/HYPOTHESES.md). |
 | [docs/ROADMAP.md](ROADMAP.md) | The outstanding work, and the decisions that shaped it. |
 | `docs/measurements/` | One write-up per experiment. Write-ups from 2026-10-22 on are lab pages (`lab/pages/`), whose tables and numbers are computed from the runs. |
 | `lab/` | The results database and pages (labbook). `lab jupyter` opens them as notebooks and `lab serve` as a site. `lab/pages/experiments.md` regenerates this page's parameter tables from the runs. |
@@ -562,15 +562,15 @@ would need its own arms and reader checks.
   - the spike's request latencies and cost per appended part;
   - a check of the latency model on one run.
 
-  It needs a directory bucket, an instance in its zone, and credentials. Its hypotheses are
-  drafted in the runbook, to register with the held H1 draft.
+  It needs a directory bucket, an instance in its zone, and credentials. Its hypotheses are C1–C4
+  (docs/HYPOTHESES.md, registered 2026-10-27).
 - **Prepared: Azure**, the other side of RMoW's break-even (docs/AZURE_RUNBOOK.md). Requests
   dominate there, so the simulation predicts that RMoW wins outright. It runs through Iceberg's
   ADLS FileIO, on the atomicio fork, whose reads ask for exactly their ranges (Iceberg's as
   shipped open every stream with a GET of up to 4 MiB and over-read ranges at offsets; measuring
   them needs a build before 2026-10-26). It needs a hierarchical-namespace account, a VM in its
   region and a managed identity. Its Azurite twin gives the requests it must send, and its
-  hypotheses are drafted in the runbook, with the S3 Express ones.
+  hypotheses are C1–C4, with the S3 Express run's.
 - **Both calibrations run the five arms new campaigns run** (MoR-v3, TailCoW-C, RMoR-C, RMoR-C
   with footers, RMoW-C) since 2026-10-27, RMoR-C with the writer that skips dead row groups and a `cached-skip` reader beside
   the others, and their spikes time GETs by size for the read rate per MiB.

@@ -60,7 +60,7 @@ From local runs, where requests and bytes are exact (HYPOTHESES.md at 1145f89, E
 - **Space:** uncompacted, an appendable file keeps 7.8–8.3× its live bytes by batch 60, so it
   needs compaction (H6).
 
-## Before the calibration runs (2026-10-27, DRAFT, for review)
+## Before the calibration runs (registered 2026-10-27)
 
 **What they decide:** whether the simulation's prices hold on the real stores, and the direction
 of the trade-off on each. S3 Express and Azure Blob sit on either side of RMoW's break-even

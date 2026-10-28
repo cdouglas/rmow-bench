@@ -121,7 +121,7 @@ instruction) varies from run to run.
 
 ## Hypotheses
 
-C1–C4 in docs/HYPOTHESES.md (before the calibration runs, drafted 2026-10-27): the model counts
+C1–C4 in docs/HYPOTHESES.md (before the calibration runs, registered 2026-10-27): the model counts
 what S3 Express receives (C1), a phase takes its CPU plus its requests' latencies (C2), the
 trade-off falls where the twin puts it (C3: the region arms' batches slower than MoR-v3's, their
 full reads faster), and CPU is the bottleneck of the region arms' batches here (C4). The spike's
