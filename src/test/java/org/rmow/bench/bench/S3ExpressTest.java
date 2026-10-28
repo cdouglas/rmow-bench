@@ -13,6 +13,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import org.apache.iceberg.aws.s3.S3FileIO;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -33,7 +34,8 @@ import software.amazon.awssdk.services.s3.model.S3Object;
  *
  * <p>It checks what the benchmark's S3 Express path relies on, the atomicio fork's atomic
  * operations ({@link AtomicAppender} over S3FileIO): an append at the object's length lands; one
- * anywhere else fails ({@code InvalidWriteOffset}) and leaves the object as it was; the recorder
+ * anywhere else but 0 (an unknown length to the fork, as to Iceberg) fails ({@code
+ * InvalidWriteOffset}) and leaves the object as it was; the recorder
  * sees a create as one {@code PutObject}, conditioned on the object's absence, and an append as one
  * {@code PutObject} with a write offset, conditioned on its ETag, neither with a HEAD; and a run of
  * every arm family matches the trace's model request for request, appends included.
@@ -44,6 +46,9 @@ class S3ExpressTest {
   private static String prefix;
   private static String region;
   private static S3Client s3;
+  // one S3FileIO over s3 for every appender: an S3FileIO closes its client when it is closed or
+  // finalized, so one per appender, left to the collector, would close s3 under the other tests
+  private static S3FileIO io;
 
   @BeforeAll
   static void open() {
@@ -57,6 +62,7 @@ class S3ExpressTest {
       region = "us-east-1";
     }
     s3 = S3Client.builder().region(Region.of(region)).build();
+    io = Store.s3FileIO(s3);
   }
 
   @AfterAll
@@ -71,6 +77,7 @@ class S3ExpressTest {
     for (String k : keys) {
       s3.deleteObject(b -> b.bucket(bucket).key(k));
     }
+    io.close(); // closes s3 if it used it
     s3.close();
   }
 
@@ -86,14 +93,14 @@ class S3ExpressTest {
     return s3.getObjectAsBytes(b -> b.bucket(bucket).key(prefix + "/" + name)).asByteArray();
   }
 
-  /** RMoW's appender, over S3FileIO over {@code client}, which the caller closes. */
-  private static RegionAppender appender(S3Client client) {
-    return new AtomicAppender(Store.s3FileIO(client));
+  /** RMoW's appender over S3FileIO, with no snapshot of any object. */
+  private static RegionAppender appender() {
+    return new AtomicAppender(io);
   }
 
   @Test
   void appendsAtTheObjectsLength() throws IOException {
-    RegionAppender appender = appender(s3);
+    RegionAppender appender = appender();
     appender.create(location("append"), bytes("first|"));
     long length = appender.append(location("append"), 6, bytes("second|"));
     length = appender.append(location("append"), length, bytes("third"));
@@ -103,16 +110,18 @@ class S3ExpressTest {
 
   @Test
   void appendElsewhereFailsAndChangesNothing() throws IOException {
-    appender(s3).create(location("wrong"), bytes("0123456789"));
-    for (long offset : new long[] {0, 9, 11}) {
+    appender().create(location("wrong"), bytes("0123456789"));
+    // not at 0: the fork's snapshots, as Iceberg's, take a length of 0 for an unknown one, so an
+    // APPEND from newInputFile(location, 0) extends the object at whatever length it has
+    for (long offset : new long[] {1, 9, 11}) {
       // an appender with no snapshot of the object looks its ETag up
-      assertThatThrownBy(() -> appender(s3).append(location("wrong"), offset, bytes("x")))
+      assertThatThrownBy(() -> appender().append(location("wrong"), offset, bytes("x")))
           .as("append at " + offset)
           .isInstanceOf(IOException.class)
           .hasMessageContaining("APPEND");
     }
     assertThat(read("wrong")).isEqualTo(bytes("0123456789"));
-    assertThatThrownBy(() -> appender(s3).create(location("wrong"), bytes("again")))
+    assertThatThrownBy(() -> appender().create(location("wrong"), bytes("again")))
         .as("a create where an object is")
         .isInstanceOf(IOException.class)
         .hasMessageContaining("CAS");
@@ -122,12 +131,14 @@ class S3ExpressTest {
   @Test
   void recorderSeesACreateAndAnAppendAndNoHead() throws IOException {
     S3Recorder recorder = new S3Recorder();
-    try (S3Client recorded =
-        S3Client.builder()
-            .region(Region.of(region))
-            .overrideConfiguration(o -> o.addExecutionInterceptor(recorder))
-            .build()) {
-      RegionAppender appender = appender(recorded);
+    // the S3FileIO closes its client
+    try (S3FileIO recorded =
+        Store.s3FileIO(
+            S3Client.builder()
+                .region(Region.of(region))
+                .overrideConfiguration(o -> o.addExecutionInterceptor(recorder))
+                .build())) {
+      RegionAppender appender = new AtomicAppender(recorded);
       S3Recorder.Counts before = recorder.snapshot();
       appender.create(location("recorded"), bytes("abc"));
       S3Recorder.Counts create = recorder.snapshot().minus(before);
