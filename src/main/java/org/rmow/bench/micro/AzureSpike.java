@@ -12,7 +12,6 @@ import com.azure.storage.blob.specialized.BlobClientBase;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.BufferedWriter;
 import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetAddress;
@@ -45,18 +44,20 @@ import org.rmow.bench.io.AdlsClients;
  * </pre>
  *
  * <ul>
- *   <li><b>put</b>, <b>append</b> and <b>append_sao</b>: for sizes 64 KiB to 32 MiB, doubling,
- *       {@code reps} each, interleaved: Put Blobs of new block blobs (Iceberg's writes, up to 256
- *       MiB); the store's own appends, Append Blocks conditioned on the blob's length alone; and
- *       RMoW's, the fork's APPEND ({@link AtomicAppender}), an Append Block conditioned on the
- *       length and the ETag, each to its own Append Blob;
+ *   <li><b>put</b>, <b>append</b> and <b>append_sao</b>: for sizes 64 KiB to 128 MiB (a row group
+ *       at Iceberg's default target), doubling, {@code reps} each, interleaved: Put Blobs of new
+ *       block blobs (Iceberg's writes, up to 256 MiB); the store's own appends, Append Blocks
+ *       conditioned on the blob's length alone; and RMoW's, the fork's APPEND ({@link
+ *       AtomicAppender}), an Append Block conditioned on the length and the ETag, each to its own
+ *       Append Blob. An Append Block takes at most 100 MiB, so a 128 MiB append is two, in order,
+ *       on both (parts: the blob's blocks after it);
  *   <li><b>create</b> (an empty Append Blob), <b>create_own</b> (an empty Append Blob and an
  *       Append Block of 64 KiB, the store's own way to create an appendable file),
  *       <b>create_sao</b> (the fork's atomic create of 64 KiB: a staged Append Blob, an Append Block
  *       and a rename; not on an emulator, which cannot rename) and <b>head</b>, {@code reps} each;
- *   <li><b>get_size</b> and <b>get_range</b>: GETs by size, 64 KiB to 32 MiB, doubling, for the
+ *   <li><b>get_size</b> and <b>get_range</b>: GETs by size, 64 KiB to 128 MiB, doubling, for the
  *       read rate per MiB: the block blobs the Put Blobs above wrote, read whole, and the same
- *       sizes read as a range from the middle of a 32 MiB one (as a row group is read), {@code
+ *       sizes read as a range from the middle of a 128 MiB one (as a row group is read), {@code
  *       reps} each, interleaved over the sizes;
  *   <li><b>get_full</b>, <b>get_tail</b> and <b>get_mid</b>: Append Blobs of 1, 10, 100 and 1000
  *       blocks of 64 KiB, read whole, as their last 64 KiB, and as 64 KiB from the middle;
@@ -67,7 +68,8 @@ import org.rmow.bench.io.AdlsClients;
  *
  * Writes {@code manifest.json} and {@code spike.jsonl} (one record per request: op, bytes, parts,
  * rep, ns) to {@code <out>/azure-spike-<UTC start>/} (default out: {@code results/spike}), and
- * deletes its objects. Run it from a VM in the account's region; elsewhere it measures the
+ * deletes its objects. A GET's body is drained into a buffer and dropped, so its time is the
+ * request's, not a copy's. Run it from a VM in the account's region; elsewhere it measures the
  * network. {@code --endpoint} runs it against an emulator (with {@code AZURE_STORAGE_KEY}), which
  * checks the code, not Azure.
  */
@@ -75,6 +77,7 @@ public final class AzureSpike {
 
   private static final int KIB = 1024;
   private static final int PART = 64 * KIB;
+  private static final int LARGEST = 128 * KIB * KIB;
 
   private final AdlsClients clients;
   private final ADLSFileIO adls;
@@ -189,19 +192,26 @@ public final class AzureSpike {
     out.newLine();
   }
 
-  /** The store's own append: one Append Block at {@code at}, conditioned on the length alone. */
+  /**
+   * The store's own append: Append Blocks at {@code at}, each conditioned on its position alone,
+   * one unless {@code body} is larger than an Append Block may be.
+   */
   private static long appendBlock(AppendBlobClient blob, long at, byte[] body) {
-    blob.appendBlockWithResponse(
-        new ByteArrayInputStream(body),
-        body.length,
-        null,
-        new AppendBlobRequestConditions().setAppendPosition(at),
-        null,
-        Context.NONE);
+    int max = blob.getMaxAppendBlockBytes();
+    for (int off = 0; off < body.length; off += max) {
+      int n = Math.min(max, body.length - off);
+      blob.appendBlockWithResponse(
+          new ByteArrayInputStream(body, off, n),
+          n,
+          null,
+          new AppendBlobRequestConditions().setAppendPosition(at + off),
+          null,
+          Context.NONE);
+    }
     return at + body.length;
   }
 
-  /** The store's own appendable file: an empty Append Blob, then an Append Block. */
+  /** The store's own appendable file: an empty Append Blob, then its Append Blocks. */
   private AppendBlobClient createOwn(String location, byte[] body) {
     AppendBlobClient blob = clients.appendBlob(location);
     blob.create(true);
@@ -210,13 +220,15 @@ public final class AzureSpike {
   }
 
   private void putsAndAppends() throws IOException {
-    for (int size = PART; size <= 32 * KIB * KIB; size *= 2) {
+    for (int size = PART; size <= LARGEST; size *= 2) {
       byte[] body = payload(size);
       AppendBlobClient own = createOwn(location("append-" + size), body);
       String sao = location("append-sao-" + size);
       atomic.create(sao, body);
       long ownLength = size;
       long saoLength = size;
+      int max = own.getMaxAppendBlockBytes();
+      int blocks = (size + max - 1) / max; // the Append Blocks one append of this size takes
       for (int i = 0; i < reps; i++) {
         String loc = location("put-" + size);
         long t = System.nanoTime();
@@ -226,11 +238,11 @@ public final class AzureSpike {
 
         t = System.nanoTime();
         ownLength = appendBlock(own, ownLength, body);
-        record("append", size, i + 2, i, System.nanoTime() - t);
+        record("append", size, (i + 2) * blocks, i, System.nanoTime() - t);
 
         t = System.nanoTime();
         saoLength = atomic.append(sao, saoLength, body);
-        record("append_sao", size, i + 2, i, System.nanoTime() - t);
+        record("append_sao", size, (i + 2) * blocks, i, System.nanoTime() - t);
       }
       out.flush();
     }
@@ -261,30 +273,45 @@ public final class AzureSpike {
     out.flush();
   }
 
-  private byte[] get(String location, long offset, long count) {
+  private long get(String location, long offset, long count) {
     return get(clients.appendBlob(location), offset, count);
   }
 
-  private static byte[] get(BlobClientBase blob, long offset, long count) {
-    ByteArrayOutputStream b = new ByteArrayOutputStream();
+  /** One GET of a range, its body dropped as it arrives; the bytes it delivered. */
+  private static long get(BlobClientBase blob, long offset, long count) {
+    Drain sink = new Drain();
     blob.downloadStreamWithResponse(
-        b, new BlobRange(offset, count), null, null, false, null, Context.NONE);
-    return b.toByteArray();
+        sink, new BlobRange(offset, count), null, null, false, null, Context.NONE);
+    return sink.bytes;
+  }
+
+  /** An output stream that counts what it is given and keeps none of it. */
+  private static final class Drain extends OutputStream {
+    long bytes = 0;
+
+    @Override
+    public void write(int b) {
+      bytes++;
+    }
+
+    @Override
+    public void write(byte[] b, int off, int len) {
+      bytes += len;
+    }
   }
 
   /** GETs by size, of the Put Blobs' blobs: whole, and as ranges of the largest. */
   private void getsBySize() throws IOException {
-    int largest = 32 * KIB * KIB;
     for (int i = 0; i < reps; i++) {
-      BlobClientBase big = clients.blockBlob(puts.get(largest).get(i));
+      BlobClientBase big = clients.blockBlob(puts.get(LARGEST).get(i));
       for (Map.Entry<Integer, List<String>> e : puts.entrySet()) {
         int size = e.getKey();
         long t = System.nanoTime();
-        int n = get(clients.blockBlob(e.getValue().get(i)), 0, size).length;
+        long n = get(clients.blockBlob(e.getValue().get(i)), 0, size);
         record("get_size", n, 1, i, System.nanoTime() - t);
 
         t = System.nanoTime();
-        n = get(big, (largest - size) / 2, size).length;
+        n = get(big, (LARGEST - size) / 2, size);
         record("get_range", n, 1, i, System.nanoTime() - t);
       }
       out.flush();
@@ -302,16 +329,16 @@ public final class AzureSpike {
       }
       for (int i = 0; i < reps; i++) {
         long t = System.nanoTime();
-        int n = get(loc, 0, length).length;
+        long n = get(loc, 0, length);
         record("get_full", n, parts, i, System.nanoTime() - t);
 
         t = System.nanoTime();
-        n = get(loc, length - PART, PART).length;
+        n = get(loc, length - PART, PART);
         record("get_tail", n, parts, i, System.nanoTime() - t);
 
         long mid = length / 2;
         t = System.nanoTime();
-        n = get(loc, mid, PART).length;
+        n = get(loc, mid, PART);
         record("get_mid", n, parts, i, System.nanoTime() - t);
       }
       out.flush();
@@ -334,7 +361,7 @@ public final class AzureSpike {
         record("iceberg_mid", PART, 1, i, System.nanoTime() - t);
       }
       t = System.nanoTime();
-      int n = get(loc, size / 2, PART).length;
+      long n = get(loc, size / 2, PART);
       record("get_mid_32m", n, 1, i, System.nanoTime() - t);
     }
     out.flush();

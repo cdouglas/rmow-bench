@@ -111,7 +111,11 @@ The phases recorded in `steps.jsonl` are:
 
 Each phase records wall time, thread CPU time, and the requests a tracing FileIO saw: GETs (ranged
 or streamed), HEADs, PUTs, APPENDs, aborts, bytes read and bytes written. Requests are counted the
-way Iceberg's object-store streams issue them. Every read is checked against a reference model,
+way Iceberg's object-store streams issue them. An append counts as one APPEND and a new appendable
+file as one PUT on every store. Where a store caps an append (Azure's Append Block, 100 MiB), the
+fork splits a larger one into several, and `append_splits` counts the extra ones, for a store
+profile with a cap to price (since 2026-10-27; the lab takes older runs' splits from their request
+logs, appends only). Every read is checked against a reference model,
 using an order-independent hash of (id, version), and a mismatch stops the run. With `verifyRows`
 (the default), every decoded row's payload is checked as well. That check is the harness's, not an
 engine's, and it costs about 70% of a read's CPU, so runs made for latency simulation turn it off.
@@ -206,8 +210,9 @@ not in the model), and latency. Two things check them, given a directory bucket:
   - a run of every arm family matches the model, appends and bytes written included.
 - **`org.rmow.bench.micro.S3ExpressSpike <s3://bucket/prefix>`** measures latencies, interleaved:
   the store's own appends (a write offset alone) against RMoW's (the fork's, conditioned on the
-  ETag too), PUTs against RMoW's creates (conditioned on absence), from 64 KiB to 32 MiB; GETs by
-  size, of the PUTs' objects whole and as ranges of a 32 MiB one, for the read rate per MiB; and
+  ETag too), PUTs against RMoW's creates (conditioned on absence), from 64 KiB to 128 MiB, a row
+  group at Iceberg's default; GETs by size, of the PUTs' objects whole and as ranges of a 128 MiB
+  one, for the read rate per MiB; and
   GETs (whole, last 64 KiB, middle 64 KiB) of objects of 1 to 1000 appended parts. It writes
   `results/spike/s3x-spike-<UTC>/spike.jsonl`.
 
@@ -236,7 +241,9 @@ than the model counts, but no more requests.
 `AppendBlock` extends only an Append Blob, and Iceberg writes block blobs. So RMoW's files are
 Append Blobs, created through the fork (`AtomicAppender`) as a temporary Append Blob, one Append
 Block and a rename with `If-None-Match: *`: three requests, where the model counts one PUT. Each
-append is one `AppendBlock`, conditioned on the blob's length and ETag.
+append is one `AppendBlock`, conditioned on the blob's length and ETag. An Append Block takes at
+most 100 MiB, so a larger append or create takes one per 100 MiB (`append_splits` counts the
+extra ones).
 
 The recorder (`AzureRecorder`) counts what the SDK sends through every client in the process,
 Iceberg's included: azure-core adds its policies to every storage pipeline
@@ -258,10 +265,11 @@ Block. The contract checks that:
 `AzureTest` runs the same contract against Azure when `RMOW_AZURE_ROOT` names a prefix in a
 container. `org.rmow.bench.micro.AzureSpike <abfss://...>` measures latencies, interleaved: Put
 Blobs, the store's own Append Blocks (conditioned on the length alone) and RMoW's (on the ETag
-too), from 64 KiB to 32 MiB; GETs by size, of the Put Blobs' blobs whole and as ranges of a 32 MiB
-one; creates (an empty Append Blob, the store's own appendable file, and RMoW's atomic one) and
-HEADs; GETs of Append Blobs of 1 to 1000 blocks; and Iceberg's ranged read
-of a 32 MiB file against the SDK's. `configs/azure-calibration.json` is the calibration run. Its
+too), from 64 KiB to 128 MiB, a row group at Iceberg's default (a 128 MiB append is two Append
+Blocks); GETs by size, of the Put Blobs' blobs whole and as ranges of a 128 MiB one; creates (an
+empty Append Blob, the store's own appendable file, and RMoW's atomic one) and HEADs; GETs of
+Append Blobs of 1 to 1000 blocks; and Iceberg's ranged read of a 32 MiB file against the SDK's.
+`configs/azure-calibration.json` is the calibration run. Its
 Azurite twin (`-azurite.json`) gives the requests it must send, but for its creates: each costs a
 HEAD there where Azure's costs a rename.
 
@@ -274,13 +282,17 @@ S3FileIO and ADLSFileIO implement it on the fork, and the local stores (`MemFile
 holding a length and an ETag, and the appender keeps it, so appends chain:
 - **An append** is one request, at the snapshot's length and conditioned on its ETag: a PutObject
   on S3 Express, an Append Block on ADLS. Of several writers appending to one version, exactly one
-  lands. Where the store caps an append (Azure's Append Block, 100 MiB), it is several, in order.
+  lands. Where the store caps an append (Azure's Append Block, 100 MiB), it is several, in order,
+  each conditioned on the snapshot the last returned, so the footer lands last. Such an append is
+  not all or nothing: a writer that stops between parts leaves bytes past the length a commit
+  records, which no reader opens. S3 Express takes 5 GB per append.
 - **A new appendable file** is a CAS from a snapshot that has seen nothing, which assumes the
   object is absent and sends no lookup (every RMoW file has a name of its own):
   - on S3, one PutObject with `If-None-Match: *`;
-  - on ADLS, a temporary Append Blob (created, then one Append Block) renamed onto the file with
-    `If-None-Match: *`. An Append Blob is created empty, so only the rename makes the create all or
-    nothing: one request more than the store's own way, an empty Append Blob and its first block.
+  - on ADLS, a temporary Append Blob (created, then one Append Block, or one per 100 MiB) renamed
+    onto the file with `If-None-Match: *`. An Append Blob is created empty, so only the rename
+    makes the create all or nothing, at any size: one request more than the store's own way, an
+    empty Append Blob and its blocks.
   - on the local filesystem, a temporary file renamed onto the file.
 
   The model counts it as one PUT.
@@ -322,8 +334,10 @@ For latency, a configuration can set more things, and a run can log its requests
   1 MiB, fetched whole, is skipped only whole.
 - **`store.latency`** injects a simulated store's latency into every measured request: median
   latencies by kind (GET and HEAD, PUT and DELETE, append) with their lognormal sigmas, an extra
-  GET latency per appended part, and transfer times per MiB. Each request sleeps its expected
-  latency, so a phase's wall time is what it would take on that store (`StoreLatency`).
+  GET latency per appended part, transfer times per MiB, and `maxAppendMib`, the store's cap on an
+  append (100 for Azure; 0, the default, for none), past which each part costs an append. Each
+  request sleeps its expected latency, so a phase's wall time is what it would take on that store
+  (`StoreLatency`).
 - **`--log-requests`** (on `bin/run.sh` and `bin/matrix.sh`) writes `requests.jsonl`: every
   request each phase issued, with its split task and each task's CPU. The lab's
   `figures.replay` times a logged run on any store, with parallel reads' critical paths

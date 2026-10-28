@@ -28,7 +28,8 @@ import org.rmow.bench.append.RegionAppender;
  *   <li>{@code OutputFile.create()} is a HEAD, the existence check Iceberg's S3 and ADLS output
  *       files make ({@code createOrOverwrite()} makes none);
  *   <li>an output stream is one PUT on close, and so is creating an appendable object; an append
- *       is one APPEND.
+ *       is one APPEND. Where a store caps an append (Azure), the fork splits a larger append or
+ *       create into several; the trace counts the extra ones apart ({@link IoTrace#splits}).
  * </ul>
  *
  * The wrapper keeps the delegate's {@link RangeReadable} capability: dropping it would silently
@@ -114,6 +115,7 @@ public final class TracingFileIO implements FileIO, RegionAppender {
       length = appender.append(location, expectedLength, bytes);
     }
     trace.record(IoTrace.Kind.APPEND, location, expectedLength, bytes.length, span);
+    trace.appendable(bytes.length);
     return length;
   }
 
@@ -127,10 +129,11 @@ public final class TracingFileIO implements FileIO, RegionAppender {
     try (span) {
       appender.create(location, bytes);
       if (latency != null) {
-        latency.put(location, bytes.length);
+        latency.create(location, bytes.length);
       }
     }
     trace.record(IoTrace.Kind.PUT, location, 0, bytes.length, span);
+    trace.appendable(bytes.length);
   }
 
   private final class TracingInputFile implements InputFile {

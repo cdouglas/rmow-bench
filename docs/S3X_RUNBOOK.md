@@ -25,7 +25,9 @@ service. It answers four questions:
 - **Credentials** from the instance's role: `s3express:CreateSession`, and object read, write and
   delete on the bucket. The SDK's default chain finds them; no configuration holds them.
 - **Cost.** The workload is small: about 10,000 requests for the calibration run and a few
-  thousand for the spike, with a few GiB stored for minutes. The instance-hours dominate.
+  thousand for the spike. The spike's writes reach 128 MiB, so it uploads about 20 GiB and keeps
+  about 20 GiB stored while it runs (tens of minutes at most; S3 Express charges $0.0032 per GB
+  uploaded past a request's first 512 KB, so about $0.07). The instance-hours dominate.
 
 ## Steps, on the instance
 
@@ -37,6 +39,9 @@ git clone -b atomicio git@github.com:cdouglas/iceberg.git
 git clone git@github.com:cdouglas/rmow-bench.git && cd rmow-bench
 git checkout <the commit the run is registered against>
 mvn -q package -DskipTests
+# the spike's build: main, whose spike reaches 128 MiB (since 2026-10-27); the calibration run
+# keeps the registered build
+git worktree add ../rmow-spike main && (cd ../rmow-spike && mvn -q package -DskipTests)
 
 ROOT=s3://<bucket>--<az id>--x-s3/rmow-bench
 export AWS_REGION=<region>
@@ -53,10 +58,10 @@ export AWS_REGION=<region>
 RMOW_S3X_ROOT=$ROOT/test mvn test -Dtest=S3ExpressTest
 
 # 2. The spike: the store's own appends against RMoW's (the fork's), PUTs against RMoW's creates,
-#    from 64 KiB to 32 MiB, interleaved; GETs of the PUTs' objects by size, whole and as ranges of
-#    a 32 MiB one; and GETs of objects of 1 to 1000 appended parts. Writes
+#    from 64 KiB to 128 MiB, interleaved; GETs of the PUTs' objects by size, whole and as ranges of
+#    a 128 MiB one; and GETs of objects of 1 to 1000 appended parts. Writes
 #    results/spike/s3x-spike-<UTC>/spike.jsonl, deletes its objects
-java -cp "target/rmow-bench-0.1.0-SNAPSHOT.jar:target/lib/*" \
+java -cp "../rmow-spike/target/rmow-bench-0.1.0-SNAPSHOT.jar:../rmow-spike/target/lib/*" \
   org.rmow.bench.micro.S3ExpressSpike $ROOT/spike --reps 20
 
 # 3. The calibration run: the bucket goes into a copy of the configuration (its root is a
@@ -110,8 +115,11 @@ instruction) varies from run to run.
 - **A measured profile.** The spike gives:
   - medians and lognormal sigmas per operation and size, as `store_profiles` holds them;
   - what the fork's conditions cost: `append_sao` against `append`, `create_sao` against `put`;
-  - the read rate per MiB, the slope of `get_size` and `get_range` over 64 KiB to 32 MiB: the
+  - the read rate per MiB, the slope of `get_size` and `get_range` over 64 KiB to 128 MiB: the
     profile assumes it equal to the write rate, and it is the largest I/O term of a full read;
+  - the write rate per MiB, and whether it holds at a row group of Iceberg's default size: at
+    128 MiB row groups an RMoW-C append is about 100 MiB, and a full read's GETs reach 127 MiB
+    (the scale campaign, lab/pages/scale.md);
   - a GET's extra latency per appended part, from the 1-, 10-, 100- and 1000-part objects.
 - **Where the time went.** `phase_breakdown` splits each phase into encoding, decoding,
   footers, deletes, other CPU, the store client's CPU, waiting on the store, and other waiting.

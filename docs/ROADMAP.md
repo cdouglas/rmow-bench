@@ -122,6 +122,24 @@ reads.
   assumed, and it is the biggest I/O term in S3 Express full reads.
 - [x] **Drop the instruction-counter advice from the cloud runbooks** (done 2026-10-27). The cloud
   runs measure wall time; they need the clocks to agree (`host.thread_cpu_per_wall`).
+- [x] **The spikes reach 128 MiB** (done 2026-10-27), a row group at Iceberg's default: at
+  128 MiB row groups RMoW-C's appends are 98 MiB at the median (137 MiB at most) and full reads'
+  GETs reach 127 MiB, past the 32 MiB the spikes stopped at. On Azure a 128 MiB append is two
+  Append Blocks, the store's own and RMoW's. GETs drain their bodies rather than copy them, and
+  the S3 spike's own writes stream their bodies as the fork's do. Checked on versitygw and
+  Azurite. The calibration runs keep the registered build; the runbooks build the spike from main
+  beside it.
+- [x] **Split appends counted** (done 2026-10-27). The fork splits an append, or an appendable
+  create's staging, larger than Azure's 100 MiB Append Block into several; the model counted one.
+  Phases record the extra ones (`append_splits`), and the `azure` profiles price each as an append
+  (`max_append_mib`, in `phase_latency`, `figures.replay` and injected latency). Older runs take
+  them from their request logs, appends only. Only the 128 MiB scale runs have any (0.65 per
+  RMoW-C batch, 59 ms on a 13.7 s batch on Azure); no number on any page moved.
+- [ ] **Iceberg's own writes above 256 MiB on Azure:** an output stream is one Put Blob up to
+  256 MiB (README, The Azure store). A larger one is presumably several requests, the SDK's
+  chunked upload, not yet counted; the model counts one PUT. No run so far writes one after its
+  initial load, but compaction at 128 MiB row groups (512 MiB files) would. Count what the SDK
+  sends for such a file on Azurite, then model it as the splits are.
 
 ## Arms
 

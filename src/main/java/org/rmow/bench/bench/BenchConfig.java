@@ -44,8 +44,8 @@ public final class BenchConfig {
 
   /**
    * A simulated store: median latencies by request kind with their lognormal sigmas, an extra GET
-   * latency per appended part, and transfer times per MiB, as {@code lab/views/40_latency.sql}'s
-   * {@code store_profiles} lists them.
+   * latency per appended part, transfer times per MiB, and the store's cap on an append, as {@code
+   * lab/views/40_latency.sql}'s {@code store_profiles} lists them.
    */
   public static final class LatencySpec {
     /** A name for the profile, for the record. */
@@ -59,6 +59,11 @@ public final class BenchConfig {
     public double partMs = 0;
     public double readMsPerMib = 0;
     public double writeMsPerMib = 0;
+    /**
+     * The most one append may write, or 0 for no cap: 100 for Azure, whose Append Block the fork
+     * splits a larger append into.
+     */
+    public double maxAppendMib = 0;
   }
 
   /** Which reads probe the arms, and how often. */

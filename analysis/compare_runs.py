@@ -14,8 +14,8 @@ from pathlib import Path
 import pandas as pd
 
 KEYS = ["arm", "step", "phase", "reader"]
-EXACT = ["requests", "gets", "get_range", "get_stream", "heads", "puts", "appends", "deletes",
-         "aborts", "bytes_read", "bytes_skipped_through", "bytes_written", "rows",
+EXACT = ["requests", "gets", "get_range", "get_stream", "heads", "puts", "appends", "append_splits",
+         "deletes", "aborts", "bytes_read", "bytes_skipped_through", "bytes_written", "rows",
          "objects", "stored_bytes", "live_bytes", "row_groups", "data_files", "delete_files"]
 
 

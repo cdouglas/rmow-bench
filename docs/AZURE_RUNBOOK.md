@@ -59,7 +59,8 @@ iceberg`) on builds before 2026-10-26. It needs such a build now, and is optiona
 - **Credentials** from the VM's managed identity, with **Storage Blob Data Contributor** on the
   account. The SDK's default chain finds them; no configuration holds them.
 - **Cost.** The workload is small: about 10,000 requests per calibration run, and a few thousand
-  for the spike, with a few GiB stored for minutes. The VM-hours dominate.
+  for the spike. The spike's writes reach 128 MiB, so it uploads about 15 GiB and keeps about
+  15 GiB stored while it runs (tens of minutes at most). The VM-hours dominate.
 
 ## Steps, on the VM
 
@@ -71,6 +72,9 @@ git clone -b atomicio git@github.com:cdouglas/iceberg.git
 git clone git@github.com:cdouglas/rmow-bench.git && cd rmow-bench
 git checkout <the commit the run is registered against>
 mvn -q package -DskipTests
+# the spike's build: main, whose spike reaches 128 MiB (since 2026-10-27); the calibration run
+# keeps the registered build
+git worktree add ../rmow-spike main && (cd ../rmow-spike && mvn -q package -DskipTests)
 
 ROOT=abfss://<container>@<account>.dfs.core.windows.net/rmow-bench
 
@@ -84,12 +88,12 @@ ROOT=abfss://<container>@<account>.dfs.core.windows.net/rmow-bench
 RMOW_AZURE_ROOT=$ROOT/test mvn test -Dtest=AzureTest
 
 # 2. The spike: Put Blobs, the store's own Append Blocks and RMoW's (the fork's), from 64 KiB to
-#    32 MiB, interleaved; GETs of the Put Blobs' blobs by size, whole and as ranges of a 32 MiB
-#    one; creates (an empty Append Blob, the store's own appendable file, RMoW's atomic one) and
-#    HEADs; GETs of Append Blobs of 1 to 1000 blocks; and Iceberg's ranged read of a 32 MiB file
-#    against the SDK's. Writes results/spike/azure-spike-<UTC>/spike.jsonl,
-#    deletes its objects
-java -cp "target/rmow-bench-0.1.0-SNAPSHOT.jar:target/lib/*" \
+#    128 MiB (two Append Blocks at 128 MiB), interleaved; GETs of the Put Blobs' blobs by size,
+#    whole and as ranges of a 128 MiB one; creates (an empty Append Blob, the store's own
+#    appendable file, RMoW's atomic one) and HEADs; GETs of Append Blobs of 1 to 1000 blocks; and
+#    Iceberg's ranged read of a 32 MiB file against the SDK's. Writes
+#    results/spike/azure-spike-<UTC>/spike.jsonl, deletes its objects
+java -cp "../rmow-spike/target/rmow-bench-0.1.0-SNAPSHOT.jar:../rmow-spike/target/lib/*" \
   org.rmow.bench.micro.AzureSpike $ROOT/spike --reps 20
 
 # 3. The calibration run: the root goes into a copy of the configuration (its root is a
@@ -144,8 +148,13 @@ docker stop rmow-azurite
 - **A measured profile.** The spike gives:
   - medians and lognormal sigmas per operation and size, as `store_profiles` holds them;
   - what the fork's writes cost: `append_sao` against `append`, `create_sao` against `create_own`;
-  - the read rate per MiB, the slope of `get_size` and `get_range` over 64 KiB to 32 MiB: the
+  - the read rate per MiB, the slope of `get_size` and `get_range` over 64 KiB to 128 MiB: the
     profile assumes it equal to the write rate;
+  - the write rate per MiB up to a row group of Iceberg's default size, and what an append split
+    in two costs: an Append Block takes at most 100 MiB, so a 128 MiB `append` or `append_sao` is
+    two, and at 128 MiB row groups about half of RMoW-C's appends are (the scale campaign,
+    lab/pages/scale.md). The lab prices each split as an append (`append_splits`, `max_append_mib`
+    in `store_profiles`);
   - a GET's extra latency per appended block, from the 1- to 1000-block blobs;
   - what Iceberg's ranged read costs against the SDK's alone (`iceberg_mid`, `get_mid_32m`).
 - **Where the time went.** `phase_breakdown` splits each phase into encoding, decoding,

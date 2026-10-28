@@ -46,7 +46,9 @@ def arm_encoding(arms: list[str] | None = None, title: str = "arm") -> tuple[alt
 # (--log-requests) would take on a simulated store. The model is the one the harness injects
 # (org.rmow.bench.io.StoreLatency) and lab/views/40_latency.sql sums: a request costs its kind's
 # expected latency (lognormal median x e^(sigma^2 / 2)), a GET a part's latency more per appended
-# part of its object, and each MiB its transfer time. Requests on the phase's own thread add up;
+# part of its object, and each MiB its transfer time. On a store that caps an append
+# (max_append_mib), a larger append costs an append more per part beyond the first, and so does a
+# larger appendable create's staging (phase_splits). Requests on the phase's own thread add up;
 # each group of split tasks runs on its reader's threads, first come first served, and costs its
 # makespan.
 
@@ -54,9 +56,13 @@ def _expected(median_ms, sigma):
     return median_ms * np.exp(sigma ** 2 / 2)
 
 
+CAPPED_APPEND_BYTES = 100 * 2 ** 20  # IoTrace.CAPPED_APPEND_BYTES, the cap append_splits counts at
+
+
 def replay(run_id, profile, parallelism=None, cpu="time"):
     """Simulated latency (ms) of each outermost phase of `run_id` on the store `profile` (a dict
-    or row with store_profiles' columns, plus an optional part_ms). `parallelism` overrides the
+    or row with store_profiles' columns, plus an optional part_ms; a max_append_mib, if set, must
+    be the 100 MiB the runs count splits at). `parallelism` overrides the
     threads of every reader model that ran on a pool. `cpu` is "time" (each thread's measured
     CPU) or "work" (its instructions at its arm's pace, as phase_work times a phase; needs a run
     with counts). Returns arm, step, phase, reader, the phase's measured wall and CPU (ms), and
@@ -70,10 +76,13 @@ def replay(run_id, profile, parallelism=None, cpu="time"):
         FROM requests WHERE run_id = $r ORDER BY arm, seq""", r=run_id)
     steps = q("""
         SELECT s.arm, s.step, s.phase, coalesce(s.reader, '') AS reader, s.wall_ns / 1e6 AS wall_ms,
-               s.cpu_ns / 1e6 AS cpu_ms, s.instructions, w.cpi, w.ghz
+               s.cpu_ns / 1e6 AS cpu_ms, s.instructions, w.cpi, w.ghz, x.append_splits
         FROM steps s LEFT JOIN phase_work w
           ON w.run_id = s.run_id AND w.arm = s.arm AND w.step = s.step AND w.phase = s.phase
          AND w.reader IS NOT DISTINCT FROM s.reader
+        JOIN phase_splits x
+          ON x.run_id = s.run_id AND x.arm = s.arm AND x.step = s.step AND x.phase = s.phase
+         AND x.reader IS NOT DISTINCT FROM s.reader
         WHERE s.run_id = $r
           AND s.phase IN ('batch', 'compact', 'read_full', 'read_recent', 'read_old')""", r=run_id)
     if cpu == "work":
@@ -98,18 +107,25 @@ def replay(run_id, profile, parallelism=None, cpu="time"):
     append = _expected(pr["append_ms"], pr["append_sigma"]) if can_append else 0.0
     part = pr.get("part_ms") or 0.0
     read, write = pr["read_ms_per_mib"] / 2 ** 20, pr["write_ms_per_mib"] / 2 ** 20
+    cap = pr.get("max_append_mib")
+    capped = cap is not None and not pd.isna(cap)
+    if capped and cap * 2 ** 20 != CAPPED_APPEND_BYTES:
+        raise ValueError(f"max_append_mib is 100 or none, not {cap}")
 
-    # parts of each object: appends since its last PUT or DELETE, before this event
+    # the parts beyond the first a capped store splits each append into (IoTrace.splits)
+    split = (np.maximum(0, (ev.length - 1) // CAPPED_APPEND_BYTES)
+             if capped else 0) * (ev.kind == "append")
+    # parts of each object: appends' parts since its last PUT or DELETE, before this event
     obj = ev.arm + "/" + ev.object
     gen = ev.kind.isin(["put", "delete"]).groupby(obj).cumsum()
-    app = (ev.kind == "append").astype(int)
+    app = (ev.kind == "append").astype(int) * (1 + split)
     parts = app.groupby([obj, gen]).cumsum() - app
     lat = np.select(
         [ev.kind == "get_range", ev.kind == "get_stream",
          ev.kind.isin(["stream_bytes", "skip_through"]), ev.kind == "head", ev.kind == "put",
          ev.kind == "append", ev.kind == "delete"],
         [get + parts * part + ev.length * read, get + parts * part, ev.length * read, get,
-         put + ev.length * write, append + ev.length * write, put],
+         put + ev.length * write, append * (1 + split) + ev.length * write, put],
         0.0)
     ev = ev.assign(lat=lat)
     key = ["arm", "step", "phase", "reader"]
@@ -137,6 +153,12 @@ def replay(run_id, profile, parallelism=None, cpu="time"):
 
     out = steps.set_index(key)
     out["serial_io"] = serial.reindex(out.index).fillna(0.0)
+    if capped:
+        # the splits the log does not show: appendable creates', staged on the phase's thread
+        # (the log does not say which PUT made an appendable file, so their parts are not counted
+        # as the object's, as injected latency counts them)
+        logged = ev.assign(split=split).groupby(key).split.sum()
+        out["serial_io"] += (out.append_splits - logged.reindex(out.index).fillna(0)) * append
     out["tasks"] = groups.span.reindex(out.index).fillna(0.0)
     # the phase thread's CPU includes the tasks it ran inline; those count in their tasks
     out["serial_cpu"] = out.cpu_ms - groups.inline_cpu.reindex(out.index).fillna(0.0)

@@ -181,7 +181,7 @@ public final class Runner {
             ? null
             : new StoreLatency(
                 ls.getMs, ls.getSigma, ls.putMs, ls.putSigma, ls.appendMs, ls.appendSigma,
-                ls.partMs, ls.readMsPerMib, ls.writeMsPerMib);
+                ls.partMs, ls.readMsPerMib, ls.writeMsPerMib, ls.maxAppendMib);
     List<ArmRun> arms = new ArrayList<>();
     for (String name : cfg.arms) {
       IoTrace trace = new IoTrace();
@@ -380,6 +380,7 @@ public final class Runner {
       m.put("heads", c.heads());
       m.put("puts", c.puts());
       m.put("appends", c.appends());
+      m.put("append_splits", c.appendSplits());
       m.put("deletes", c.deletes());
       m.put("aborts", c.aborts());
       m.put("bytes_read", c.bytesRead());

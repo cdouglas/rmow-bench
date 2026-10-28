@@ -13,6 +13,9 @@ import java.util.concurrent.locks.LockSupport;
  * <ul>
  *   <li>a GET or HEAD costs {@code get}, a PUT or DELETE {@code put}, an append {@code append},
  *       each a lognormal's mean (median × e^(σ²/2));
+ *   <li>where the store caps an append ({@code maxAppendMib}), an append or an appendable create
+ *       larger than the cap costs {@code append} more for each part beyond the first, as the fork
+ *       splits it;
  *   <li>a GET of an object that took appends costs {@code part} more per appended part;
  *   <li>each byte read or written costs {@code 1 / rate}.
  * </ul>
@@ -30,6 +33,7 @@ public final class StoreLatency {
   private final long partNs;
   private final double readNsPerByte;
   private final double writeNsPerByte;
+  private final long maxAppendBytes; // 0: no cap
   private final Map<String, Integer> appended = new ConcurrentHashMap<>(); // parts after the first
 
   /**
@@ -39,6 +43,8 @@ public final class StoreLatency {
    * @param partMs extra GET latency per appended part of the object
    * @param readMsPerMib transfer time of a MiB read
    * @param writeMsPerMib transfer time of a MiB written
+   * @param maxAppendMib the most one append may write, or 0 for no cap; only Azure's 100 MiB,
+   *     the cap {@link IoTrace#splits} counts at
    */
   public StoreLatency(
       double getMs,
@@ -49,13 +55,24 @@ public final class StoreLatency {
       double appendSigma,
       double partMs,
       double readMsPerMib,
-      double writeMsPerMib) {
+      double writeMsPerMib,
+      double maxAppendMib) {
+    if (maxAppendMib != 0 && (long) (maxAppendMib * MIB) != IoTrace.CAPPED_APPEND_BYTES) {
+      throw new IllegalArgumentException(
+          "maxAppendMib is 0 or " + (IoTrace.CAPPED_APPEND_BYTES >> 20) + ", not " + maxAppendMib);
+    }
     this.getNs = expectedNs(getMs, getSigma);
     this.putNs = expectedNs(putMs, putSigma);
     this.appendNs = expectedNs(appendMs, appendSigma);
     this.partNs = (long) (partMs * 1e6);
     this.readNsPerByte = readMsPerMib * 1e6 / MIB;
     this.writeNsPerByte = writeMsPerMib * 1e6 / MIB;
+    this.maxAppendBytes = (long) (maxAppendMib * MIB);
+  }
+
+  /** The appends beyond the first that this store splits a write of {@code bytes} into. */
+  private long splits(long bytes) {
+    return maxAppendBytes == 0 ? 0 : IoTrace.splits(bytes);
   }
 
   private static long expectedNs(double medianMs, double sigma) {
@@ -90,9 +107,24 @@ public final class StoreLatency {
     sleep(putNs + (long) (bytes * writeNsPerByte));
   }
 
+  /**
+   * A new appendable object, which the model counts as a PUT: on a capped store, its content is
+   * staged in parts, each a part of the object.
+   */
+  void create(String path, long bytes) {
+    long splits = splits(bytes);
+    if (splits == 0) {
+      appended.remove(path);
+    } else {
+      appended.put(path, (int) splits);
+    }
+    sleep(putNs + splits * appendNs + (long) (bytes * writeNsPerByte));
+  }
+
   void append(String path, long bytes) {
-    appended.merge(path, 1, Integer::sum);
-    sleep(appendNs + (long) (bytes * writeNsPerByte));
+    long parts = 1 + splits(bytes);
+    appended.merge(path, (int) parts, Integer::sum);
+    sleep(parts * appendNs + (long) (bytes * writeNsPerByte));
   }
 
   void delete(String path) {

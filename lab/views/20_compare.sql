@@ -2,7 +2,9 @@
 -- configuration and the code, so two runs of one configuration must match exactly in these
 -- columns (wall and CPU time may not). A record is keyed by arm, step, phase and reader: probes
 -- run every read phase once per reader model (runs before reader models have no reader). No run
--- has two records with one key; if one did, its records are flagged 'duplicate key'.
+-- has two records with one key; if one did, its records are flagged 'duplicate key'. Runs before
+-- 2026-10-27 have no append_splits, which is compared only where both runs have it.
+ALTER TABLE steps ADD COLUMN IF NOT EXISTS append_splits BIGINT;
 CREATE MACRO steps_diff(run_a, run_b) AS TABLE
 WITH a AS (
     SELECT *, coalesce(reader, '') AS reader_key,
@@ -28,6 +30,7 @@ SELECT coalesce(a.arm, b.arm) AS arm, coalesce(a.step, b.step) AS step,
            CASE WHEN coalesce(a.heads, -1) <> coalesce(b.heads, -1) THEN 'heads' END,
            CASE WHEN coalesce(a.puts, -1) <> coalesce(b.puts, -1) THEN 'puts' END,
            CASE WHEN coalesce(a.appends, -1) <> coalesce(b.appends, -1) THEN 'appends' END,
+           CASE WHEN a.append_splits <> b.append_splits THEN 'append_splits' END,
            CASE WHEN coalesce(a.deletes, -1) <> coalesce(b.deletes, -1) THEN 'deletes' END,
            CASE WHEN coalesce(a.aborts, -1) <> coalesce(b.aborts, -1) THEN 'aborts' END,
            CASE WHEN coalesce(a.bytes_read, -1) <> coalesce(b.bytes_read, -1) THEN 'bytes_read' END,

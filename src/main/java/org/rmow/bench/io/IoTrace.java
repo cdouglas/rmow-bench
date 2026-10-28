@@ -53,6 +53,18 @@ public final class IoTrace {
     TASK // logged only: a split task ended (cpuNs, and length 1 if it ran inline)
   }
 
+  /**
+   * The most one append may write on a store that caps it: Azure's Append Block, 100 MiB since
+   * service version 2022-11-02. The fork splits a larger append, and a larger appendable create's
+   * staging, into several, in order ({@code AtomicAppender}, {@code ADLSOutputFile}).
+   */
+  public static final long CAPPED_APPEND_BYTES = 100L << 20;
+
+  /** The appends beyond the first that a capped store splits a write of {@code bytes} into. */
+  public static long splits(long bytes) {
+    return bytes <= CAPPED_APPEND_BYTES ? 0 : (bytes - 1) / CAPPED_APPEND_BYTES;
+  }
+
   private static final ThreadLocal<Integer> CURRENT_TASK = ThreadLocal.withInitial(() -> -1);
 
   /** Marks the calling thread's requests as split task {@code id}'s, until {@link #exitTask}. */
@@ -75,6 +87,7 @@ public final class IoTrace {
   private final LongAdder putBytes = new LongAdder();
   private final LongAdder appends = new LongAdder();
   private final LongAdder appendBytes = new LongAdder();
+  private final LongAdder appendSplits = new LongAdder();
   private final LongAdder deletes = new LongAdder();
   private final List<Event> events = Collections.synchronizedList(new ArrayList<>());
   private final LongAdder poolCpu = new LongAdder();
@@ -249,6 +262,16 @@ public final class IoTrace {
   }
 
   /**
+   * Counts the appends beyond the first that a capped store would split an append or an appendable
+   * create of {@code bytes} into ({@link #splits}). They are not requests of the model, which
+   * counts an append as one APPEND and a create as one PUT on every store; a store profile with a
+   * cap prices them.
+   */
+  void appendable(long bytes) {
+    appendSplits.add(splits(bytes));
+  }
+
+  /**
    * Bytes a stream request delivered to its reader (counted per read, not per request), and the
    * read's time: none if the read opened the request, whose GET carries it.
    */
@@ -274,6 +297,7 @@ public final class IoTrace {
         putBytes.sum(),
         appends.sum(),
         appendBytes.sum(),
+        appendSplits.sum(),
         deletes.sum());
   }
 
@@ -290,6 +314,7 @@ public final class IoTrace {
       long putBytes,
       long appends,
       long appendBytes,
+      long appendSplits,
       long deletes) {
 
     public Counters minus(Counters o) {
@@ -305,6 +330,7 @@ public final class IoTrace {
           putBytes - o.putBytes,
           appends - o.appends,
           appendBytes - o.appendBytes,
+          appendSplits - o.appendSplits,
           deletes - o.deletes);
     }
 
