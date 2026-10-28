@@ -72,7 +72,9 @@ build_infra_vars() {
   say "restricting SSH ingress to $cidr"
   case "$CLOUD" in
     aws) INFRA_VARS=(-var "region=$AWS_REGION" -var "az_id=$AWS_AZ_ID" -var "ssh_ingress_cidr=$cidr"
-      -var "ssh_pub_key=$SSH_PUBLIC_KEY") ;;
+      -var "ssh_pub_key=$SSH_PUBLIC_KEY" -var "bucket=${AWS_BUCKET:-}"
+      -var "instance_profile=${AWS_INSTANCE_PROFILE:-}"
+      -var "create_endpoint=${AWS_CREATE_ENDPOINT:-true}") ;;
     azure) INFRA_VARS=(-var "location=$AZURE_LOCATION" -var "resource_group_name=$AZURE_RESOURCE_GROUP"
       -var "source_address_prefix=$cidr") ;;
   esac
@@ -149,8 +151,20 @@ cmd_teardown() {
     && [[ -n "$("${TF_BENCH[@]}" state list 2>/dev/null)" ]]; then
     die "the VM is still up: '$0 down' first (and '$0 fetch' before that)"
   fi
-  say "destroying the store ($(infra_out root 2>/dev/null || echo '?')) with every object in it"
   build_infra_vars
+  # An existing bucket stays: only the runs' prefix in it goes
+  if [[ "$CLOUD" == aws && -n "${AWS_BUCKET:-}" ]]; then
+    local root
+    root="$(infra_out root 2>/dev/null || true)"
+    if [[ -n "$root" ]]; then
+      [[ "$root" == "s3://$AWS_BUCKET/rmow-bench" ]] || die "unexpected root '$root'"
+      say "deleting every object under $root/; the bucket stays"
+      aws s3 rm --recursive --only-show-errors --region "$AWS_REGION" "$root/"
+    fi
+    say "destroying the key pair and the security group"
+  else
+    say "destroying the store ($(infra_out root 2>/dev/null || echo '?')) with every object in it"
+  fi
   "${TF_INFRA[@]}" destroy -auto-approve -input=false "${INFRA_VARS[@]}"
 }
 

@@ -150,7 +150,12 @@ reads.
   1.12.0-atomicio-SNAPSHOT. They now fetch the tag from Apache, as the deployment does. Checked
   offline and with a read-only plan of the AWS infra layer, and the VM's build step in an Ubuntu
   24.04 container: the local twin's configuration on that build sent the registered twin's
-  requests and bytes (0 of 862 records differ). Nothing has been applied.
+  requests and bytes (0 of 862 records differ). Applied on AWS (2026-10-28) in us-west-2, as
+  catalog-bench's runs were, on catalog-bench's directory bucket and instance profile: `casuser`
+  may neither create IAM roles nor open sessions on a bucket it makes. The fork's S3 Express
+  contract passed there; rmow-bench's `S3ExpressTest` failed on two faults of its own, since fixed
+  (an append at 0, which the fork takes for an unknown length, and a client its throwaway
+  S3FileIOs closed when finalized).
 
 ## Arms
 

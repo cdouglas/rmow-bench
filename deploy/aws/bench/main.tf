@@ -17,7 +17,7 @@ provider "aws" {
 
 variable "region" {
   type    = string
-  default = "us-east-1"
+  default = "us-west-2"
 }
 
 # AMD Zen 4, as the laptop the twins ran on is: the twins' predictions price CPU at the laptop's

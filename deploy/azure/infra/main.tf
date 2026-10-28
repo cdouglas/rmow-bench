@@ -20,7 +20,7 @@ provider "azurerm" {
 
 variable "location" {
   type    = string
-  default = "eastus"
+  default = "westus"
 }
 
 variable "resource_group_name" {
