@@ -11,7 +11,7 @@
 #              and at SPIKE_COMMIT (~/rmow-spike, a worktree of it)
 #   test       the fork's atomic-operations contract on the store, then rmow-bench's (step 1)
 #   spike      the spike, SPIKE_REPS reps (step 2)
-#   calibrate  the calibration run, its requests logged (step 3)
+#   calibrate  the calibration run, its requests logged, CALIBRATION_REPS times (step 3)
 # Its log is ~/run.log; results land in ~/rmow-bench/results, as on the laptop.
 set -euo pipefail
 cd "$HOME"
@@ -159,12 +159,17 @@ step_calibrate() {
     jq --arg region "$AWS_REGION" '.store.region = $region' "$cfg" > "$cfg.tmp" && mv "$cfg.tmp" "$cfg"
   fi
   ! grep -q REPLACE "$cfg" || die "a placeholder is left in $cfg"
-  log "the calibration run ($label, the build at $CALIBRATION_COMMIT), under $ROOT/calibration"
-  local out
-  out="$(cd rmow-bench && bin/run.sh "$cfg" --log-requests | tee /dev/stderr | tail -1)"
-  # The model's checks need the VM's two clocks to agree (the runbooks, Where the time went)
-  jq -r '"  host.thread_cpu_per_wall: \(.host.thread_cpu_per_wall) (should be about 1)"' \
-    "rmow-bench/$out/manifest.json" 2>/dev/null || echo "  (no manifest at rmow-bench/$out)"
+  # Repeated, for the spread of measured latency (the requests and bytes of every run are the
+  # same, C1); each run deletes its objects when it ends
+  local i out
+  for i in $(seq 1 "$CALIBRATION_REPS"); do
+    log "calibration run $i of $CALIBRATION_REPS ($label, the build at $CALIBRATION_COMMIT)," \
+      "under $ROOT/calibration"
+    out="$(cd rmow-bench && bin/run.sh "$cfg" --log-requests | tee /dev/stderr | tail -1)"
+    # The model's checks need the VM's two clocks to agree (the runbooks, Where the time went)
+    jq -r '"  host.thread_cpu_per_wall: \(.host.thread_cpu_per_wall) (should be about 1)"' \
+      "rmow-bench/$out/manifest.json" 2>/dev/null || echo "  (no manifest at rmow-bench/$out)"
+  done
 }
 
 running() { [[ -f run.pid ]] && kill -0 "$(cat run.pid)" 2>/dev/null; }

@@ -50,6 +50,8 @@ select = ["source:micro"]
 title = "The calibration's twins: MoR-v3, TailCoW-C, RMoR-C, RMoR-C with footers and RMoW-C, cached-skip and GETs by size (docs/AZURE_RUNBOOK.md, docs/S3X_RUNBOOK.md)"
 select = ["azure-calibration-azurite-a96fd56de2f0/*", "s3x-calibration-local-8433ccfd4620/*"]
 
+[campaigns.standins]
+select = ["standin-*", "spike/*-20261028T16*"]
 [[annotate]]
 select = "smoke-*"
 mark = "excluded"
@@ -59,3 +61,10 @@ note = "in-memory smoke test of the harness"
 select = "where:host = 'havoc' AND label = 'sim-validate-s3x'"
 mark = "excluded"
 note = "pipeline check of the havoc container (docker/campaigns/pipeline.json): requests and bytes match the laptop's run in 769 of 779 records, the other 10 being the split arm's stock reads, changed by the split planning"
+[[annotate]]
+select = "standin-*"
+note = "pipeline stand-ins for the cloud calibration (lab/pages/cloud.md), not an experiment"
+[[annotate]]
+select = "spike/*-20261028T16*"
+tags = ["emulator"]
+note = "spike on an emulator (versitygw, Azurite): checks the code, not the store"

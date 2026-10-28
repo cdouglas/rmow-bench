@@ -148,7 +148,9 @@ reads.
   the role's temporary keys, or a SAS signed here for 8 hours. The runbooks' fork build was wrong:
   the fork on GitHub has no release tag, without which the build does not version itself
   1.12.0-atomicio-SNAPSHOT. They now fetch the tag from Apache, as the deployment does. Checked
-  offline and with a read-only plan of the AWS infra layer; nothing has been applied.
+  offline and with a read-only plan of the AWS infra layer, and the VM's build step in an Ubuntu
+  24.04 container: the local twin's configuration on that build sent the registered twin's
+  requests and bytes (0 of 862 records differ). Nothing has been applied.
 
 ## Arms
 

@@ -113,7 +113,8 @@ write_env() {
   {
     printf '%s=%q\n' STORE "$CLOUD" ROOT "$(infra_out root)" \
       FORK_REPO "$FORK_REPO" FORK_COMMIT "$FORK_COMMIT" FORK_BASE_TAG "$FORK_BASE_TAG" \
-      CALIBRATION_COMMIT "$calib" SPIKE_COMMIT "$spike" SPIKE_REPS "$SPIKE_REPS"
+      CALIBRATION_COMMIT "$calib" SPIKE_COMMIT "$spike" SPIKE_REPS "$SPIKE_REPS" \
+      CALIBRATION_REPS "$CALIBRATION_REPS"
     case "$CLOUD" in
       aws) printf '%s=%q\n' AWS_REGION "$(infra_out region)" S3_EXPRESS_BUCKET "$(infra_out bucket)" ;;
       azure) printf '%s=%q\n' AZURE_ACCOUNT "$(infra_out account)" \

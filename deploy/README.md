@@ -8,8 +8,11 @@ and brings the results back into `results/`. The layout follows shield-rs's `dep
 
 > **Status: written and checked offline, not yet applied.** `./deploy/validate.sh` passes
 > (`terraform fmt` and `validate` on the four layers, `bash -n`, and shellcheck if installed), and
-> a read-only `terraform plan` of the AWS infra layer resolves its lookups (2026-10-28). `infra-up`
-> and `up` provision **billable** resources; review `terraform plan` and tear down when done.
+> a read-only `terraform plan` of the AWS infra layer resolves its lookups (2026-10-28). The VM's
+> `build` step ran in an Ubuntu 24.04 container (9 minutes), and the local twin's configuration on
+> its build sent the registered twin's requests and bytes (`compare_runs.py`: 0 of 862 records
+> differ). `infra-up` and `up` provision **billable** resources; review `terraform plan` and tear
+> down when done.
 
 ## Layout
 
@@ -85,9 +88,10 @@ skipped every test fails: a suite without credentials skips rather than fails.
   Apache's repository. Gradle skips the engines (Spark, Flink, Kafka Connect). Then rmow-bench at
   `CALIBRATION_COMMIT` (9a69028, where C1–C4 were registered) and, in a worktree,
   `SPIKE_COMMIT` (`main`).
-- **test, spike, calibrate:** the runbook's steps 1–3. The calibration's configuration gets the
-  store's root (and on AWS its region) in a copy outside the checkout, so the manifest records a
-  clean tree.
+- **test, spike, calibrate:** the runbook's steps 1–3. The calibration runs `CALIBRATION_REPS`
+  times (3), for the spread of measured latency; every run must send the twin's requests and
+  bytes (C1). Its configuration gets the store's root (and on AWS its region) in a copy outside
+  the checkout, so the manifest records a clean tree.
 
 **The VM.** Ubuntu 24.04 and its OpenJDK 17 package, which the twins ran on (17.0.20.1 when this
 was written). The defaults are AMD, as the twins' laptop is (Zen 4):

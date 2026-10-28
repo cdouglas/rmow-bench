@@ -40,6 +40,25 @@ oplog = "oplog_sha256"
 verify_rows = { path = "config.verifyRows", type = "BOOLEAN" }
 cpu_model = "host.cpu_model"
 
+# The store spikes (S3ExpressSpike, AzureSpike) write results/spike/<label>-<UTC start>/:
+# manifest.json (label, started, root, endpoint, reps; finished once done) and spike.jsonl. On an
+# emulator (endpoint set) a spike checks the code, not the store.
+[[runs]]
+name = "spike"
+kind = "manifest"
+root = "results/spike"
+glob = "*"
+id = "spike/{dir.name}"
+
+[runs.fields]
+started = { path = "started", format = "%Y%m%dT%H%M%SZ" }
+host = "host"
+params = "."
+
+[runs.promote]
+endpoint = "endpoint"
+reps = { path = "reps", type = "INTEGER" }
+
 # JMH micro-benchmarks (-rf json), one run per file
 [[runs]]
 name = "micro"
@@ -75,6 +94,18 @@ mode = "table"
 name = "requests"
 runs = "bench"
 file = "requests.jsonl"
+format = "jsonl"
+mode = "table"
+only_finished = true
+options = { ignore_errors = true }
+
+# The spikes' requests, one record each: op, bytes (the size written or read), parts (the
+# appendable object's parts after it, or the parts of the object a GET read), rep and ns (its wall
+# time on the VM)
+[[facts]]
+name = "spike_requests"
+runs = "spike"
+file = "spike.jsonl"
 format = "jsonl"
 mode = "table"
 only_finished = true

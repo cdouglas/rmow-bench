@@ -554,3 +554,244 @@ def compaction_analysis(build, arms=None, readers=("one-footer", "cached")):
     }
 
     return SimpleNamespace(**{k: v for k, v in locals().items() if not k.startswith("_")})
+
+
+# The cloud calibration (lab/pages/cloud.md, docs/S3X_RUNBOOK.md, docs/AZURE_RUNBOOK.md). Each
+# provider is a list of repeated runs of one configuration, {provider: [run_id, ...]}: the cloud
+# runs, or until they come back, stand-ins. Latency is each phase's measured wall time; requests,
+# bytes and storage come from the views in lab/views/60_cloud.sql.
+
+READS = {"read_full": "full read", "read_recent": "newest 1%", "read_old": "time travel"}
+FILE_TYPES = {"parquet": "Parquet", "puffin": "Puffin (DV)", "session": "CreateSession"}
+PARTS = {"base": "initial load", "base_appended": "appended to it", "data": "new data files",
+         "data_appended": "appended to them", "dv": "DVs"}
+
+
+def _groups(groups):
+    """{provider: [run, ...]} as two parallel lists, for unnest in SQL."""
+    pairs = [(p, r) for p, runs in groups.items() for r in runs]
+    return {"providers": [p for p, _ in pairs], "group_runs": [r for _, r in pairs]}
+
+
+_GROUPS = "(SELECT unnest($providers) AS provider, unnest($group_runs) AS run_id)"
+
+
+def update_latency(groups, reader="cached"):
+    """Measured wall time (ms) per provider, run, arm and update: each batch (a write; steps from
+    1) and each read under `reader` (steps 0, every `reads.every`)."""
+    return q(f"""
+        SELECT g.provider, s.run_id, s.arm, m.arm_label, m.ord, s.step, s.phase,
+               s.wall_ns / 1e6 AS ms
+        FROM steps s JOIN {_GROUPS} g USING (run_id) JOIN arm_meta m USING (arm)
+        WHERE s.phase = 'batch' OR (list_contains($reads, s.phase) AND s.reader = $reader)
+        ORDER BY g.provider, m.ord, s.phase, s.step""",
+             reads=list(READS), reader=reader, **_groups(groups))
+
+
+def summary_points(groups, reader="cached", k=None, reads=("read_full", "read_recent")):
+    """Per provider, arm and kind of read, over the updates up to `k` deltas against the
+    checkpoint (default: all of them): the mean batch (write_ms), the mean read over the reads at
+    0..k deltas (read_ms), and the reads at 0 and at k (read_k0, read_kk), in ms; each a mean over
+    the provider's runs."""
+    lat = update_latency(groups, reader)
+    k = int(lat.step.max()) if k is None else k
+    lat = lat[lat.step <= k]
+    keys = ["provider", "arm", "arm_label", "ord"]
+    writes = (lat[(lat.phase == "batch") & (lat.step >= 1)].groupby(keys).ms.mean()
+              .rename("write_ms").reset_index())
+    r = (lat[lat.phase.isin(reads)].groupby(keys + ["phase", "step"]).ms.mean().reset_index()
+         .sort_values("step"))
+    rd = r.groupby(keys + ["phase"]).agg(read_ms=("ms", "mean"), read_k0=("ms", "first"),
+                                         read_kk=("ms", "last"), reads=("ms", "size"))
+    out = rd.reset_index().merge(writes, on=keys)
+    out["read"] = out.phase.map(READS)
+    out["k"] = k
+    out["runs"] = out.provider.map({p: len(v) for p, v in groups.items()})
+    out["porder"] = out.provider.map({p: i for i, p in enumerate(groups)})
+    return out.sort_values(["porder", "phase", "ord"]).reset_index(drop=True)
+
+
+def summary_chart(df):
+    """Write latency against read latency per arm: a point at the means, a whisker from the read
+    at 0 deltas to the read at k; one panel per provider (columns) and kind of read (rows), each
+    on its own scales."""
+    color, shape = arm_encoding(list(df.arm.unique()))
+    base = alt.Chart().encode(
+        x=alt.X("write_ms:Q", title="write (one batch), ms", scale=alt.Scale(zero=False)),
+        color=color)
+    whisker = base.mark_rule(strokeWidth=2, opacity=0.6).encode(
+        y=alt.Y("read_k0:Q", title="read, ms", scale=alt.Scale(zero=False)), y2="read_kk:Q")
+    point = base.mark_point(filled=True, size=90, opacity=1).encode(
+        y="read_ms:Q", shape=shape,
+        tooltip=["provider", "read", "arm_label",
+                 alt.Tooltip("write_ms:Q", format=".1f"), alt.Tooltip("read_ms:Q", format=".1f"),
+                 alt.Tooltip("read_k0:Q", format=".1f"), alt.Tooltip("read_kk:Q", format=".1f")])
+    return (alt.layer(whisker, point, data=df)
+            .properties(width=260, height=220)
+            .facet(column=alt.Column("provider:N", title=None,
+                                     sort=list(dict.fromkeys(df.provider))),
+                   row=alt.Row("read:N", title=None, sort=[READS[p] for p in READS]))
+            .resolve_scale(x="independent", y="independent"))
+
+
+def update_latency_chart(lat, provider, phases):
+    """Bars of measured latency per update for one provider: the mean over its runs, with the
+    least and the most as a whisker; one row per arm, one column per phase."""
+    d = (lat[(lat.provider == provider) & lat.phase.isin(phases)]
+         .groupby(["arm_label", "ord", "phase", "step"]).ms
+         .agg(["mean", "min", "max", "size"]).reset_index())
+    d["what"] = d.phase.map({"batch": "write (batch)", **READS})
+    color, _ = arm_encoding(list(lat.arm.unique()))
+    base = alt.Chart().encode(x=alt.X("step:O", title="update (deltas since the checkpoint)"))
+    bars = base.mark_bar().encode(y=alt.Y("mean:Q", title="ms"), color=color,
+                                  tooltip=["arm_label", "what", "step",
+                                           alt.Tooltip("mean:Q", format=".1f"),
+                                           alt.Tooltip("min:Q", format=".1f"),
+                                           alt.Tooltip("max:Q", format=".1f"), "size"])
+    spread = base.mark_rule(color="black", opacity=0.5).encode(y="min:Q", y2="max:Q")
+    arms = list(d.sort_values("ord").arm_label.unique())
+    return (alt.layer(bars, spread, data=d).properties(width=300, height=90)
+            .facet(row=alt.Row("arm_label:N", title=None, sort=arms),
+                   column=alt.Column("what:N", title=None,
+                                     sort=[{"batch": "write (batch)", **READS}[p] for p in phases]))
+            .resolve_scale(x="independent", y="independent"))
+
+
+def update_requests(groups, reader="cached"):
+    """What each update sent the store, per provider, arm, phase, step, file type and the SDK's
+    kind of request (sent_requests): the mean over the provider's runs. Reads under `reader`."""
+    return q(f"""
+        WITH x AS (
+            SELECT g.provider, x.run_id, x.arm, x.step, x.phase, x.file_type, x.kind, x.source,
+                   sum(x.requests) AS requests
+            FROM sent_requests x JOIN {_GROUPS} g USING (run_id)
+            WHERE x.phase = 'batch' OR x.reader = $reader
+            GROUP BY ALL
+        )
+        SELECT provider, arm, m.arm_label, m.ord, step, phase, file_type, kind, source,
+               sum(requests) / count(DISTINCT run_id) AS requests, count(DISTINCT run_id) AS runs
+        FROM x JOIN arm_meta m USING (arm)
+        GROUP BY ALL ORDER BY provider, m.ord, phase, step""",
+             reader=reader, **_groups(groups))
+
+
+def update_bytes(groups, reader="cached"):
+    """The model's bytes per update (file_requests), per provider, arm, phase, step, file type,
+    object class and direction, in MB: the mean over the provider's runs (they agree: bytes are
+    deterministic). Reads under `reader`."""
+    return q(f"""
+        WITH x AS (
+            SELECT g.provider, f.run_id, f.arm, f.step, f.phase, f.file_type, f.object_class,
+                   f.appended, sum(f.bytes_read) AS r, sum(f.bytes_written) AS w
+            FROM file_requests f JOIN {_GROUPS} g USING (run_id)
+            WHERE f.phase = 'batch' OR f.reader = $reader
+            GROUP BY ALL
+        )
+        SELECT provider, arm, m.arm_label, m.ord, step, phase, file_type, object_class, appended,
+               sum(r) / count(DISTINCT run_id) / 1e6 AS mb_read,
+               sum(w) / count(DISTINCT run_id) / 1e6 AS mb_written
+        FROM x JOIN arm_meta m USING (arm)
+        GROUP BY ALL ORDER BY provider, m.ord, phase, step""",
+             reader=reader, **_groups(groups))
+
+
+def stacked_per_update(d, value, title, stack="file_type", labels=FILE_TYPES):
+    """Stacked bars per update, one row per arm and one column per provider (in the frame's
+    order): `value` stacked by `stack`."""
+    providers = list(dict.fromkeys(d.provider)) if "provider" in d else [""]
+    d = d.assign(provider=d.provider if "provider" in d else "")
+    d = d.groupby(["provider", "arm_label", "ord", "step", stack], as_index=False)[value].sum()
+    d["stack"] = d[stack].map(labels).fillna(d[stack])
+    arms = list(d.sort_values("ord").arm_label.unique())
+    return (alt.Chart(d).mark_bar().encode(
+                x=alt.X("step:O", title="update (deltas since the checkpoint)"),
+                y=alt.Y(f"{value}:Q", title=title),
+                color=alt.Color("stack:N", title=None, sort=[labels[k] for k in labels]),
+                tooltip=["provider", "arm_label", "step", "stack",
+                         alt.Tooltip(f"{value}:Q", format=".2f")])
+            .properties(width=300, height=80)
+            .facet(row=alt.Row("arm_label:N", title=None, sort=arms),
+                   column=alt.Column("provider:N", title=None, sort=providers))
+            .resolve_scale(y="independent"))
+
+
+def storage(groups):
+    """What each arm stores after each update, per provider's first run (storage is
+    deterministic): by part (stored_by_part), and the state's live, dead and reclaimable bytes
+    (stored_state), in MB."""
+    first = {p: runs[:1] for p, runs in groups.items()}
+    parts = q(f"""
+        SELECT g.provider, s.arm, m.arm_label, m.ord, s.step, s.part, s.bytes / 1e6 AS mb,
+               s.stored_check
+        FROM stored_by_part s JOIN {_GROUPS} g USING (run_id) JOIN arm_meta m USING (arm)
+        ORDER BY g.provider, m.ord, s.step""", **_groups(first))
+    state = q(f"""
+        SELECT g.provider, s.arm, m.arm_label, m.ord, s.step, s.live_bytes / 1e6 AS live,
+               s.dead_bytes / 1e6 AS dead, s.reclaimable_bytes / 1e6 AS reclaimable,
+               s.stored_bytes / 1e6 AS stored
+        FROM stored_state s JOIN {_GROUPS} g USING (run_id) JOIN arm_meta m USING (arm)
+        ORDER BY g.provider, m.ord, s.step""", **_groups(first))
+    return parts, state
+
+
+def spike_ops(spikes):
+    """Per spike ({provider: spike run}), op and size or parts: median, p10 and p90 in ms."""
+    d = q(f"""
+        SELECT g.provider, o.* EXCLUDE (run_id), o.bytes / 1048576.0 AS mib
+        FROM spike_ops o JOIN {_GROUPS} g USING (run_id)
+        ORDER BY o.op, o.bytes, o.parts""",
+          **_groups({p: [r] for p, r in spikes.items()}))
+    order = {p: i for i, p in enumerate(spikes)}
+    return d.sort_values("provider", key=lambda c: c.map(order), kind="stable")
+
+
+def spike_size_chart(ops, kinds):
+    """Latency against size, log-log: the median per op and size, with a p10-p90 whisker; one
+    panel per provider."""
+    d = ops[ops.op.isin(kinds) & (ops.bytes > 0)]
+    base = alt.Chart().encode(
+        x=alt.X("mib:Q", title="size, MiB", scale=alt.Scale(type="log", base=2)),
+        color=alt.Color("op:N", title=None, sort=list(kinds)))
+    line = base.mark_line(point=True).encode(
+        y=alt.Y("median_ms:Q", title="ms", scale=alt.Scale(type="log")),
+        tooltip=["provider", "op", alt.Tooltip("mib:Q", format=".3g"), "n",
+                 alt.Tooltip("median_ms:Q", format=".2f"), alt.Tooltip("p10_ms:Q", format=".2f"),
+                 alt.Tooltip("p90_ms:Q", format=".2f")])
+    spread = base.mark_rule(opacity=0.5).encode(y="p10_ms:Q", y2="p90_ms:Q")
+    return (alt.layer(spread, line, data=d).properties(width=300, height=220)
+            .facet(column=alt.Column("provider:N", title=None,
+                                     sort=list(dict.fromkeys(d.provider))))
+            .resolve_scale(y="independent"))
+
+
+def spike_parts_chart(ops):
+    """A GET of an appended object against its parts (1 to 1000): whole, its last 64 KiB and
+    64 KiB from its middle; the median with a p10-p90 whisker, one panel per provider."""
+    d = ops[ops.op.isin(["get_full", "get_tail", "get_mid"])]
+    base = alt.Chart().encode(
+        x=alt.X("parts:Q", title="parts of the object", scale=alt.Scale(type="log")),
+        color=alt.Color("op:N", title=None))
+    line = base.mark_line(point=True).encode(
+        y=alt.Y("median_ms:Q", title="ms", scale=alt.Scale(type="log")),
+        tooltip=["provider", "op", "parts", "n", alt.Tooltip("median_ms:Q", format=".2f")])
+    spread = base.mark_rule(opacity=0.5).encode(y="p10_ms:Q", y2="p90_ms:Q")
+    return (alt.layer(spread, line, data=d).properties(width=300, height=200)
+            .facet(column=alt.Column("provider:N", title=None,
+                                     sort=list(dict.fromkeys(d.provider))))
+            .resolve_scale(y="independent"))
+
+
+def model_check(groups, profiles):
+    """Per provider ({provider: profile}, a measured_profiles or store_profiles name), each
+    one-thread outermost phase of its runs: measured wall time against the model's (CPU +
+    requests + transfer), in ms."""
+    frames = []
+    for provider, runs in groups.items():
+        for run in runs:
+            d = q("SELECT * FROM model_check($run, $profile)", run=run, profile=profiles[provider])
+            d["provider"] = provider
+            frames.append(d)
+    d = pd.concat(frames, ignore_index=True)
+    d["model_ms"] = d.cpu_ms + d.request_ms + d.transfer_ms
+    d["what"] = d.phase.map({"batch": "write (batch)", **READS})
+    return d.merge(q("SELECT arm, arm_label, ord FROM arm_meta"), on="arm")

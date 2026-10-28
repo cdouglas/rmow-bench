@@ -12,6 +12,7 @@ project:
     - file: pages/layout-vs-policy.md
     - file: pages/time-travel.md
     - file: pages/compaction.md
+    - file: pages/cloud.md
     - file: pages/store-latency.md
     - file: pages/scale.md
     - file: pages/cpu-measure.md

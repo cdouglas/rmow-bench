@@ -150,6 +150,8 @@ docker stop rmow-azurite
 
 ## What the analysis will do
 
+- **The charts.** [lab/pages/cloud.md](../lab/pages/cloud.md) draws them from stand-ins until
+  the runs return; its pinned runs are then swapped for the cloud runs and the spike.
 - **Twin match.** `steps_diff` between the cloud run and the local twin finds no difference in
   the model's requests or bytes. Each phase's `sdk_*` counts equal its Azurite twin's, retries
   and the creates' HEADs and renames aside (above).

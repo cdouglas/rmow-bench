@@ -117,6 +117,8 @@ instruction) varies from run to run.
 
 ## What the analysis will do
 
+- **The charts.** [lab/pages/cloud.md](../lab/pages/cloud.md) draws them from stand-ins until
+  the runs return; its pinned runs are then swapped for the cloud runs and the spike.
 - **Twin match.** `steps_diff` between the cloud run and its local twin should find no difference
   in requests or bytes. `CreateSession` is counted apart (`sdk_sessions`); it costs, but the model
   does not hold it.
