@@ -32,12 +32,14 @@ service. It answers four questions:
 ## Steps, on the instance
 
 ```sh
-# the fork (its atomicio branch, at the commit the run is registered against), unless its build
-# was copied over
+# the fork (its atomicio branch, at af875ccfd1, the twins' build), unless its build was copied
+# over
 git clone -b atomicio git@github.com:cdouglas/iceberg.git
-(cd iceberg && git checkout <fork commit> && ./gradlew publishToMavenLocal -x test -x integrationTest)
+(cd iceberg && git checkout af875ccfd1 && ./gradlew publishToMavenLocal -x test -x integrationTest)
+# the calibration run's build: 9a69028, where C1-C4 were registered, whose code is the twins'
+# (f0ae9ae's); not main, whose code has changed since
 git clone git@github.com:cdouglas/rmow-bench.git && cd rmow-bench
-git checkout <the commit the run is registered against>
+git checkout 9a69028
 mvn -q package -DskipTests
 # the spike's build: main, whose spike reaches 128 MiB (since 2026-10-27); the calibration run
 # keeps the registered build
