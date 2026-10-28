@@ -275,6 +275,25 @@ approach 1.
   all 862 records, every phase on Azurite sent what the model counts (RMoR-C with footers'
   creates aside), and the other arms match the earlier twins in every shared record. Across the
   runs the S3 Express ratios moved by up to 0.12, through the CPU's pace per run.
+
+  **Running it** is the user's: [deploy/](../deploy/README.md), each cloud step by step the first
+  time (`infra-up`, `up`, `ship`, `wait`, `run test`, `wait`, then `run spike calibrate`), then
+  `fetch`, `down` and `teardown`. **When the results are in `results/`:**
+  1. `lab ingest`.
+  2. In [lab/pages/cloud.md](../lab/pages/cloud.md), swap the pinned stand-ins for the cloud
+     runs: `LATENCY` and `SENT` to the three calibration runs per provider, `SPIKES` to the
+     cloud spikes, `PROFILES` to those spikes' run ids (`measured_profiles`), and set
+     `STANDIN = False`. Build with `lab build --strict` and look at the charts.
+  3. C1: `steps_diff` of every cloud run against its local twin
+     (`s3x-calibration-local-8433ccfd4620/20261027T175847Z`) finds no difference in requests or
+     bytes, and each Azure phase's `sdk_*` counts equal the Azurite twin's
+     (`azure-calibration-azurite-a96fd56de2f0/20261027T175614Z`), but for the creates
+     (AZURE_RUNBOOK.md, The twins).
+  4. C2: the page's model check, priced with the measured profiles.
+  5. C3 and C4, against the predictions in the runbooks and HYPOTHESES.md; report a contradicted
+     hypothesis as contradicted.
+  6. Ask the user before retiring the stand-ins (campaign `standins`), recorded first under
+     EXPERIMENTS.md's Retired runs.
 - [x] **`phase_work`'s CPU was 11% high on the laptop** (found 2026-10-27; divided by the ratio,
   decided and done 2026-10-27). The thread CPU clock runs 11.1% fast against the wall clock there
   (WSL2; `host.thread_cpu_per_wall` in manifests from 2026-10-26), and `phase_work` turned
