@@ -1,0 +1,10 @@
+# per-operator configuration, Terraform's state and providers (<cloud>/<layer>/), the VMs' host
+# keys and their logs
+deploy.env
+*/*/.terraform/
+*/*/.terraform.lock.hcl
+*/*/*.tfstate
+*/*/*.tfstate.*
+*/*/*.tfplan
+.known_hosts.*
+logs/

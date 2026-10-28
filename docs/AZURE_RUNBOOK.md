@@ -47,6 +47,9 @@ iceberg`) on builds before 2026-10-26. It needs such a build now, and is optiona
 
 ## What it needs
 
+[deploy/](../deploy/README.md) provisions all of it with Terraform (`CLOUD=azure`) and runs the
+steps below on the VM; what follows is what it does, by hand.
+
 - **A storage account:** StorageV2, Standard performance, hot tier, with **hierarchical
   namespace** enabled (ADLS Gen2), and a container in it. Any region.
 - **A VM in the account's region,** so the run measures the store, not the network. Something
@@ -66,9 +69,12 @@ iceberg`) on builds before 2026-10-26. It needs such a build now, and is optiona
 
 ```sh
 # the fork (its atomicio branch, at af875ccfd1, the twins' build), unless its build was copied
-# over
-git clone -b atomicio git@github.com:cdouglas/iceberg.git
-(cd iceberg && git checkout af875ccfd1 && ./gradlew publishToMavenLocal -x test -x integrationTest)
+# over. Its version comes from the release tag, which the fork on GitHub does not carry: without
+# the tag it would not build 1.12.0-atomicio-SNAPSHOT
+git clone -b atomicio https://github.com/cdouglas/iceberg.git
+(cd iceberg && git checkout -B atomicio af875ccfd1 \
+  && git fetch --no-tags https://github.com/apache/iceberg.git tag apache-iceberg-1.12.0 \
+  && ./gradlew publishToMavenLocal -x test -x integrationTest)
 # the calibration run's build: 9a69028, where C1-C4 were registered, whose code is the twins'
 # (f0ae9ae's); not main, whose code has changed since
 git clone git@github.com:cdouglas/rmow-bench.git && cd rmow-bench

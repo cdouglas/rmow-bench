@@ -140,6 +140,15 @@ reads.
   chunked upload, not yet counted; the model counts one PUT. No run so far writes one after its
   initial load, but compaction at 128 MiB row groups (512 MiB files) would. Count what the SDK
   sends for such a file on Azurite, then model it as the splits are.
+- [x] **The cloud runs deploy from here** (done 2026-10-28; [deploy/](../deploy/README.md), after
+  shield-rs's). Terraform makes the store, the VM's credentials and the VM on each cloud: a
+  directory bucket and an EC2 instance in its zone, or an ADLS Gen2 account and a VM with a
+  managed identity. `deploy.sh` ships rmow-bench and runs the runbooks' steps on the VM (builds,
+  contract suites, spike, calibration), detached, and fetches the results. The fork's suites get
+  the role's temporary keys, or a SAS signed here for 8 hours. The runbooks' fork build was wrong:
+  the fork on GitHub has no release tag, without which the build does not version itself
+  1.12.0-atomicio-SNAPSHOT. They now fetch the tag from Apache, as the deployment does. Checked
+  offline and with a read-only plan of the AWS infra layer; nothing has been applied.
 
 ## Arms
 
