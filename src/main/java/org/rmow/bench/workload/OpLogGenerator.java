@@ -73,10 +73,22 @@ public final class OpLogGenerator {
       if (spec.keyDist == WorkloadSpec.KeyDist.REGIONS) {
         weigh();
       }
-      long[] updates =
-          spec.updateShare > 0
-              ? statements(spec.updates(), touched)
-              : choose(spec.updates(), touched);
+      long[] updates;
+      long[] deletes;
+      if (spec.updateShare > 0) {
+        // statements change the batch's rows, and its deletes are drawn from all they took
+        long[] changed = statements(spec.updates() + spec.deletes(), touched);
+        deletes = new long[spec.deletes()];
+        for (int i = 0; i < deletes.length; i++) {
+          int j = i + rnd.nextInt(changed.length - i);
+          deletes[i] = changed[j];
+          changed[j] = changed[i];
+        }
+        updates = Arrays.copyOfRange(changed, deletes.length, changed.length);
+      } else {
+        updates = choose(spec.updates(), touched);
+        deletes = choose(spec.deletes(), touched);
+      }
       Arrays.sort(updates);
       int[] versions = new int[updates.length];
       for (int i = 0; i < updates.length; i++) {
@@ -84,7 +96,6 @@ public final class OpLogGenerator {
         version[id] += 1;
         versions[i] = version[id];
       }
-      long[] deletes = choose(spec.deletes(), touched);
       for (long id : deletes) {
         deleted.set((int) id);
         live[region(id)] -= 1;
@@ -178,7 +189,7 @@ public final class OpLogGenerator {
   }
 
   /**
-   * Chooses {@code n} ids to update as statements ({@link WorkloadSpec#updateShare}): each takes
+   * Chooses {@code n} ids to change as statements ({@link WorkloadSpec#updateShare}): each takes
    * the region of an id the key distribution picks, and that id and others of the region, until it
    * holds the share of the region's live rows or the region has no usable row left.
    */

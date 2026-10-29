@@ -130,33 +130,37 @@ class OpLogGeneratorTest {
     assertThat(steep).isGreaterThan(zipf);
   }
 
-  /** The regions a batch's updates fall in, and the rows of the busiest. */
-  private static long[] spread(OpLog.Batch b, long regionRows) {
+  /** The regions the ids fall in, and the ids in the busiest. */
+  private static long[] spread(long regionRows, long[]... ids) {
     Map<Long, Integer> n = new HashMap<>();
-    for (long id : b.updateIds()) {
-      n.merge(id / regionRows, 1, Integer::sum);
+    for (long[] some : ids) {
+      for (long id : some) {
+        n.merge(id / regionRows, 1, Integer::sum);
+      }
     }
     return new long[] {n.size(), n.values().stream().mapToInt(Integer::intValue).max().orElse(0)};
   }
 
   @Test
-  void aStatementUpdatesAShareOfOneRegion() {
+  void aStatementChangesAShareOfOneRegion() {
     WorkloadSpec w = spec(100_000, 10, 2_000, WorkloadSpec.KeyDist.REGIONS);
     w.regionRows = 1_000;
     for (OpLog.Batch b : OpLogGenerator.generate(w).batches()) {
-      assertThat(spread(b, 1_000)[0]).as("one row a statement").isGreaterThan(30);
+      assertThat(spread(1_000, b.updateIds())[0]).as("one row an update").isGreaterThan(30);
+      assertThat(spread(1_000, b.deleteIds())[0]).as("one row a delete").isGreaterThan(30);
     }
     // a statement takes a tenth of a region's live rows (80 to 100 here, as deletes thin them),
-    // and a batch's 500 updates take at most seven
+    // and a batch's 500 updates and 100 deletes take at most eight, deletes included
     w.updateShare = 0.1;
     for (OpLog.Batch b : OpLogGenerator.generate(w).batches()) {
-      assertThat(spread(b, 1_000)[0]).isBetween(1L, 7L);
-      assertThat(spread(b, 1_000)[1]).isGreaterThanOrEqualTo(80);
+      long[] changes = spread(1_000, b.updateIds(), b.deleteIds());
+      assertThat(changes[0]).isBetween(1L, 8L);
+      assertThat(changes[1]).isGreaterThanOrEqualTo(80);
     }
-    // a statement would take the whole region; the batch's 500 cap it
+    // a statement would take the whole region; the batch's 600 changes cap it
     w.updateShare = 1;
     for (OpLog.Batch b : OpLogGenerator.generate(w).batches()) {
-      assertThat(spread(b, 1_000)).containsExactly(1, 500);
+      assertThat(spread(1_000, b.updateIds(), b.deleteIds())).containsExactly(1, 600);
     }
   }
 
@@ -167,8 +171,9 @@ class OpLogGeneratorTest {
     w.updateShare = 0.2;
     // statements of 190 to 200 rows in full regions, fewer in the newest, which is filling
     for (OpLog.Batch b : OpLogGenerator.generate(w).batches()) {
-      assertThat(spread(b, 1_000)[0]).isBetween(1L, 6L);
-      assertThat(spread(b, 1_000)[1]).isGreaterThanOrEqualTo(150);
+      long[] changes = spread(1_000, b.updateIds(), b.deleteIds());
+      assertThat(changes[0]).isBetween(1L, 6L);
+      assertThat(changes[1]).isGreaterThanOrEqualTo(150);
     }
   }
 }

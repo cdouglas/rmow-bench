@@ -256,6 +256,13 @@ hashes of the calibration's log and of the 1M-row recency and uniform logs.
   a region rewrite pays, and RMoW more than RMoR; at one row per region it does not; a crossover
   lies between. RMoR-C's θ (`rmorRewriteShare`, a share of a region's live rows per batch) is the
   knob to sweep against p.
+  - [x] **Deletes join the statements** (decided and built 2026-10-29). Single-row deletes
+    scattered over the table touched about 100 of 135 regions a batch at a skew of 1, whatever p
+    was, so a batch's rewrites did not follow p. Now a statement changes p of a region's live rows,
+    and the batch's deletes are drawn uniformly from the rows its statements changed, the rest
+    updated, as a MERGE does. The rows updated and deleted per batch are unchanged, and p counts
+    up to updates plus deletes over `regionRows`. Logs at an update share of 0 are unchanged (the
+    pinned hashes hold); no run had used the update share.
 - [ ] **Arrival window:** sweep insert lateness (`lateMedianBatches`, `lateP99Batches`). It
   exists but has never been swept.
 
@@ -268,11 +275,32 @@ or 1 and 73 at 2, and p can reach 24%. To decide before the sweeps: more rows, s
 groups, or fewer updates a batch, so that a batch touches a minority of regions and p can
 approach 1.
 
+**The base point (decided 2026-10-29):** 1M rows, 60 batches of 10,000 operations (70/25/5),
+1 MiB row groups with regions of 10,521 rows (135 by the end), a region skew of 1, and statements
+at p = 0.03, with the calibration's layout. Every setting the sweeps run keeps a batch to a
+minority of the regions: where most regions change, the region arms are copy-on-write, which is
+known and not worth measuring (the user's call). Measured on the generator alone (seed 1, batches
+30–59):
+- **Update share,** at a skew of 1: p of 0.01, 0.03, 0.1 and 0.285 touch 22, 9.1, 3.4 and 2.0
+  regions a batch. 0.285 is the ceiling (3,000 changes over 10,521 rows); reaching 1 needs about
+  10,500 changes a batch. If the sweep finds no crossover by then, more runs follow.
+- **Skew,** at p = 0.03: every skew from 0 to 2 touches 8–10 regions a batch. The skew decides
+  how many distinct regions the changes come back to: 120 over 30 batches at 0, 84 at 1 and 38
+  at 2 (the ingest window: 4.1 a batch, 27 in all).
+- **Single-row updates** touch 70–100% of the regions under any region skew at this size; only
+  the ingest window keeps them a minority (11 of 135). The single-row ingest window, the earlier
+  base point's log byte for byte, stays as the reference to the settled findings.
+- **The row-group sweep** keeps regions of 10,521 rows, so its log is the same at every size.
+
+Neither more rows nor fewer updates was the answer: p's ceiling is changes per batch over rows
+per region, which more rows leave alone and fewer updates lower.
+
 ## Experiments
 
-- [ ] **Local sweeps, one axis at a time,** from a base point (4 MiB row groups, 1M rows, 60
-  batches, the ingest window): skew, update share, arrival window and row-group size, for the five
-  arms. The simulation finds each crossover cheaply, since requests and bytes are exact locally.
+- [ ] **Local sweeps, one axis at a time,** from the base point (decided 2026-10-29, above: 1 MiB
+  row groups, 1M rows, 60 batches, a region skew of 1, statements at p = 0.03): skew, update
+  share, arrival window and row-group size, for the five arms. The simulation finds each crossover
+  cheaply, since requests and bytes are exact locally.
 - [ ] **Hot-region isolation** (a micro-benchmark question, not a Parquet benchmark). Can RMoW
   isolate frequently updated regions as row groups of their own, and so cut its amplification?
   - RMoW sets row-group boundaries on every rewrite, so it can cut a hot range out as its own row

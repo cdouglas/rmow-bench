@@ -9,8 +9,8 @@ package org.rmow.bench.workload;
  *
  * <p>Regions: ids fall into regions of {@code regionRows} consecutive ids, about a row group's
  * rows (ids grow with insertion, and writes keep rows in roughly that order). The key distribution
- * {@link KeyDist#REGIONS} picks rows by region, and an update share above 0 makes each update a
- * statement over one region.
+ * {@link KeyDist#REGIONS} picks rows by region, and an update share above 0 makes the updates and
+ * deletes statements, each over one region.
  */
 public final class WorkloadSpec {
 
@@ -56,12 +56,14 @@ public final class WorkloadSpec {
   /** {@link KeyDist#REGIONS}: the Zipf exponent of the regions' heat; 0 is uniform. */
   public double regionSkew = 1.0;
   /**
-   * The share p of a region's live rows each update statement updates (at least one row); 0 makes
-   * each update a row of its own. A statement's region is that of a row the key distribution picks
-   * (by {@link KeyDist#REGIONS}, a region by its weight), and it updates rows of the region not yet
-   * touched in the batch, picked uniformly. The rows updated per batch stay {@link #updates()}: the
-   * batch's last statement takes what is left, so p counts only up to {@code updates() /
-   * regionRows}. Deletes stay one row each.
+   * The share p of a region's live rows each statement changes (at least one row); 0 makes each
+   * update and delete a row of its own. A statement's region is that of a row the key distribution
+   * picks (by {@link KeyDist#REGIONS}, a region by its weight), and it changes rows of the region
+   * not yet touched in the batch, picked uniformly. The batch's deletes are drawn uniformly from
+   * the rows its statements changed, and the others are updated, as a MERGE updates some of the
+   * rows it matches and deletes others. The rows changed per batch stay {@link #updates()} plus
+   * {@link #deletes()}: the batch's last statement takes what is left, so p counts only up to
+   * those over {@code regionRows}.
    */
   public double updateShare = 0;
 
