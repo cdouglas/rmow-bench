@@ -52,6 +52,10 @@ select = ["azure-calibration-azurite-a96fd56de2f0/*", "s3x-calibration-local-843
 
 [campaigns.standins]
 select = ["standin-*", "spike/*-20261028T16*"]
+
+[campaigns.cloud]
+title = "The calibration on S3 Express (us-west-2, c7a.2xlarge) and Azure Blob (westus, D8as_v6), 3 runs each on the registered build 9a69028, and the spikes from main (2026-10-28)"
+select = ["s3x-calibration-f57c86f8e3e7/*", "azure-calibration-cb4830f16cf3/*", "spike/s3x-spike-20261028T221407Z", "spike/azure-spike-20261028T233151Z"]
 [[annotate]]
 select = "smoke-*"
 mark = "excluded"

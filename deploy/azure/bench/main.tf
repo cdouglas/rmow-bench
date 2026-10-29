@@ -16,11 +16,11 @@ provider "azurerm" {
   features {}
 }
 
-# AMD, as the laptop the twins ran on is (Zen 4 there, Zen 3 here): the twins' predictions price CPU
+# AMD Zen 4, as the laptop the twins ran on is and the AWS c7a: the twins' predictions price CPU
 # at the laptop's pace. 8 vCPUs and 32 GiB.
 variable "vm_size" {
   type    = string
-  default = "Standard_D8as_v5"
+  default = "Standard_D8as_v6"
 }
 
 variable "admin_username" {

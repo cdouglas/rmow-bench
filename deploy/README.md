@@ -107,7 +107,7 @@ skipped every test fails: a suite without credentials skips rather than fails.
 **The VM.** Ubuntu 24.04 and its OpenJDK 17 package, which the twins ran on (17.0.20.1 when this
 was written). The defaults are AMD, as the twins' laptop is (Zen 4):
 - `c7a.2xlarge` on AWS: Zen 4, 8 vCPUs, 16 GiB; offered in usw2-az3;
-- `Standard_D8as_v5` on Azure: Zen 3, 8 vCPUs, 32 GiB.
+- `Standard_D8as_v6` on Azure: Zen 4, 8 vCPUs, 32 GiB (the subscription has no quota for `D8as_v5`, Zen 3, in westus).
 
 The twins' predictions price CPU at the laptop's pace, so a VM of another family moves the
 predicted times, but not the requests and bytes C1 checks. Any size works for C2, which uses the
@@ -115,7 +115,7 @@ run's own CPU.
 
 ## Cost
 
-The instance-hours dominate: about $0.41/h for `c7a.2xlarge` and $0.34/h for `D8as_v5`, on demand
+The instance-hours dominate: about $0.41/h for `c7a.2xlarge` and $0.43/h for `D8as_v6` (westus), on demand
 in us-east-1 and eastus (us-west-2 charges the same for `c7a.2xlarge`). A campaign takes about an hour: the builds, the suites, the spike
 (tens of minutes at 20 reps) and the calibration. The stores charge little: the runbooks' Cost
 paragraphs. The bucket and the account cost nothing while empty, and every step deletes what it

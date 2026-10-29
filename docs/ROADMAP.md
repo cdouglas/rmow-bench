@@ -63,20 +63,38 @@ reads.
 - [ ] **ADLS creates stay one request above the store's own appender:** 3 requests against 2.
   An Append Blob is created empty, so only the staged rename makes a create all or nothing.
   This is decided: SAO keeps the atomic create.
-- [ ] **Run the fork's contract suites on the real services** (`S3ExpressFileIOAtomicTest`,
-  `AdlsFileIOAtomicTest`, `GcsFileIOAtomicRapidTest`), first on each cloud VM. No emulator runs
-  the fork's paths: versitygw ignores write offsets, and Azurite has no rename.
-  The runbooks now list them as step 1. They need keys in the environment, not the VM's
-  identity: AWS keys for S3 Express, a SAS token for ADLS.
+- [x] **Run the fork's contract suites on the real services** (done 2026-10-28, at af875ccfd1, the
+  twins' build). No emulator runs the fork's paths: versitygw ignores write offsets, and Azurite
+  has no rename. All pass:
+  - `S3ExpressFileIOAtomicTest` on the cloud VM in usw2-az3: 14 passed, and the opt-in
+    segment-limit case skipped;
+  - `AdlsFileIOAtomicTest` on the cloud VM in westus: 19 passed, 1 skipped;
+  - `GcsFileIOAtomicTest` (a standard bucket) and `GcsFileIOAtomicRapidTest` (a Rapid zonal
+    one), from here on catalog-bench's buckets in us-west4: 10 and 12 passed, each with the
+    APPEND cases and the segment limit skipped, since the fork has no APPEND on GCS.
+- [ ] **APPEND on GCS** (found 2026-10-28). The fork's GCSFileIO has no APPEND on any bucket, so
+  RMoW cannot run on GCS. Rapid (zonal) buckets have appendable objects, the counterpart of S3
+  Express's appends; implementing APPEND on them would come first, then a GCS store and recorder
+  here, a spike, a twin, a deploy layer (catalog-bench's `gcp/` has one) and hypotheses.
 - [ ] **An APPEND at length 0 is an APPEND at any length** (found 2026-10-26, for
   fileio-catalog). The fork's snapshots, like Iceberg's, take a known length of 0 for an unknown
   one (`length > 0 ? length : null` in `S3InputFile`, `ADLSInputFile` and `GCSInputFile`). So an
   APPEND from `newInputFile(location, 0)` looks the object up and extends it at whatever length it
   has, where the contract says it lands only at the snapshot's length. On Azurite an append "at 0"
   to a 12-byte blob landed at 12. RMoW never appends at 0. The bench's stand-in for Azurite's
-  creates relies on it, which is safe there. The local stores keep the length.
+  creates relies on it, which is safe there. The local stores keep the length. `S3ExpressTest`
+  probed it on its first run on S3 Express (2026-10-28) and now probes 1, 9 and 11, as the Azure
+  contract does.
 
 ## Harness (rmow-bench)
+
+- [ ] **`AzureRecorder` counts the managed identity's token requests** (found 2026-10-28). Its
+  policies join every Azure SDK pipeline in the JVM, Azure Identity's too, so on a VM the token
+  request to the instance metadata service (a GET with `resource=` in its query) counts as a
+  LIST, with its 2.5 KB response as GET bytes. `AzureTest`'s first Iceberg write on Azure counted
+  HEAD, PUT and that LIST, and failed. No calibration phase held one (every phase's `sdk_*` counts
+  equal the Azurite twin's but for the creates). The fix: count only requests to the store's
+  hosts.
 
 - [x] **Unify on SAO** (decided and done 2026-10-26). One appender,
   `AtomicAppender`, over the fork's `SupportsAtomicOperations`, for every store:
@@ -299,6 +317,17 @@ approach 1.
      hypothesis as contradicted.
   6. Ask the user before retiring the stand-ins (campaign `standins`), recorded first under
      EXPERIMENTS.md's Retired runs.
+
+  **The calibration ran** on 2026-10-28 (campaign `cloud`): three runs on each store on the
+  registered build, and the spikes from main, on S3 Express in usw2-az3 (`c7a.2xlarge`) and on
+  Azure in westus (`D8as_v6`, Zen 4, since the subscription has no D8as_v5 quota there). Steps 1
+  and 3 are done: C1 holds on both, with no difference in requests or bytes in any of the 862
+  records, and each Azure phase's `sdk_*` counts equal the Azurite twin's but for RMoR-C with
+  footers' creates (a rename for a HEAD). A first look, to be decided in the page: C2 misses
+  with the measured profiles, though the `s3x` profile fits S3 Express (so check how a spike
+  becomes a profile first); on S3 Express the region arms' batches are faster than MoR-v3's,
+  against C3; on Azure every ratio but RMoR-C with footers' batch lands on its side. Both infra
+  layers stay up, free while empty; the VMs are down.
 - [x] **`phase_work`'s CPU was 11% high on the laptop** (found 2026-10-27; divided by the ratio,
   decided and done 2026-10-27). The thread CPU clock runs 11.1% fast against the wall clock there
   (WSL2; `host.thread_cpu_per_wall` in manifests from 2026-10-26), and `phase_work` turned
