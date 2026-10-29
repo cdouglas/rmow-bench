@@ -19,6 +19,8 @@
 #   CORES_PER_JOB=N      physical cores per job (default: the campaign's cores_per_job)
 #   THREADS_PER_CORE=N   threads a job runs on per core (default 1: SMT siblings stay idle)
 #   JAVA_EXTRA="..."     extra JVM options for every run
+#   FORK_M2=<tar>        build: the atomicio fork's artifacts (docker/fork-m2.sh; default
+#                        ~/rmow-fork-m2.tar)
 #
 # A container fixes the toolchain, not the machine: CPU counts toward every simulated latency, so
 # run on idle cores (`cores`), and read each job's foreign load (`status`) before using its numbers.
@@ -31,7 +33,7 @@ VERB="${1:-}"
 CAMPAIGN="${2:-}"
 CONTAINER="rmow-bench-${CAMPAIGN}"
 
-usage() { sed -n '2,25p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 need_campaign() {
   [ -n "$CAMPAIGN" ] || usage
@@ -98,21 +100,31 @@ run_args() {
 
 case "$VERB" in
   build)
+    fork="$(realpath -m "${FORK_M2:-$HOME/rmow-fork-m2.tar}")"
+    [ -f "$fork" ] || {
+      echo "no $fork: the fork's artifacts (docker/fork-m2.sh where the fork is built; FORK_M2=<tar>)" >&2
+      exit 2; }
     dirty=false
     if [ -n "$(git -C "$REPO" status --porcelain)" ]; then
       dirty=true
     fi
+    ctx="$(mktemp -d)"
+    trap 'rm -rf "$ctx"' EXIT
     if [ "${DIRTY_OK:-}" = 1 ]; then
       echo "building from the working tree (dirty=$dirty): its runs say so" >&2
-      context=(-f "$HERE/Dockerfile" "$REPO")
-      DOCKER_BUILDKIT=1 docker build --build-arg GIT_SHA="$GIT_SHA" --build-arg GIT_DIRTY="$dirty" \
-        -t "$IMAGE" -t "$IMAGE:${GIT_SHA:0:12}" "${context[@]}"
+      # the tree as git sees it: tracked files still present, and untracked ones not ignored
+      git -C "$REPO" ls-files -z -co --exclude-standard |
+        while IFS= read -r -d '' f; do [ -e "$REPO/$f" ] && printf '%s\0' "$f"; done |
+        tar -C "$REPO" --null -T - -cf - | tar -x -C "$ctx"
     else
       [ "$dirty" = true ] && echo "note: the tree is dirty; building HEAD ($GIT_SHA) only" >&2
-      git -C "$REPO" archive --format=tar HEAD |
-        DOCKER_BUILDKIT=1 docker build --build-arg GIT_SHA="$GIT_SHA" --build-arg GIT_DIRTY=false \
-          -t "$IMAGE" -t "$IMAGE:${GIT_SHA:0:12}" -f docker/Dockerfile -
+      dirty=false
+      git -C "$REPO" archive --format=tar HEAD | tar -x -C "$ctx"
     fi
+    mkdir "$ctx/fork-m2"
+    tar -xf "$fork" -C "$ctx/fork-m2"
+    DOCKER_BUILDKIT=1 docker build --build-arg GIT_SHA="$GIT_SHA" --build-arg GIT_DIRTY="$dirty" \
+      -t "$IMAGE" -t "$IMAGE:${GIT_SHA:0:12}" -f "$ctx/docker/Dockerfile" "$ctx"
     ;;
   cores)
     shift || true

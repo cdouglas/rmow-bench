@@ -3,9 +3,10 @@
 # rmow-bench's campaign image (docker/run.sh; docker/README.md).
 #
 # **The image contains the built jar.** Build it on the machine that runs the campaign, from a
-# commit: `docker/run.sh build` sends `git archive HEAD` as the context, so the image is that
-# commit and nothing else. A run then starts at once and never shares the machine with a
-# compiler. Results and the local store are bind-mounted; nothing else is.
+# commit: `docker/run.sh build` sends `git archive HEAD` as the context, with the atomicio fork's
+# artifacts under fork-m2/ (docker/fork-m2.sh), so the image is that commit on that fork build and
+# nothing else. A run then starts at once and never shares the machine with a compiler. Results
+# and the local store are bind-mounted; nothing else is.
 
 # ---------------------------------------------------------------------------------------------
 # builder: the jar and its dependencies (target/rmow-bench-*.jar, target/lib/)
@@ -13,8 +14,15 @@
 FROM maven:3.9-eclipse-temurin-17 AS builder
 WORKDIR /src
 COPY pom.xml ./
+# The fork is in no remote repository: its artifacts replace whatever Iceberg the cache holds,
+# stale "absent" records included, before anything resolves.
+COPY fork-m2/ /fork-m2/
 # Dependencies first, so a source change does not download them again.
-RUN --mount=type=cache,target=/root/.m2 mvn -q -B dependency:go-offline
+RUN --mount=type=cache,target=/root/.m2 \
+    rm -rf /root/.m2/repository/org/apache/iceberg \
+    && mkdir -p /root/.m2/repository \
+    && cp -r /fork-m2/. /root/.m2/repository/ \
+    && mvn -q -B dependency:go-offline
 COPY src/ ./src/
 RUN --mount=type=cache,target=/root/.m2 mvn -q -B package -DskipTests
 

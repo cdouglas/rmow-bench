@@ -11,6 +11,7 @@ built there. The approach is the shield harness's (`~/work/shield/shield-rs/dock
 | file | |
 |---|---|
 | `Dockerfile` | builds the jar with Maven, then a JRE image with the jar, `bin/`, `configs/` and the campaigns |
+| `fork-m2.sh` | packs the atomicio fork's artifacts from this machine's Maven repository, for a build where the fork is not installed |
 | `run.sh` | `build`, `cores`, `start`, `status`, `logs`, `stop`, `run`, `shell` |
 | `campaign.py` | the runner inside the container: placement, launch, the foreign-load watch, resume; `status` on the host |
 | `cores.py` | shield's report of topology and idle cores, with a proposed `CPUSET` |
@@ -18,11 +19,15 @@ built there. The approach is the shield harness's (`~/work/shield/shield-rs/dock
 
 ## Running a campaign
 
-The repository has no remote, so the code travels as a bundle of `main`:
+The repository has no remote, so the code travels as a bundle of `main`. The atomicio fork
+(`1.12.0-atomicio-SNAPSHOT`) is in no remote Maven repository either, so its artifacts travel as
+a tar from the laptop's `~/.m2` (`fork-m2.sh`), and `build` installs them in the image's. Every
+run's manifest names the fork's commit (`versions.iceberg`); repack after rebuilding the fork.
 
 ```sh
 # here
-git bundle create /tmp/rmow-bench.bundle main && scp /tmp/rmow-bench.bundle havoc:
+git bundle create /tmp/rmow-bench.bundle main && docker/fork-m2.sh /tmp/rmow-fork-m2.tar
+scp /tmp/rmow-bench.bundle /tmp/rmow-fork-m2.tar havoc:
 # on havoc, the first time
 git clone ~/rmow-bench.bundle rmow-bench
 # on havoc, later
@@ -33,7 +38,8 @@ Then, on havoc:
 
 ```sh
 cd rmow-bench
-docker/run.sh build                          # the image of HEAD (git archive: clean by construction)
+docker/run.sh build                          # the image of HEAD (git archive: clean by construction),
+                                             # on the fork in ~/rmow-fork-m2.tar (FORK_M2)
 docker/run.sh cores                          # what is idle; proposes a CPUSET of whole cores
 df -h .                                      # the scale campaign stores tens of GiB under STORE
 CPUSET=36-71,108-143 STORE=/data/$USER/rmow-store docker/run.sh start pipeline   # minutes
@@ -55,6 +61,7 @@ the rest start over. To rerun finished jobs, give the rerun a campaign of its ow
 | `RESULTS`, `STORE` | host directories for runs (`<repo>/results`) and the local store's objects (`<repo>/store`) |
 | `JAVA_EXTRA` | more JVM options for every run |
 | `DIRTY_OK=1` | `build` only: build the working tree instead of `HEAD`; the runs' manifests say dirty |
+| `FORK_M2` | `build` only: the fork's artifacts (`fork-m2.sh`; default `~/rmow-fork-m2.tar`) |
 
 ## What a run records
 
