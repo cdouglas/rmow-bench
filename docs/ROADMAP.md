@@ -317,7 +317,7 @@ approach 1.
   5. C3 and C4, against the predictions in the runbooks and HYPOTHESES.md; report a contradicted
      hypothesis as contradicted.
   6. Ask the user before retiring the stand-ins (campaign `standins`), recorded first under
-     EXPERIMENTS.md's Retired runs.
+     EXPERIMENTS.md's Retired runs. Done 2026-10-28: deleted, with their build snapshots.
 
   **The calibration ran** on 2026-10-28 (campaign `cloud`): three runs on each store on the
   registered build, and the spikes from main, on S3 Express in usw2-az3 (`c7a.2xlarge`) and on
@@ -329,7 +329,7 @@ approach 1.
   rather than the model (the spikes' profiles, latency at 64 KiB plus a slope, misprice the
   calibration's small GETs); C3 is contradicted for S3 Express's batches, where the region arms
   beat MoR-v3, and for RMoR-C with footers' batch on Azure; C4 holds on S3 Express and is
-  contradicted on Azure. Step 6 waits on the user. Both infra layers stay up, free while empty;
+  contradicted on Azure. Step 6 is done. Both infra layers stay up, free while empty;
   the VMs are down.
 - [ ] **A profile priced by request size** (from the cloud runs, 2026-10-28). `measured_profiles`
   takes a request's latency at the spike's smallest size and a slope over 64 KiB–128 MiB, which

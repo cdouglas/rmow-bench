@@ -31,8 +31,7 @@ What anyone (or Claude) reading these results must know. Keep it short and curre
   probe under the one-footer reader. Runs before reader models have only `stock` (or `cached`).
 - `footer_bytes` and `row_groups_out_of_order` are -1 where unknown (non-RMoW arms).
 - The cloud calibration (lab/pages/cloud.md, views/60_cloud.sql): latency is measured wall time
-  only on the cloud runs and the stand-ins with injected latency (campaign `standins`); elsewhere
-  it is not reported. `sent_requests` is what each phase sent the store by file: the SDK's counts
+  only on the cloud runs (campaign `cloud`); elsewhere it is not reported. `sent_requests` is what each phase sent the store by file: the SDK's counts
   where a run has them (DVs take the model's; the rest went to Parquet), else the model's.
   `file_requests` and `stored_by_part` add up exactly to the steps' requests, bytes and stored
   bytes. Spikes (`spike/<label>-<UTC>`, fact `spike_requests`) on an emulator check the code, not

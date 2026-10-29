@@ -16,8 +16,8 @@ theme()
 fig = figures_module()
 
 # The runs, pinned by id, per provider (campaign cloud): the calibration on each store, three runs
-# on the registered build, and each store's spike. The stand-ins this page was built on are campaign
-# standins.
+# on the registered build, and each store's spike. The stand-ins this page was built on are
+# deleted (docs/EXPERIMENTS.md, Retired runs).
 LATENCY = {
     "S3 Express": ["s3x-calibration-f57c86f8e3e7/20261028T221905Z",
                    "s3x-calibration-f57c86f8e3e7/20261028T222037Z",
