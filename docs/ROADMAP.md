@@ -88,13 +88,14 @@ reads.
 
 ## Harness (rmow-bench)
 
-- [ ] **`AzureRecorder` counts the managed identity's token requests** (found 2026-10-28). Its
-  policies join every Azure SDK pipeline in the JVM, Azure Identity's too, so on a VM the token
-  request to the instance metadata service (a GET with `resource=` in its query) counts as a
-  LIST, with its 2.5 KB response as GET bytes. `AzureTest`'s first Iceberg write on Azure counted
-  HEAD, PUT and that LIST, and failed. No calibration phase held one (every phase's `sdk_*` counts
-  equal the Azurite twin's but for the creates). The fix: count only requests to the store's
-  hosts.
+- [x] **`AzureRecorder` counted the managed identity's token requests** (found and fixed
+  2026-10-28). Its policies join every Azure SDK pipeline in the JVM, Azure Identity's too, so on a
+  VM the token request to the instance metadata service (a GET with `resource=` in its query)
+  counted as a LIST, with its 2.5 KB response as GET bytes. `AzureTest`'s first Iceberg write on
+  Azure counted HEAD, PUT and that LIST, and failed. No calibration phase held one (every phase's
+  `sdk_*` counts equal the Azurite twin's but for the creates). The recorder now counts only
+  requests to the store's hosts: the root's account's Data Lake and Blob endpoints, or an
+  emulator's (`AzureRecorderTest`; the Azurite contract still passes).
 
 - [x] **Unify on SAO** (decided and done 2026-10-26). One appender,
   `AtomicAppender`, over the fork's `SupportsAtomicOperations`, for every store:

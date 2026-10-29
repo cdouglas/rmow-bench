@@ -129,8 +129,8 @@ abstract class AzureStoreContract {
     void run() throws IOException;
   }
 
-  private static Sent sent(IoBody body) throws IOException {
-    try (AzureRecorder r = AzureRecorder.install()) {
+  private Sent sent(IoBody body) throws IOException {
+    try (AzureRecorder r = AzureRecorder.install(root, endpoint)) {
       body.run();
       Map<Kind, Long> m = new LinkedHashMap<>();
       for (Kind k : Kind.values()) {

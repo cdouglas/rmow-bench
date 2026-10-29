@@ -142,7 +142,7 @@ final class Store implements AutoCloseable {
     boolean emulator = !spec.endpoint.isEmpty();
     String key = System.getProperty("azure.storage.key", System.getenv("AZURE_STORAGE_KEY"));
     var props = AdlsClients.properties(spec.root, spec.endpoint, emulator ? key : null);
-    AzureRecorder recorder = AzureRecorder.install();
+    AzureRecorder recorder = AzureRecorder.install(spec.root, spec.endpoint);
     ADLSFileIO adls = new ADLSFileIO();
     adls.initialize(props);
     RunDeleter deleter;

@@ -11,10 +11,12 @@ import com.azure.core.http.policy.AfterRetryPolicyProvider;
 import com.azure.core.http.policy.BeforeRetryPolicyProvider;
 import com.azure.core.http.policy.HttpPipelinePolicy;
 import com.azure.core.util.BinaryData;
+import java.net.URI;
 import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.LongAdder;
 import reactor.core.publisher.Mono;
 
@@ -23,8 +25,12 @@ import reactor.core.publisher.Mono;
  * this records through the SDK's own hook: azure-core adds the policies of every {@link
  * BeforeRetryPolicyProvider} and {@link AfterRetryPolicyProvider} on the classpath ({@code
  * META-INF/services}) to every pipeline a storage builder makes. {@link Requests} sees each request
- * once, {@link Attempts} each transmission. The policies record into the {@linkplain #install()
- * installed} recorder, if any; one store at a time per JVM.
+ * once, {@link Attempts} each transmission. The policies record into the {@linkplain
+ * #install(String, String) installed} recorder, if any; one store at a time per JVM.
+ *
+ * <p>Only requests to the store's hosts count. Azure Identity's pipelines get the policies too, and
+ * on a VM its token request to the instance metadata service (a GET with {@code resource=} in its
+ * query) would count as a LIST, its token as GET bytes.
  *
  * <p>Requests are classified by what reaches the Blob service: Iceberg's output streams upload a
  * block blob (one {@code PutBlob} up to 256 MiB, else blocks and a block list), its reads are
@@ -49,22 +55,41 @@ public final class AzureRecorder implements SdkRecorder, AutoCloseable {
 
   private static volatile AzureRecorder active;
 
+  private final Set<String> hosts; // the store's
   private final Map<Kind, LongAdder> requests = new EnumMap<>(Kind.class);
   private final LongAdder attempts = new LongAdder();
   private final LongAdder getBytes = new LongAdder();
   private final LongAdder putBytes = new LongAdder();
 
-  private AzureRecorder() {
+  private AzureRecorder(Set<String> hosts) {
+    this.hosts = hosts;
     for (Kind k : Kind.values()) {
       requests.put(k, new LongAdder());
     }
   }
 
-  /** A new recorder, which the providers' policies record into until it is closed. */
-  public static AzureRecorder install() {
-    AzureRecorder r = new AzureRecorder();
+  /**
+   * A new recorder of the requests to the store under {@code root}, which the providers' policies
+   * record into until it is closed. {@code endpoint} is an emulator's, as {@link
+   * AdlsClients#properties} takes it, or empty for Azure, where the store's hosts are the root's
+   * account's Data Lake and Blob endpoints.
+   */
+  public static AzureRecorder install(String root, String endpoint) {
+    Set<String> hosts;
+    if (endpoint != null && !endpoint.isEmpty()) {
+      hosts = Set.of(URI.create(endpoint).getHost());
+    } else {
+      String host = AdlsClients.Location.of(root).host();
+      hosts = Set.of(host, host.replace(".dfs.", ".blob."));
+    }
+    AzureRecorder r = new AzureRecorder(hosts);
     active = r;
     return r;
+  }
+
+  /** Whether {@code request} goes to the store. */
+  boolean counts(HttpRequest request) {
+    return hosts.contains(request.getUrl().getHost());
   }
 
   @Override
@@ -200,7 +225,7 @@ public final class AzureRecorder implements SdkRecorder, AutoCloseable {
 
         private void count(HttpRequest request) {
           AzureRecorder r = active;
-          if (r != null) {
+          if (r != null && r.counts(request)) {
             r.requests.get(kind(request)).increment();
           }
         }
@@ -216,7 +241,7 @@ public final class AzureRecorder implements SdkRecorder, AutoCloseable {
         @Override
         public Mono<HttpResponse> process(HttpPipelineCallContext ctx, HttpPipelineNextPolicy next) {
           AzureRecorder r = active;
-          if (r == null) {
+          if (r == null || !r.counts(ctx.getHttpRequest())) {
             return next.process();
           }
           return next.process().doOnNext(response -> r.attempted(ctx.getHttpRequest(), response));
@@ -227,7 +252,7 @@ public final class AzureRecorder implements SdkRecorder, AutoCloseable {
             HttpPipelineCallContext ctx, HttpPipelineNextSyncPolicy next) {
           AzureRecorder r = active;
           HttpResponse response = next.processSync();
-          if (r != null) {
+          if (r != null && r.counts(ctx.getHttpRequest())) {
             r.attempted(ctx.getHttpRequest(), response);
           }
           return response;
