@@ -125,13 +125,80 @@ stayed at least 16% from 1 in all three; TailCoW-C's S3 Express full read ranged
   (RMoR-C's, RMoR-C's with footers and RMoW-C's: 66–74% simulated), and less than a third of every
   phase's on Azure (at most 24%).
 
-## Next: the local sweeps (to register before they run)
+## The sweeps (registered 2026-10-29)
 
-From a base point, one axis at a time, for the five arms. The base point is not yet chosen: at 1M
-rows and 4 MiB row groups the table has 15 regions, and a batch's single-row updates touch 12–13
-of them at any skew, so neither the skew nor the update share has room (ROADMAP.md).
-- **The update share (the user's prediction):** where a statement updates a high share p of a
-  region's rows, a region rewrite pays, and RMoW more than RMoR; at one row per region it does
-  not; a crossover lies between. RMoR-C's θ is swept against p.
-- **The skew:** as the skew over regions falls toward uniform, the region arms' writes rise
-  toward copy-on-write, and a crossover with MoR-v3 lies between the ingest window and uniform.
+**What they decide:** where the region arms' extra write cost is repaid, against MoR-v3, along
+the update share, the skew and the row-group size, while a batch changes a minority of the
+table's regions. Where most regions change, the region arms are copy-on-write, which is known and
+not measured (ROADMAP.md, The base point).
+
+**Setup:** `configs/sweep-*.json`, the campaign `docker/campaigns/sweep.json` on havoc, one run
+each from one build snapshot. The five arms (both RMoR-C arms at θ = 0, with the writer that
+skips dead row groups), the calibration's five readers, no compaction, payload checks off,
+requests logged; probes every 5 batches (a full read, the newest 1% of event time, and the table
+10 batches back). The base point (`sweep-base`):
+- row groups and tail seal of 16 MiB, the size Durner et al. find cost-optimal for a fetch from
+  object storage ([PVLDB 16, 2023](https://vldb.org/pvldb/vol16/p2769-durner.pdf)), and files of
+  128 MiB (eight row groups, the calibration's ratio);
+- regions of a row group's rows: 513,700, measured on this schema (15.2 MiB on disk; 32 MiB row
+  groups hold 1,053,700 rows, 64 MiB ones 2,133,600);
+- 50 regions in the initial load (25,685,000 rows), 71 by the end, and 30 batches of 500,000
+  operations (70% inserts, 25% updates, 5% deletes);
+- a region skew of 1, and statements changing p = 0.03 of a region's live rows (about 15,400),
+  the batch's deletes among them.
+
+**The settings,** and where the generator puts their changes (seed 1, batches 16–30):
+
+| Runs | Vary from the base | Regions a batch changes | Distinct regions changed in batches 16–30 |
+|---|---|---|---|
+| `sweep-base` | nothing | 8.4 of 71 | 42 |
+| `sweep-p10`, `sweep-p30` | p = 0.1, 0.3 | 3.6, 1.4 | 34, 15 |
+| `sweep-s0`, `sweep-s2` | a skew of 0, 2 | 9.7, 5.8 | 57, 16 |
+| `sweep-ingest` | the ingest window | 4.4 | 15 |
+| `sweep-ingest-rows` | the ingest window, a row a change (the calibration's workload) | 16.8 | 26 |
+| `sweep-rg32m`, `sweep-rg64m` | row groups of 32, 64 MiB; the same log | 10.3 of 35, 7.5 of 17 row groups | |
+| `sweep-late99-1`, `sweep-late99-20` | insert lateness with a p99 of 1, 20 batches; the same rows change | 8.4 | 42 |
+
+**Prices:** requests and bytes are exact. Simulated time uses the named `s3x` and `azure`
+profiles, as the calibration's predictions did. Havoc has no instruction counters, so CPU is
+thread time there: a time ratio within 10% of what a prediction needs decides nothing.
+
+**Predicted** (means over batches 1–30, and over the full reads after the initial load, under
+`cached`; RMoR-C's also under `cached-skip`):
+- **U1: a region rewrite pays more as p rises** (the user's prediction). From p = 0.03 to 0.1 to
+  0.3, each region arm's (RMoW-C, RMoR-C, RMoR-C with footers) bytes written per batch fall, as
+  the regions a batch changes fall from 8.4 to 1.4, and its batch time over MoR-v3's is lower at
+  0.3 than at 0.03 on both profiles.
+- **U2: RMoW more than RMoR** (the user's prediction). At every p, RMoW-C's batch takes fewer
+  requests and less time than RMoR-C's and RMoR-C's with footers, on both profiles, and its batch
+  time over RMoR-C's is no higher at 0.3 than at 0.03.
+- **U3: no region arm writes fewer bytes than MoR-v3, at any p.** A rewrite carries a whole
+  region (513,700 rows), where MoR-v3 writes only the changed rows, so a crossover, where there is
+  one, is in requests and time.
+- **K1: skew moves the region arms' writes, not MoR-v3's, nor the full reads.** At p = 0.03, each
+  region arm's bytes written per batch at a skew of 2 are at most 0.8 of those at 0 (statements
+  pile onto hot regions: 5.8 regions a batch against 9.7), while MoR-v3's differ by under 10%.
+  MoR-v3's and RMoW-C's full reads at the last probe (requests and bytes) differ by under 10%
+  across skews 0, 1 and 2. A model of MoR-v3's files on the generator's log puts a DV on 35 of its
+  36 files by the last batch at every skew, with the same dead rows; RMoW-C reads only live row
+  groups. The expectation that the region arms' read advantage grows as the skew falls needs a
+  table of many more files than a run's changes reach, and is not tested here.
+- **G1: bigger row groups cost the region arms' writes.** On the same log, each region arm's
+  bytes written per batch grow from 16 to 32 to 64 MiB row groups (a rewrite carries a whole row
+  group: about 128, 321 and 474 MiB a batch, from the generator and the measured row-group
+  sizes), and its batch time over MoR-v3's rises on both profiles, while MoR-v3's bytes written
+  differ by under 10%.
+
+**Measured, not judged:**
+- where each region arm's batch time crosses MoR-v3's along p on each profile, or that none lies
+  between 0.03 and 0.3, and where RMoR-C's crosses TailCoW-C's: the θ the hybrid stage starts
+  from (ROADMAP.md, Experiments);
+- the arrival window: only event time moves, so it measures the recent-window read;
+- the ingest window's two runs, which tie the sweeps to the calibration's workload at this size;
+- RMoR-C's full reads across skews, and every arm's reads along p and the row-group size;
+- space: each arm's dead bytes at the last batch, uncompacted.
+
+**Limits:** one seed and one run each. The cloud calibration found the `s3x` profile pessimistic
+about the region arms' batches (C3 was contradicted on S3 Express, where they beat MoR-v3), so a
+crossover on `s3x` likely lies at a higher p than on S3 Express itself. The schema is narrow (11
+columns); other schemas are extrapolated by bytes.

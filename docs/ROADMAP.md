@@ -263,8 +263,13 @@ hashes of the calibration's log and of the 1M-row recency and uniform logs.
     updated, as a MERGE does. The rows updated and deleted per batch are unchanged, and p counts
     up to updates plus deletes over `regionRows`. Logs at an update share of 0 are unchanged (the
     pinned hashes hold); no run had used the update share.
+  - [ ] **θ against p, after the sweeps** (decided 2026-10-29). RMoR-C's θ is a hybrid, choosing
+    per region between DVs and a rewrite, and the story compares the alternatives before
+    introducing one. The sweeps run θ = 0 (always rewrite), and TailCoW-C is the other end
+    (never), so where RMoR-C's batch crosses TailCoW-C's along p, on each store's profile, is where
+    θ belongs; the θ stage starts there.
 - [ ] **Arrival window:** sweep insert lateness (`lateMedianBatches`, `lateP99Batches`). It
-  exists but has never been swept.
+  exists but has never been swept; the sweeps take a p99 of 1 and 20 batches against the base's 5.
 
 **The base point leaves the skew and the update share no room** (found 2026-10-27, from the
 generator alone). At 1M rows, 60 batches of 10,000 operations and 4 MiB row groups, the table has
@@ -275,32 +280,40 @@ or 1 and 73 at 2, and p can reach 24%. To decide before the sweeps: more rows, s
 groups, or fewer updates a batch, so that a batch touches a minority of regions and p can
 approach 1.
 
-**The base point (decided 2026-10-29):** 1M rows, 60 batches of 10,000 operations (70/25/5),
-1 MiB row groups with regions of 10,521 rows (135 by the end), a region skew of 1, and statements
-at p = 0.03, with the calibration's layout. Every setting the sweeps run keeps a batch to a
-minority of the regions: where most regions change, the region arms are copy-on-write, which is
-known and not worth measuring (the user's call). Measured on the generator alone (seed 1, batches
-30–59):
-- **Update share,** at a skew of 1: p of 0.01, 0.03, 0.1 and 0.285 touch 22, 9.1, 3.4 and 2.0
-  regions a batch. 0.285 is the ceiling (3,000 changes over 10,521 rows); reaching 1 needs about
-  10,500 changes a batch. If the sweep finds no crossover by then, more runs follow.
-- **Skew,** at p = 0.03: every skew from 0 to 2 touches 8–10 regions a batch. The skew decides
-  how many distinct regions the changes come back to: 120 over 30 batches at 0, 84 at 1 and 38
-  at 2 (the ingest window: 4.1 a batch, 27 in all).
-- **Single-row updates** touch 70–100% of the regions under any region skew at this size; only
-  the ingest window keeps them a minority (11 of 135). The single-row ingest window, the earlier
-  base point's log byte for byte, stays as the reference to the settled findings.
-- **The row-group sweep** keeps regions of 10,521 rows, so its log is the same at every size.
+**The base point (decided 2026-10-29):** 16 MiB row groups, regions of a row group's rows
+(513,700, measured), 50 regions in the initial load (25,685,000 rows) and 71 by the end, 30
+batches of 500,000 operations (70/25/5), a region skew of 1, and statements at p = 0.03; files of
+128 MiB (eight row groups, the calibration's ratio), the calibration's readers, no compaction.
+- **16 MiB, not 1 MiB.** A first choice the same day took 1 MiB row groups, the only way to give
+  p room at 1M rows. The user rejected it: 1 MiB is far from any real Iceberg table (whose
+  default is 128 MiB), and 16 MiB is a defensible fine grain for RMo*, the fetch size Durner et
+  al. find cost-optimal on object storage
+  ([PVLDB 16, 2023](https://vldb.org/pvldb/vol16/p2769-durner.pdf)). The ratios that gave the
+  axes room at 1 MiB were kept, scaled to 16 MiB's rows; the generator's limits are in rows, the
+  experiment's size in row groups times their bytes. So the sweeps run on havoc.
+- **A batch changes a minority of the regions** at every setting: where most regions change, the
+  region arms are copy-on-write, which is known and not worth measuring (the user's call). By the
+  generator (seed 1, batches 16–30): p of 0.03, 0.1 and 0.3 change 8.4, 3.6 and 1.4 regions a
+  batch, of 71 (p = 0.01 would change 30, so it is out); skews of 0, 1 and 2 change 9.7, 8.4 and
+  5.8; the ingest window 4.4, and 16.8 with a row a change. p's ceiling is 0.29 (150,000 changes
+  over 513,700 rows); if the sweeps find no crossover below it, more runs follow.
+- **The row-group axis** (16, 32 and 64 MiB) keeps the same log, so a batch changes 13%, 32% and
+  47% of the row groups at the base's p; 128 MiB would change most of them.
+- **The schema stays narrow** (11 columns, the user's call): a width knob would be more to explain,
+  and other schemas extrapolate by bytes.
 
-Neither more rows nor fewer updates was the answer: p's ceiling is changes per batch over rows
-per region, which more rows leave alone and fewer updates lower.
+Neither more rows nor fewer updates was the answer to the room the old base point left: p's
+ceiling is changes per batch over rows per region, which more rows leave alone and fewer updates
+lower.
 
 ## Experiments
 
-- [ ] **Local sweeps, one axis at a time,** from the base point (decided 2026-10-29, above: 1 MiB
-  row groups, 1M rows, 60 batches, a region skew of 1, statements at p = 0.03): skew, update
-  share, arrival window and row-group size, for the five arms. The simulation finds each crossover
-  cheaply, since requests and bytes are exact locally.
+- [ ] **Sweeps, one axis at a time,** from the base point (decided 2026-10-29, above: 16 MiB row
+  groups, 50 regions growing to 71, 30 batches, a region skew of 1, statements at p = 0.03):
+  update share, skew, arrival window and row-group size, for the five arms, with the ingest
+  window as a reference. Requests and bytes are exact, so the simulation finds each crossover.
+  Eleven configurations (`configs/sweep-*.json`), too large for the laptop: the campaign
+  `docker/campaigns/sweep.json` runs them on havoc, as the user's runs.
 - [ ] **Hot-region isolation** (a micro-benchmark question, not a Parquet benchmark). Can RMoW
   isolate frequently updated regions as row groups of their own, and so cut its amplification?
   - RMoW sets row-group boundaries on every rewrite, so it can cut a hot range out as its own row
@@ -313,10 +326,10 @@ per region, which more rows leave alone and fewer updates lower.
 - [ ] **Register the hypotheses** before the runs that decide them. HYPOTHESES.md was refocused
   on 2026-10-27 on the write and read trade-off; the earlier ones are the file at commit 1145f89.
   - [x] the calibration's C1–C4 (registered 2026-10-27);
-  - [ ] the sweeps' predictions, once the base point is chosen.
+  - [x] the sweeps' U1–U3, K1 and G1 (registered 2026-10-29).
 - [ ] **Cloud campaign,** on the fork build with the five arms, on S3 Express and Azure:
   - the base point;
-  - settings on either side of each crossover the local sweeps find;
+  - settings on either side of each crossover the sweeps find;
   - each configuration's local twin rerun on the same build.
 
   The configurations planned so far are only the calibration (`s3x-calibration`,
@@ -379,6 +392,10 @@ per region, which more rows leave alone and fewer updates lower.
   (`twins-five`). The calibration's workload is the ingest window, unchanged: its op log is the
   same. On 2026-10-27 they dropped `rmow-c-split` again, with the arm, and took `rmor-c-footer`
   (above).
+
+- [ ] **Later: a tool that recommends a layout** (row-group size, policy, heuristics) for a
+  real table from these findings. Interesting once there are findings to inform it (the user,
+  2026-10-29).
 
 ## Still open from before
 
