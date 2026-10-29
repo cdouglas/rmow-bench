@@ -491,9 +491,11 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
   bytes and storage were decided there. Thread CPU time could not decide anything: one read's
   CPU varied by up to 9% between identical twins. CPU was then measured in instructions on this
   laptop ([lab/pages/cpu-measure.md](lab/pages/cpu-measure.md)), which decided P3–P5.
-- **Next:** the cloud runs, only to check the simulation. Both are prepared, not run:
-  - S3 Express (M3), near RMoW's break-even ([docs/S3X_RUNBOOK.md](docs/S3X_RUNBOOK.md));
-  - Azure (M4), far above it, through Iceberg's ADLS FileIO with its reads as shipped and exact
-    ([docs/AZURE_RUNBOOK.md](docs/AZURE_RUNBOOK.md)).
-
-  Split files can also run on standard S3.
+- **Done in the cloud (2026-10-28):** the calibration on S3 Express (M3) and Azure (M4), three
+  runs each from a VM beside the store, deployed by [deploy/](deploy/README.md)
+  ([lab/pages/cloud.md](lab/pages/cloud.md)). Each store received exactly the model's requests
+  and bytes (C1). The stores' latencies are not the profiles': Azure is several times faster than
+  its profile, and on S3 Express the region arms' batches beat MoR-v3's, against the twins'
+  prediction.
+- **Next:** a profile from the spikes priced by request size, to test the latency model on these
+  runs. Split files can also run on standard S3.

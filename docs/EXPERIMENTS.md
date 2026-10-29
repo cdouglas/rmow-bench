@@ -111,7 +111,8 @@ a new hash under the same label.
 | **store latency** (`configs/sim-*`, and the existing runs) | What would each arm take on a given store? Latency simulated from what each phase records: CPU, requests and bytes. | endive's store profiles (S3 Express, S3, Azure), and a sweep of request latency × throughput; a validation run with latency injected; a 4 MiB recency run with its requests logged | MoR-v3, TailCoW-C, RMoW-B and -C, both layouts | 3 (and the 4 MiB recency and uniform runs) | [lab/pages/store-latency.md](../lab/pages/store-latency.md) |
 | **s3x calibration, local twin** (`configs/s3x-calibration-local.json`) | The requests and bytes the first S3 Express run must reproduce exactly, and its runtime. | the S3 Express calibration's settings (200k rows, 20 batches, 1 MiB row groups) on the local store, with a JIT warmup and five readers (one-footer, cached on 1 and 8 threads, cached-skip, stock) and the writer that skips dead row groups; rerun 2026-10-27 with the five arms new campaigns run (campaign `twins`) | MoR-v3, TailCoW-C, RMoR-C, RMoR-C with footers and RMoW-C | 1 | None: a baseline. 1.2 minutes, 10,222 requests. |
 | **azure calibration, Azurite twin** (`configs/azure-calibration-azurite.json`) | The requests the first Azure run must send, through ADLSFileIO and the Azure SDK, and the predictions it is checked against (docs/AZURE_RUNBOOK.md). | the same settings on Azurite, 2026-10-27, with the five arms (campaign `twins`) | the same | 1 | The runbook's predictions. 2.2 minutes; every phase sent the model's 10,222 requests (RMoR-C with footers' creates aside, three requests each there), and its model requests and bytes equal the local twin's in all 862 records. |
-| **cloud stand-ins** (`configs/standin-*.json`, spikes on emulators) | Not an experiment: inputs for the cloud calibration's charts until the cloud runs return, so the analysis runs end to end beforehand. | the local twin with the `s3x` or `azure` profile injected (measured wall time is its CPU and the injected waits), and the spikes on versitygw and Azurite at 3 reps | the calibration's five | 3 + 3, and 2 spikes, 2026-10-28 (campaign `standins`) | [lab/pages/cloud.md](../lab/pages/cloud.md). Replaced by the cloud runs, then retired. The model check prices them with the injected profile: measured over modeled is about 1.01 at the median in every phase. |
+| **cloud stand-ins** (`configs/standin-*.json`, spikes on emulators) | Not an experiment: inputs for the cloud calibration's charts until the cloud runs return, so the analysis runs end to end beforehand. | the local twin with the `s3x` or `azure` profile injected (measured wall time is its CPU and the injected waits), and the spikes on versitygw and Azurite at 3 reps | the calibration's five | 3 + 3, and 2 spikes, 2026-10-28 (campaign `standins`) | [lab/pages/cloud.md](../lab/pages/cloud.md). Replaced by the cloud runs on 2026-10-28; to be retired. The model check prices them with the injected profile: measured over modeled is about 1.01 at the median in every phase. |
+| **cloud calibration** (`configs/s3x-calibration.json`, `configs/azure-calibration.json`) | C1–C4: does each store receive what the model counts, does the latency model hold with the stores' measured latencies, and does the trade-off fall where the twins put it? | the store: S3 Express in usw2-az3 from a `c7a.2xlarge`, Azure Blob (ADLS Gen2, Standard) in westus from a `D8as_v6`; the calibration's settings on the registered build 9a69028, requests logged; each store's spike from main | the calibration's five | 3 + 3, and 2 spikes, 2026-10-28 (campaign `cloud`) | [lab/pages/cloud.md](../lab/pages/cloud.md). C1 held on both; C2 contradicted (the spikes' profiles misprice small GETs); C3 contradicted for S3 Express's batches and RMoR-C with footers' batch on Azure; C4 held on S3 Express, contradicted on Azure. |
 | **scale** (`configs/scale-recency-*`, on havoc) | Do the 4 MiB recency setting's requests, bytes, CPU and simulated latency hold at Iceberg's defaults (P1–P6)? | row group R = tail seal = 4, 16, 64, 128 MiB, with rows, operations per batch and files scaled by R; recency, no compaction, payload checks off, requests logged | MoR-v3, TailCoW-C, RMoW-B and -C in both layouts | 4, 4 in the rerun, 4 on the laptop | [lab/pages/scale.md](../lab/pages/scale.md). CPU decided on the laptop, in instructions: on havoc, foreign load and then noise beyond it left it undecided. |
 | **cpu measure** (`configs/cal-cpu-recency-4m.json`) | How to measure CPU so that one phase can decide a 10% question (M1–M4)? | the measure: thread CPU time against each thread's user-mode instructions and cycles (`perf_event_open`); the 4 MiB scale setting, all six arms, `cached` and `cached-p8`, run twice | all six of the scale campaign | 2 | [lab/pages/cpu-measure.md](../lab/pages/cpu-measure.md) |
 | **dv ablation** (`configs/local-dv-*`) | H3's attribution: how much of RMoW against TailCoW is the layout, and how much the update handling (region rewrites against DVs)? | key distribution (recency, uniform); 4 MiB, no compaction | MoR-v3, CoW, TailCoW-B and -C, RMoW-A, -B and -C, RMoW-A-dv, -B-dv and -C-dv | 3, deleted | Conclusions in [DESIGN.md](DESIGN.md#deletion-vectors-on-an-appendable-file-an-ablation-removed); numbers under Retired runs. |
@@ -157,6 +158,7 @@ The compaction sweep's threshold levels:
 | cpu measure | cal-cpu-recency-4m (twice) | recency | 4 MiB | never | — | 6 |
 | scale, laptop | scale-recency-rg{4,16,64,128}m, from 9f868af | recency | 4–128 MiB | never | — | 6 |
 | cloud stand-ins | standin-s3x, standin-azure (three runs each) | recency | 1 MiB | never | — | 5 |
+| cloud calibration | s3x-calibration, azure-calibration (three runs each, on the stores) | recency | 1 MiB | never | — | 5 |
 
 "Thresholds" are only used when compaction runs, so "—" marks runs that never compact (their
 configurations carry the default values). The lab's Experiments page builds the same table from
@@ -357,6 +359,28 @@ What they showed:
 
 ## Findings so far
 
+**The cloud calibration (2026-10-28,** [lab/pages/cloud.md](../lab/pages/cloud.md)**).** Three runs
+of the calibration on S3 Express (usw2-az3) and on Azure Blob (westus), each from a Zen 4 VM beside
+the store, on the registered build:
+- **C1 held.** Every run equals its twin in requests and bytes in all 862 records, and the SDKs'
+  counts equal the model's (S3 Express) or the Azurite twin's (Azure), but for Azure's creates.
+- **The stores are not their profiles.** Azure's GETs take 9.5 ms (profile 38), the fork's appends
+  13.8 ms (88) and its reads 5.7 ms/MiB (25): Azure sits much nearer RMoW's break-even than
+  assumed. On S3 Express GETs take 6.2 ms (2.5) and the fork's appends 8.7 ms (13). The fork's
+  atomic create on Azure (a staged Append Blob and a rename) takes 112 ms.
+- **On S3 Express the region arms' batches beat MoR-v3's** (RMoW-C 0.72×, predicted 1.37×; RMoR-C
+  with footers 0.85×; RMoR-C 0.99×). They are 56–67% CPU, at the VM's pace, and their appends are
+  cheaper than assumed. Full reads land as predicted (RMoW-C 0.73×). On Azure every judged ratio
+  lands where predicted, nearer 1, but RMoR-C with footers' batch (1.12×, predicted 0.54×).
+- **C2 is contradicted by the profile, not the model.** CPU and waiting on the store account for
+  all but 0.6% of the one-thread phases' time, but the spikes' profiles (latency at 64 KiB plus a
+  slope) misprice the calibration's small GETs: by +31% to +45% on S3 Express, by −43% for Azure's
+  larger ones.
+- **H4's abort, measured.** Under the stock reader an old footer's open-ended GET declares the
+  rest of an appendable object (379 MB on S3 Express, 191 MB on Azure, against 7 MB read). S3
+  Express aborts it at no visible cost; on Azure RMoW-C's time-travel reads take 3.7 s against at
+  most 1.1 s for the other arms. The bounded readers avoid it.
+
 **CPU on the wall clock (2026-10-27).** The laptop's thread CPU clock runs 11.1% fast against its
 wall clock (WSL2 on Hyper-V; manifest `host.thread_cpu_per_wall`, 1.1116 on the boot every
 counted run used), and `phase_work` turned instructions into time through thread CPU time. The
@@ -530,15 +554,19 @@ Against the runs they replaced (controls K1–K3):
 ## The hypotheses
 
 H1–H6 are HYPOTHESES.md as of commit 1145f89; the refocused file (2026-10-27) carries
-what they settled, and the calibration's C1–C4, open until the cloud runs.
+what they settled, and the calibration's C1–C4, decided by the cloud runs of 2026-10-28.
 
 | | Claim, in short | Status |
 |---|---|---|
-| H1 | Recency-skewed updates: RMoW-C's full read stays flat, its writes within 3× MoR-v3's | **Open.** Decided on S3 Express, which has not run. |
+| H1 | Recency-skewed updates: RMoW-C's full read stays flat, its writes within 3× MoR-v3's | **Open.** Decided on S3 Express, where only the calibration has run (2026-10-28), which H1 was not registered against. |
 | H2 | Uniform updates: RMoW's writes approach copy-on-write | **Held** (local, m1; on the reruns, 0.996–0.997× CoW's bytes). |
 | H3 | RMoW-C against TailCoW is the single-object effect | **Mixed.** Smaller, and mostly in reads, in request counts; larger, and mostly write bytes, on S3 Express prices at up to one full read per batch. The dv ablation puts 70% to all of the extra bytes on the update handling, and most of the read savings on the single object (with a delete cache). |
-| H4 | Old versions read like current ones; dead bytes cost nothing | **Held** for reads, under every reader model (on the reruns, all 1,200 pairs), and for dead bytes. The extra abort on S3 is **open**: the trace cannot show it. |
+| H4 | Old versions read like current ones; dead bytes cost nothing | **Held** for reads, under every reader model (on the reruns, all 1,200 pairs), and for dead bytes. The extra abort: on S3 Express the declared GET bytes show it, at no visible cost; on Azure it costs RMoW-C's time travel under the stock reader 3.7 s against 1.1 s (the cloud runs, 2026-10-28). |
 | H5 | Split files: one more request per changed file, the same reads, kept bytes within 1.5× | **Mostly held.** One more PUT-class request per changed file, the same bytes and reads; kept 1.41× for RMoW-B, 1.52× for RMoW-C. **Contradicted** for requests in all: on the reruns split files take 0.45 fewer per batch, since their writer fetches a footer-only object in one GET where an appendable footer takes two. |
+| C1 | The model counts what each store receives | **Held** on S3 Express and Azure (the cloud runs, 2026-10-28). |
+| C2 | A phase's time is its CPU plus its requests' latencies, within 25%, priced with the measured latencies | **Contradicted** as registered: the spikes' profiles misprice small GETs. The structure holds (0.6% unexplained). |
+| C3 | The trade-off falls where the twins put it | **Contradicted** for S3 Express's batches (the region arms beat MoR-v3) and RMoR-C with footers' batch on Azure; held for every judged full read. |
+| C4 | CPU is the bottleneck only of the region arms' batches on S3 Express | **Held** on S3 Express (56–67%), **contradicted** on Azure (RMoW-C's batches 39%, more than a third). |
 | H6 | When to compact | **Mixed** (unchanged on the reruns). The read half held for RMoW-B, not RMoW-C; the space and write-for-read halves held; the costs half held for split RMoW, not for MoR-v3 (its cheapest on S3 Express is every 10 batches, 4%). |
 
 ## What is next
@@ -559,20 +587,9 @@ would need its own arms and reader checks.
   - The campaign pages (run, sweep, layouts) follow once the old runs are marked superseded.
   - The compaction sweep, until now only a static report, gets a lab page.
   - A summary page holds every number the post quotes.
-- **Prepared: S3 Express**, to anchor the simulated latencies (docs/S3X_RUNBOOK.md):
-  - its twin match;
-  - the spike's request latencies and cost per appended part;
-  - a check of the latency model on one run.
-
-  It needs a directory bucket, an instance in its zone, and credentials. Its hypotheses are C1–C4
-  (docs/HYPOTHESES.md, registered 2026-10-27).
-- **Prepared: Azure**, the other side of RMoW's break-even (docs/AZURE_RUNBOOK.md). Requests
-  dominate there, so the simulation predicts that RMoW wins outright. It runs through Iceberg's
-  ADLS FileIO, on the atomicio fork, whose reads ask for exactly their ranges (Iceberg's as
-  shipped open every stream with a GET of up to 4 MiB and over-read ranges at offsets; measuring
-  them needs a build before 2026-10-26). It needs a hierarchical-namespace account, a VM in its
-  region and a managed identity. Its Azurite twin gives the requests it must send, and its
-  hypotheses are C1–C4, with the S3 Express run's.
+- **Done: the cloud calibration** on S3 Express and Azure (2026-10-28,
+  [lab/pages/cloud.md](../lab/pages/cloud.md)). Next there: a profile from the spikes priced by
+  request size, to test the latency model; and retiring the stand-ins.
 - **Both calibrations run the five arms new campaigns run** (MoR-v3, TailCoW-C, RMoR-C, RMoR-C
   with footers, RMoW-C) since 2026-10-27, RMoR-C with the writer that skips dead row groups and a `cached-skip` reader beside
   the others, and their spikes time GETs by size for the read rate per MiB.
@@ -583,7 +600,6 @@ would need its own arms and reader checks.
     an admin allows counters (`sysctl -w kernel.perf_event_paranoid=2`; it is 4);
   - docker/README.md still says the repository has no remote; it has one (`self`, on GitHub), so
     havoc could pull instead of taking a bundle;
-  - H4's abort, measurable on S3 from aborted connections or the GET bytes the SDK declares;
   - split files on standard S3.
 - **Gaps in the old runs**, which the rerun closes:
   - no `cached` reader model in runs before 2026-10-23, so MoR-v3's and TailCoW's reads load a

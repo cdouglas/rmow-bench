@@ -324,11 +324,18 @@ approach 1.
   Azure in westus (`D8as_v6`, Zen 4, since the subscription has no D8as_v5 quota there). Steps 1
   and 3 are done: C1 holds on both, with no difference in requests or bytes in any of the 862
   records, and each Azure phase's `sdk_*` counts equal the Azurite twin's but for RMoR-C with
-  footers' creates (a rename for a HEAD). A first look, to be decided in the page: C2 misses
-  with the measured profiles, though the `s3x` profile fits S3 Express (so check how a spike
-  becomes a profile first); on S3 Express the region arms' batches are faster than MoR-v3's,
-  against C3; on Azure every ratio but RMoR-C with footers' batch lands on its side. Both infra
-  layers stay up, free while empty; the VMs are down.
+  footers' creates (a rename for a HEAD). Steps 2, 4 and 5 are done in
+  [lab/pages/cloud.md](../lab/pages/cloud.md): C2 is contradicted as registered, by the profile
+  rather than the model (the spikes' profiles, latency at 64 KiB plus a slope, misprice the
+  calibration's small GETs); C3 is contradicted for S3 Express's batches, where the region arms
+  beat MoR-v3, and for RMoR-C with footers' batch on Azure; C4 holds on S3 Express and is
+  contradicted on Azure. Step 6 waits on the user. Both infra layers stay up, free while empty;
+  the VMs are down.
+- [ ] **A profile priced by request size** (from the cloud runs, 2026-10-28). `measured_profiles`
+  takes a request's latency at the spike's smallest size and a slope over 64 KiB–128 MiB, which
+  overprices S3 Express's small GETs (latency is flat to 1 MiB) and underprices Azure's past
+  128 KiB (a step there). A profile that prices each request by its size from the spike's medians
+  would test the latency model on these runs. It was not registered: hypotheses first.
 - [x] **`phase_work`'s CPU was 11% high on the laptop** (found 2026-10-27; divided by the ratio,
   decided and done 2026-10-27). The thread CPU clock runs 11.1% fast against the wall clock there
   (WSL2; `host.thread_cpu_per_wall` in manifests from 2026-10-26), and `phase_work` turned
