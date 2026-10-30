@@ -413,11 +413,29 @@ lower.
   beat MoR-v3, and for RMoR-C with footers' batch on Azure; C4 holds on S3 Express and is
   contradicted on Azure. Step 6 is done. Both infra layers stay up, free while empty;
   the VMs are down.
-- [ ] **A profile priced by request size** (from the cloud runs, 2026-10-28). `measured_profiles`
+- [x] **A profile priced by request size** (from the cloud runs, 2026-10-28; built 2026-10-29,
+  [lab/views/65_sized.sql](../lab/views/65_sized.sql)). `measured_profiles`
   takes a request's latency at the spike's smallest size and a slope over 64 KiB–128 MiB, which
   overprices S3 Express's small GETs (latency is flat to 1 MiB) and underprices Azure's past
-  128 KiB (a step there). A profile that prices each request by its size from the spike's medians
-  would test the latency model on these runs. It was not registered: hypotheses first.
+  128 KiB (a step there). `sized_requests` prices each logged request at its own size instead:
+  the spike's lognormal mean per size, linear between sizes, flat below 64 KiB. Its rules came
+  from the calibration's runs:
+  - a smaller size is never priced above a larger one. Azure's 64 KiB `get_range` is each rep's
+    first read of a freshly written 128 MiB blob, and took 33–118 ms, where the calibration's
+    64 KiB GETs took 9 ms, first read of a file or not;
+  - the log records an appendable create as a PUT, so a Parquet PUT by an arm that appends is
+    priced as one: an append of its size plus the create's overhead (98 ms on Azure, 1 ms on S3
+    Express). RMoR-C with footers' data files took 141 ms on Azure, priced as PUTs at 38;
+  - appends past Azure's 100 MiB cap are several.
+
+  On the calibration's requests, ranged GETs come within 7% of their measured time in every size
+  band on S3 Express and within 0.70–1.23 on Azure; PUTs, appends and creates within 0.77–1.16,
+  but for Azure's 24 footer appends of under 64 KiB (0.40–0.59). Streamed GETs of 64 KiB or less,
+  which only the `stock` reader opens, are priced at half their time. Per one-thread phase, CPU
+  plus prices against wall time, within 25%: each arm's batches in 83–100% on S3 Express and
+  72–92% on Azure (the slope profile: 5–93% and 2–95%); reads apart from `stock` in 80% and 89%
+  (1% and 59%); `stock`'s reads in 67% and 61% (32% and 94%). These are the runs its rules came
+  from; its first test is the base point's cloud runs (Cloud campaign, above).
 - [x] **`phase_work`'s CPU was 11% high on the laptop** (found 2026-10-27; divided by the ratio,
   decided and done 2026-10-27). The thread CPU clock runs 11.1% fast against the wall clock there
   (WSL2; `host.thread_cpu_per_wall` in manifests from 2026-10-26), and `phase_work` turned
