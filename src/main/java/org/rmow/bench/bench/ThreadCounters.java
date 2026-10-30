@@ -22,6 +22,10 @@ public final class ThreadCounters {
     public Sample minus(Sample o) {
       return new Sample(instructions - o.instructions, cycles - o.cycles);
     }
+
+    public Sample plus(Sample o) {
+      return new Sample(instructions + o.instructions, cycles + o.cycles);
+    }
   }
 
   private interface LibC extends Library {

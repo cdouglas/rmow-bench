@@ -18,6 +18,7 @@ import org.apache.iceberg.data.Record;
 import org.apache.iceberg.io.InputFile;
 import org.apache.parquet.format.FileMetaData;
 import org.apache.parquet.format.RowGroup;
+import org.rmow.bench.io.Held;
 import org.rmow.bench.io.MemFileIO;
 import org.rmow.bench.rmow.FooterCodec;
 import org.rmow.bench.rmow.RmowFile;
@@ -66,10 +67,10 @@ public final class TailCowArm extends MorArm {
   /**
    * A region a batch rewrites: rows {@code [first, first + rows)} of data file {@code k}, the whole
    * file ({@code whole}, an open tail file) or one row group, of which the batch changes {@code
-   * changed}; and its live rows, read back.
+   * changed}; and its live rows, read back, as {id, version}.
    */
   private record Rewrite(
-      int k, boolean whole, long first, long rows, int changed, List<Record> live) {}
+      int k, boolean whole, long first, long rows, int changed, List<long[]> live) {}
 
   private final TailPolicy policy;
   private final double rewriteShare; // above 1: regions are never rewritten (TailCoW)
@@ -127,12 +128,20 @@ public final class TailCowArm extends MorArm {
   }
 
   @Override
-  protected int addFile(DataFile df, long seq, List<Long> ids) {
+  protected int addFile(DataFile df, long seq, long[] ids) {
     int k = super.addFile(df, seq, ids);
     if (elide) {
-      idsOf.put(k, ids.stream().mapToLong(Long::longValue).toArray());
+      idsOf.put(k, ids);
     }
     return k;
+  }
+
+  /** A file that leaves the table takes what this arm keeps of it along. */
+  @Override
+  protected void retire(int k) {
+    super.retire(k);
+    idsOf.remove(k);
+    dead.remove(k);
   }
 
   private boolean regional() {
@@ -169,7 +178,25 @@ public final class TailCowArm extends MorArm {
       fileOfId[(int) id] = -1;
     }
 
-    Map<Integer, List<Record>> mergedRows = new HashMap<>();
+    rowsHeld = Held.scope("the batch's files written");
+    try {
+      applyHeld(b, seq, plan, merge, replaced, dvPositions, versions);
+    } finally {
+      rowsHeld.close();
+      rowsHeld = null;
+    }
+  }
+
+  private void applyHeld(
+      OpLog.Batch b,
+      long seq,
+      TailPolicy.Plan plan,
+      Set<Integer> merge,
+      Set<Long> replaced,
+      Map<Integer, List<Integer>> dvPositions,
+      Map<Long, Integer> versions)
+      throws IOException {
+    Map<Integer, List<long[]>> mergedRows = new HashMap<>();
     List<Rewrite> rewrites = new ArrayList<>();
     boolean planRegions = regional() && !dvPositions.isEmpty();
     if (!merge.isEmpty() || planRegions) {
@@ -187,10 +214,9 @@ public final class TailCowArm extends MorArm {
     }
     Set<Long> rewritten = new HashSet<>(); // the changed rows whose regions are rewritten
     for (Rewrite r : rewrites) {
-      for (Record rec : r.live()) {
-        long id = (Long) rec.get(Rows.ID);
-        if (versions.containsKey(id)) {
-          rewritten.add(id);
+      for (long[] row : r.live()) {
+        if (versions.containsKey(row[0])) {
+          rewritten.add(row[0]);
         }
       }
     }
@@ -202,11 +228,11 @@ public final class TailCowArm extends MorArm {
               if (!rewritten.isEmpty()) {
                 rows.removeIf(r -> rewritten.contains(r[0])); // their regions hold them
               }
-              for (List<Record> rs : mergedRows.values()) {
-                for (Record r : rs) {
-                  long id = (Long) r.get(Rows.ID);
-                  if (!replaced.contains(id)) {
-                    rows.add(new long[] {id, (Integer) r.get(Rows.VERSION)});
+              rowsHeld.hold(Held.Kind.ROWS, rows.size(), "the batch's rows to sort");
+              for (List<long[]> rs : mergedRows.values()) {
+                for (long[] r : rs) {
+                  if (!replaced.contains(r[0])) {
+                    rows.add(r);
                   }
                 }
               }
@@ -225,6 +251,7 @@ public final class TailCowArm extends MorArm {
                 policy.commit(plan, k, bytes);
               }
               rewriteOpen(b, rewrites, versions, seq);
+              rowsHeld.close(); // the batch's files are written
             });
     if (elide) {
       Map<Integer, List<Rewrite>> sealed = sealedRewrites(rewrites, dvPositions);
@@ -381,7 +408,7 @@ public final class TailCowArm extends MorArm {
         if (touched == 0 || touched < rewriteShare * liveRows) {
           continue;
         }
-        List<Record> live =
+        List<long[]> live =
             g[2] < 0 ? readLive(k) : readLive(k, held(k), tailOf(k), g[2], g[3]);
         out.add(new Rewrite(k, false, first, rows, touched, live));
       }
@@ -439,14 +466,13 @@ public final class TailCowArm extends MorArm {
    * A region's live rows with the batch's changes, as {id, version}: new versions, deleted rows
    * dropped.
    */
-  private static List<long[]> changed(List<Record> live, Map<Long, Integer> versions) {
+  private static List<long[]> changed(List<long[]> live, Map<Long, Integer> versions) {
     List<long[]> out = new ArrayList<>(live.size());
-    for (Record r : live) {
-      long id = (Long) r.get(Rows.ID);
-      Integer v = versions.get(id);
-      int version = v == null ? (Integer) r.get(Rows.VERSION) : v;
+    for (long[] r : live) {
+      Integer v = versions.get(r[0]);
+      int version = v == null ? (int) r[1] : v;
       if (version >= 0) {
-        out.add(new long[] {id, version});
+        out.add(v == null ? r : new long[] {r[0], version});
       }
     }
     return out;

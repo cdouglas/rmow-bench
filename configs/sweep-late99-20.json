@@ -22,7 +22,8 @@
     "regionSkew": 1.0,
     "updateShare": 0.03,
     "lateMedianBatches": 0.05,
-    "lateP99Batches": 20
+    "lateP99Batches": 20,
+    "initialJitterRows": 0
   },
   "layout": {
     "codec": "zstd",
@@ -53,7 +54,8 @@
         "name": "cached",
         "footerCache": true,
         "deleteCache": true,
-        "footerPrefetchBytes": 65536
+        "footerPrefetchBytes": 65536,
+        "sortedRead": true
       },
       {
         "name": "cached-skip",

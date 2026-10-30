@@ -202,3 +202,50 @@ thread time there: a time ratio within 10% of what a prediction needs decides no
 about the region arms' batches (C3 was contradicted on S3 Express, where they beat MoR-v3), so a
 crossover on `s3x` likely lies at a higher p than on S3 Express itself. The schema is narrow (11
 columns); other schemas are extrapolated by bytes.
+
+## The sweeps: memory and the sorted read (registered 2026-10-29)
+
+**What they decide:** whether what an approach must hold in memory sets it apart, on the write
+side and on a read in event-time order (the user's question: MoR may need many row groups open at
+once where RMoW streams one). The section above stands; these are added to the same runs.
+
+**What changed in the runs since that section:** the harness's writers stream (requests, bytes,
+rows and table state unchanged in 1,939 records of three configurations; instructions within 3%),
+every phase records what its readers and writers held (README, What is held), and the cached
+reader also reads the table sorted at each probe (`read_sorted`). The sweep configurations set
+`initialJitterRows` to 0, so the initial load is in event-time order, which the sorted read needs;
+the rows that change are the same, so U1–U3, K1 and G1 stand as registered. The campaign logs
+every change of what is held (`--log-held`).
+
+**Measured:** peak rows held (`held_rows`) and peak encoded bytes held (`held_bytes`, and by kind:
+column chunks in flight, writer buffers, data waiting for its request, deletes) per phase, exact
+and the same on every run. A pilot (16 MiB row groups, 4 regions, 10 batches; not one of the
+sweep's runs) showed the shapes below; its table is too small to predict the sweep's sizes from.
+
+**Predicted** (the last probe and the mean batch, at the base point unless named):
+- **M1: a sorted read holds MoR-v3's batch files at once.** Every batch file's event times span
+  the table (updated rows from anywhere, and inserts), so the merge opens a row group of each and
+  holds it to the end: MoR-v3's `read_sorted` holds at least 300 MB at the last probe (30 batch
+  files of about 15 MiB), at least 15 times its own `read_full` (one row group). TailCoW-C seals
+  each batch file at once (each is about the tail seal), so it holds as much.
+- **M2: RMoW-C's sorted read holds less than MoR-v3's, but grows too.** Its rewritten regions keep
+  their event times in place, but each batch's tail row group takes a few very late inserts (the
+  lognormal's far tail), so its event times reach back across the table and the merge holds it
+  open: RMoW-C's `read_sorted` peak is below MoR-v3's at the last probe, and above twice its own
+  at the first probe after the initial load. (In the pilot: 0.73 of MoR-v3's at batch 10.)
+- **M3: RMoW-C's batch holds more bytes than MoR-v3's.** One append per file per batch keeps every
+  region it rewrites until the append, about 8 regions of 15.2 MiB, where MoR-v3's writer holds one
+  row group: RMoW-C's mean batch `held_bytes` is at least 4 times MoR-v3's.
+- **M4: RMoR-C sorts its whole batch file.** Its writer keeps every row of its batch file (the
+  regions it rewrites and the inserts, about 4.7M rows) to sort, where RMoW-C keeps one region at a
+  time: RMoR-C's mean batch `held_rows` is at least 5 times RMoW-C's.
+
+**Measured, not judged:** the sorted read of the other arms and settings (in the pilot, RMoR-C's
+held one row group, since at 4 regions it rewrote nearly the whole table each batch); how the
+arrival window moves RMoW-C's tail row groups' reach; RMoR-C with footers' data file held for its
+single create (175 MB in the pilot); deletes held by readers.
+
+**Limits:** the levels are what this harness's writers and readers hold, which model an engine's
+(a sort in memory without spilling, one append per file, a merge that opens a row group per run);
+another engine could stream differently, so the measure compares the designs as written, not
+every implementation of them. A JFR run is still to check that the heap follows the counted levels.

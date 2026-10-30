@@ -1,5 +1,6 @@
 package org.rmow.bench.bench;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import java.util.List;
 import org.rmow.bench.arms.LayoutSpec;
 import org.rmow.bench.workload.WorkloadSpec;
@@ -104,6 +105,15 @@ public final class BenchConfig {
      * their rows one by one.
      */
     public boolean skipDeadRowGroups = false;
+    /**
+     * Also read the table in event-time order at each probe ({@code read_sorted}): a merge of its
+     * row groups, each a sorted run, opened as the merge reaches them, so the read holds every
+     * row group whose event times overlap at once (needs {@code footerCache}, sorted writes and an
+     * initial load in event-time order, {@code initialJitterRows} 0). Left out of the
+     * configuration's hash when off, so configurations from before it keep theirs.
+     */
+    @JsonInclude(JsonInclude.Include.NON_DEFAULT)
+    public boolean sortedRead = false;
 
     /**
      * Stock Iceberg readers today: one split per row group, each re-reading the file's footer

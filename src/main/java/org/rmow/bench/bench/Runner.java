@@ -28,6 +28,7 @@ import org.rmow.bench.arms.RmowArm;
 import org.rmow.bench.arms.TailCowArm;
 import org.rmow.bench.arms.TailPolicy;
 import org.rmow.bench.arms.VersionDump;
+import org.rmow.bench.io.Held;
 import org.rmow.bench.io.IoTrace;
 import org.rmow.bench.io.RelocatedFileIO;
 import org.rmow.bench.io.Spans;
@@ -59,10 +60,16 @@ public final class Runner {
    *     the run directory ({@link VersionDump})
    * @param logRequests write every request each phase issued to {@code requests.jsonl} in the
    *     run directory, with its split task and each task's CPU, for latency models
+   * @param logHeld write every change of what each phase's readers and writers hold to {@code
+   *     held.jsonl} in the run directory ({@link Held})
    */
   public record Options(
-      String storeRoot, boolean keepStore, boolean dumpVersions, boolean logRequests) {
-    public static final Options DEFAULT = new Options(null, false, false, false);
+      String storeRoot,
+      boolean keepStore,
+      boolean dumpVersions,
+      boolean logRequests,
+      boolean logHeld) {
+    public static final Options DEFAULT = new Options(null, false, false, false, false);
 
     /** Where the run's objects go: {@code storeRoot} moves a local store's, never a cloud's. */
     String storeRoot(BenchConfig cfg) {
@@ -81,7 +88,9 @@ public final class Runner {
   private final Options options;
   private final ObjectMapper json = new ObjectMapper();
   private final List<Reader> readers = new ArrayList<>();
+  private final List<Reader> sortedReaders = new ArrayList<>(); // those that also read sorted
   private BufferedWriter requestsOut; // the request log, while a run with one writes steps
+  private BufferedWriter heldOut; // the held log, likewise
 
   public Runner(BenchConfig cfg, Path runDir, String runId) {
     this(cfg, runDir, runId, Options.DEFAULT);
@@ -165,7 +174,7 @@ public final class Runner {
       if (pool != null) {
         pools.add(pool);
       }
-      readers.add(
+      Reader reader =
           new Reader(
               r.name,
               r.footerCache,
@@ -173,7 +182,11 @@ public final class Runner {
               r.footerPrefetchBytes,
               r.splitTargetBytes,
               r.skipDeadRowGroups,
-              pool));
+              pool);
+      readers.add(reader);
+      if (r.sortedRead) {
+        sortedReaders.add(reader);
+      }
     }
     BenchConfig.LatencySpec ls = cfg.store.latency;
     StoreLatency latency =
@@ -212,8 +225,12 @@ public final class Runner {
         BufferedWriter requests =
             options.logRequests()
                 ? Files.newBufferedWriter(runDir.resolve("requests.jsonl"))
-                : null) {
+                : null;
+        BufferedWriter held =
+            options.logHeld() ? Files.newBufferedWriter(runDir.resolve("held.jsonl")) : null) {
       requestsOut = requests;
+      heldOut = held;
+      Held.logEvents(held != null);
       probe(out, arms, model, 0, tsBounds);
       for (ArmRun a : arms) {
         emitState(out, a, 0);
@@ -291,7 +308,7 @@ public final class Runner {
     return order;
   }
 
-  /** Full, recent-window and time-travel reads, each checked against the model. */
+  /** Full, recent-window, time-travel and sorted reads, each checked against the model. */
   private void probe(
       BufferedWriter out, List<ArmRun> arms, ReferenceModel model, int step, long[] tsBounds)
       throws IOException {
@@ -308,6 +325,9 @@ public final class Runner {
         checkedRead(a, r, "read_recent", step, () -> a.arm().read(recent, r), wantRecent);
         if (wantOld != null) {
           checkedRead(a, r, "read_old", step, () -> a.arm().readAfter(oldSteps, r), wantOld);
+        }
+        if (sortedReaders.contains(r)) {
+          checkedRead(a, r, "read_sorted", step, () -> a.arm().readSorted(r), wantFull);
         }
       }
       emitPhases(out, a, step);
@@ -386,12 +406,44 @@ public final class Runner {
       m.put("bytes_read", c.bytesRead());
       m.put("bytes_skipped_through", c.skipThroughBytes());
       m.put("bytes_written", c.bytesWritten());
+      // the most its readers and writers held at once (Held): rows, and bytes in all and by kind
+      m.put("held_bytes", p.held().maxBytes());
+      for (Held.Kind k : Held.kinds()) {
+        m.put("held_" + k.field(), p.held().max(k));
+      }
       m.putAll(p.extra());
       out.write(json.writeValueAsString(m));
       out.newLine();
       if (requestsOut != null) {
         emitRequests(a, step, p);
       }
+      if (heldOut != null) {
+        emitHeld(a, step, p);
+      }
+    }
+  }
+
+  /**
+   * The held log: one record per change of what the phase's readers and writers hold, in order
+   * ({@code seq}), with the levels after it and the innermost phase it happened in.
+   */
+  private void emitHeld(ArmRun a, int step, Phases.Measured p) throws IOException {
+    int seq = 0;
+    for (Held.Event e : p.heldEvents()) {
+      Map<String, Object> m = new LinkedHashMap<>();
+      m.put("arm", a.arm().name());
+      m.put("step", step);
+      m.put("phase", p.phase());
+      m.put("reader", p.extra().get("reader"));
+      m.put("seq", seq++);
+      m.put("in", e.phase());
+      m.put("what", e.what());
+      m.put("bytes", e.bytes());
+      for (Held.Kind k : Held.kinds()) {
+        m.put(k.field(), e.levels()[k.ordinal()]);
+      }
+      heldOut.write(json.writeValueAsString(m));
+      heldOut.newLine();
     }
   }
 

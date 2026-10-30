@@ -12,6 +12,7 @@ import org.apache.iceberg.data.parquet.GenericParquetWriter;
 import org.apache.iceberg.io.FileAppender;
 import org.apache.iceberg.parquet.Parquet;
 import org.apache.parquet.format.FileMetaData;
+import org.rmow.bench.io.Held;
 import org.rmow.bench.io.Spans;
 
 /**
@@ -51,9 +52,17 @@ public final class RegionWriter {
    * Spans.Kind#ENCODE} span, with the region's footer decoded in a footer span.
    */
   public Region write(String location, long base, Iterable<Record> rows) throws IOException {
+    Region region;
     try (Spans.Span s = Spans.open(Spans.Kind.ENCODE)) {
-      return encode(location, base, rows);
+      region = encode(location, base, rows);
     }
+    // the writer buffered the region's one row group
+    Held.pulse(Held.Kind.WRITER, region.bytes().length, "encode a region of " + name(location));
+    return region;
+  }
+
+  private static String name(String location) {
+    return location.substring(location.lastIndexOf('/') + 1);
   }
 
   private Region encode(String location, long base, Iterable<Record> rows) throws IOException {

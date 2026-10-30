@@ -27,7 +27,7 @@ import org.apache.iceberg.IcebergBuild;
  *
  * <pre>
  *   bin/run.sh &lt;config.json&gt; [--out &lt;dir&gt;] [--store-root &lt;dir&gt;] [--keep-store] [--dump-versions]
- *       [--log-requests]
+ *       [--log-requests] [--log-held]
  * </pre>
  *
  * Results go to {@code <out>/<label>-<config hash>/<UTC start time>/}: {@code manifest.json}
@@ -41,6 +41,9 @@ import org.apache.iceberg.IcebergBuild;
  *   <li>{@code --keep-store} keeps the run's objects, which are otherwise deleted at the end;
  *   <li>{@code --dump-versions} writes every version of the appendable objects to {@code
  *       versions/} in the run directory, for {@code analysis/interop_check.py};
+ *   <li>{@code --log-held} writes every change of what each phase's readers and writers hold to
+ *       {@code held.jsonl} (rows, and bytes by kind), for drawing memory against the stages of a
+ *       phase;
  *   <li>{@code --log-requests} writes every request each phase issued to {@code requests.jsonl},
  *       with its split task and each task's CPU, for latency models.
  * </ul>
@@ -57,7 +60,7 @@ public final class Main {
     if (args.length < 1) {
       System.err.println(
           "usage: run.sh <config.json> [--out <dir>] [--store-root <dir>] [--keep-store]"
-              + " [--dump-versions] [--log-requests]");
+              + " [--dump-versions] [--log-requests] [--log-held]");
       System.exit(2);
     }
     Path out = Path.of("results");
@@ -65,6 +68,7 @@ public final class Main {
     boolean keepStore = false;
     boolean dumpVersions = false;
     boolean logRequests = false;
+    boolean logHeld = false;
     for (int i = 1; i < args.length; i++) {
       if (args[i].equals("--out") && i + 1 < args.length) {
         out = Path.of(args[++i]);
@@ -76,6 +80,8 @@ public final class Main {
         dumpVersions = true;
       } else if (args[i].equals("--log-requests")) {
         logRequests = true;
+      } else if (args[i].equals("--log-held")) {
+        logHeld = true;
       } else {
         throw new IllegalArgumentException("Unknown argument: " + args[i]);
       }
@@ -102,7 +108,7 @@ public final class Main {
     manifest.put("started", started);
     manifest.put("versions", versions());
     manifest.put("host", host());
-    Runner.Options options = new Runner.Options(storeRoot, keepStore, dumpVersions, logRequests);
+    Runner.Options options = new Runner.Options(storeRoot, keepStore, dumpVersions, logRequests, logHeld);
     manifest.put("store_root", options.storeRoot(cfg));
     Path manifestFile = runDir.resolve("manifest.json");
     pretty.writeValue(manifestFile.toFile(), manifest);

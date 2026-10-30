@@ -66,6 +66,10 @@ Campaigns too large for a laptop run in a container on another machine, each con
 whole idle cores of one NUMA node: `docker/run.sh build`, then `docker/run.sh start <campaign>`
 ([docker/README.md](docker/README.md)).
 
+`--log-requests` writes every request each phase issued to `<run>/requests.jsonl`, for the
+latency replay, and `--log-held` every change of what each phase's readers and writers hold to
+`<run>/held.jsonl` ([What is held](#what-is-held)).
+
 `--dump-versions` (on `bin/run.sh` or `bin/matrix.sh`) keeps every version of every appendable
 object in `<run>/versions/`, checked against the reference model at every step, for
 `analysis/interop_check.py <run>/versions` to read with pyarrow and DuckDB (see
@@ -101,12 +105,13 @@ The phases recorded in `steps.jsonl` are:
 | Phase | What it covers |
 |---|---|
 | `batch` | One whole batch. It contains the phases below, so don't add them to it. |
-| `merge-read` | RMoW only: reading back the row groups the batch touches. |
+| `merge-read` | Reading back what the batch rewrites or merges: RMoW's touched row groups, TailCoW's and RMoR's tail files and regions. |
 | `write` | Writing data files, or appending regions and footers. |
 | `delete-write` | MoR only: loading the previous DV and writing the new Puffin file. |
 | `read_full` | Reading the whole current table. |
 | `read_recent` | Reading rows in the newest 1% of event time. Files are pruned by column metrics, row groups by stats. |
 | `read_old` | Reading the table as it was `travelBack` batches ago. |
+| `read_sorted` | Reading the whole current table in event-time order, under a reader with `sortedRead` (since 2026-10-29): a merge of the table's row groups, each a sorted run, opened as the merge reaches its smallest `ts`. |
 | `state` | The footprint: objects, stored, live and reclaimable bytes, row groups, files, footer bytes, and RMoW's row groups listed out of id order. |
 
 Each phase records wall time, thread CPU time, and the requests a tracing FileIO saw: GETs (ranged
@@ -130,6 +135,7 @@ kind of work, as wall and CPU time (`<kind>_ns`, `<kind>_cpu_ns`), each exclusiv
 | `decode` | Parquet decoding in a scan: footers, pages and rows, with deletes applied, and the scan's consumer (a hash, or rows kept to merge). |
 | `footer` | RMoW's footers: Thrift decoding, encoding and merging. |
 | `deletes` | Delete files: DVs and position deletes built, encoded, loaded and decoded. |
+| `rows` | Rows the harness makes for a writer from their id, event time and version, a chunk at a time as the encoder takes them (since 2026-10-29; before, the same work ran ahead of the encoding, outside every span). The lab counts it in other CPU, as before. |
 
 The rest of the thread's CPU is planning and bookkeeping, and the rest of its wall time is off the
 CPU outside requests (garbage collection, the JIT, scheduling). A read pool's tasks record the same
@@ -139,6 +145,33 @@ client's threads of its own (Azure's event loop) are in `process_cpu_ns`, not in
 request log, each request has its start in its phase (`start_ns`), wall time (`dur_ns`) and thread
 CPU (`cpu_ns`). Each span reads the thread's CPU clock twice, about 2 µs here, and a batch or read
 opens tens to hundreds of them; on a 7-arm run they moved user-mode instructions by -0.5% to +2%.
+
+### What is held
+
+Each phase also records the most its readers and writers held at once (`Held`, since
+2026-10-29): `held_rows`, the rows kept to sort or merge, and `held_bytes`, the encoded bytes,
+with the peak of each kind of byte (`held_<kind>`):
+
+| Kind | What is held |
+|---|---|
+| `rows` | Rows a writer reads back to rewrite or merge, and a batch's rows to sort, until its files are written; rows a sorted read decodes to sort a file it fetched whole. In rows, since their size in memory is the engine's choice. |
+| `chunks` | The column chunks a reader fetched for the row group it is decoding: every data read its stream serves from storage, by row group (the file's split offsets), held until it fetches from the next. A file Iceberg fetches whole counts whole. |
+| `writer` | A Parquet writer's buffered row group, as large as the largest it wrote. |
+| `pending` | Encoded data waiting for its request: RMoW's regions until the file's append, a data file the store can extend until its create. |
+| `deletes` | DVs and position deletes loaded (a DV's blob, a delete file's length), by a read's delete cache until the read ends, or by a scan until it ends; and the DVs a batch builds. |
+
+The levels are counted where the code holds data, so two runs record the same peaks, as they do
+requests and bytes. They are not the JVM's heap, which holds the benchmark's own state too and
+moves with the collector. Every hold must be released by the end of the outermost phase that made
+it, or the run fails. Writers stream: RMoW reads, rewrites and encodes one row group at a time, as
+parts of `merge-read` and `write`, each recorded once; the MoR family keeps each row it reads back
+as its id and version, and makes the rows again as the encoder takes them, as it always did. A
+read whose splits run on a pool holds as many row groups as its threads do at once, so its peaks
+depend on how they interleave.
+
+With `--log-held`, `held.jsonl` has every change, in order (`seq`), with the levels after it, the
+innermost phase it came in (`in`) and what it was (`what`: a row group fetched, a region encoded,
+an append sent), for drawing a phase's memory against the stages of its work rather than time.
 
 CPU and wall time must run on one clock for the breakdown to add up. On this laptop (WSL2 on
 Hyper-V) the thread CPU clock runs 11% fast against the wall clock, so a busy phase's `cpu_ns`
@@ -390,7 +423,7 @@ has what they showed.
 | `writerFooters` | What every arm's writer holds of the footers it reads (I/O parity rule 6). `transaction` (the default): a file version's footer is read once per batch or compaction and reused within it. `open`: every open reads it again, as parquet-java does. Nothing carries over from one transaction to the next. It replaces `writerCachesFooters`, under which RMoW's writer kept its footers across batches. |
 | `footerPrefetchBytes` | Every reader prefetches this tail on its first footer probe, so a footer costs 1 request instead of 2. 0 means stock parquet-java. |
 | `locate` | `oracle` (the default) takes row positions from an in-memory index, at no cost. `scan` finds them the way a MERGE would, in a timed `locate` phase checked against the index. MoR scans `id` and `_pos` of every file whose `id` bounds may hold a target; RMoW looks the ids up in its footers' row-group statistics. |
-| `reads.readers` | The reader models every probe runs under, on the same table state. The first is primary. `one-footer` (the default) opens each file at one version and reads that version's one footer once, in one request (a 64 KiB prefetch), then only the row groups it needs. `stock` is stock Iceberg today: one split per row group (`FileScanTask.split`), each split re-reading the footer with two requests. Each model also sets `splitTargetBytes` and `parallelism`, the threads a read's split tasks run on. |
+| `reads.readers` | The reader models every probe runs under, on the same table state. The first is primary. `one-footer` (the default) opens each file at one version and reads that version's one footer once, in one request (a 64 KiB prefetch), then only the row groups it needs. `stock` is stock Iceberg today: one split per row group (`FileScanTask.split`), each split re-reading the footer with two requests. Each model also sets `splitTargetBytes` and `parallelism`, the threads a read's split tasks run on. With `sortedRead`, the model also reads the table in event-time order at each probe (`read_sorted`), on one thread: a merge of the table's row groups, each a sorted run, opened when the merge reaches its smallest `ts`, so it holds every row group whose event times overlap. A file of at most 1 MiB, which Iceberg fetches whole, is decoded and sorted in memory. It needs `footerCache`, and every run sorted: sorted writes and an initial load in event-time order (`initialJitterRows` 0); a row out of order stops the run. Left out of the configuration's hash when off. |
 | `compactEvery` | Check the compaction triggers every this many batches (0 means never). MoR-family arms bin-pack files smaller than `compactSmallFileFraction` of the target and files whose delete ratio is at least `compactDeleteRatio`, as Iceberg's `RewriteDataFiles` does. RMoW triggers on space and on reads separately: it rewrites an appendable file, or moves the live row groups out of a split file's objects, whose dead bytes are at least `compactGarbageRatio` of their length; and it packs small sealed row groups once a file holds `compactSmallRowGroups` of them ([docs/DESIGN.md](docs/DESIGN.md#compaction)). When to compact is an outcome: see `analysis/compaction.py`. |
 | `rmorRewriteShare` | `rmor-c`'s θ: a batch rewrites a region it changes (a sealed file's row group, or an open tail file) when it updates or deletes at least this share of the region's live rows, counted per batch, and otherwise puts DVs on the rows. 0 (the default) rewrites every region a batch changes; above 1 none, which is `tailcow-c`. |
 | `writerSkipsDeadRowGroups` | The MoR family's writers (their scans to locate rows, merge reads and compaction) read no row group the file's deletes cover whole, nor any file whose DV covers every row, as the `skipDeadRowGroups` reader does. Off (the default) is Iceberg's MERGE scan, which fetches such row groups and drops their rows. In practice only RMoR-C has them: on two configurations, it changed no other arm's request or byte. Configurations that report RMoR set it, with the `cached-skip` reader beside a stock one. |
@@ -410,6 +443,7 @@ order, so a range of ids stands for a region of the table. The manifest records 
 | `regionSkew` | `REGIONS`' Zipf exponent (default 1). On 1M rows and 60 batches of 10,000 operations in regions of 10,521 rows (135 by the end), the hottest tenth of the regions took 12% of the updates at 0, 54% at 1 and 89% at 2. |
 | `updateShare` | The share p of a region's live rows one statement changes. 0 (the default) makes each update and delete a row of its own. Above 0, a statement takes the region of a row the key distribution picks, under any `keyDist`, and changes p of its live rows (at least one), picked uniformly among those the batch has not touched. The batch's deletes are drawn uniformly from the rows its statements changed, and the rest are updated, as a MERGE updates some of the rows it matches and deletes others, so a batch's deletes fall in the regions its updates do. The batch's last statement takes what is left of its updates and deletes, so p counts only up to those per batch over `regionRows`. |
 | `lateMedianBatches`, `lateP99Batches` | Insert lateness in event time (`ts`), lognormal, in batches. |
+| `initialJitterRows` | How far, in rows of event time, an initial-load row's `ts` may run ahead of its id's (default 100). At 0 the initial load is in event-time order, which a sorted read needs. The rows that change are the same at any value. |
 
 Logs without regions, the ingest window or uniform keys at an update share of 0, are what they
 were before regions existed (`OpLogGeneratorTest` pins three runs' hashes).

@@ -24,8 +24,18 @@ import org.apache.iceberg.io.SeekableInputStream;
  * </ul>
  *
  * The delegate's stream must be {@link RangeReadable} (I/O parity rule 1).
+ *
+ * <p>A {@link DataReads} listener hears of every read served from storage below the footer: the
+ * row groups' bytes a reader fetched, for what it holds ({@code Held}). The footer prefetch, the
+ * footer once the probe has located it, and a cached tail are not data.
  */
 public final class VersionedInputFile implements InputFile {
+
+  /** Hears of the data a stream reads from storage: {@code n} bytes at {@code position}. */
+  @FunctionalInterface
+  public interface DataReads {
+    void read(long position, long n);
+  }
 
   private static final int FOOTER_PROBE = 8; // footer length and magic
 
@@ -33,6 +43,7 @@ public final class VersionedInputFile implements InputFile {
   private final long length;
   private final byte[] tail;
   private final int footerPrefetch;
+  private final DataReads dataReads; // null: none
 
   public VersionedInputFile(InputFile delegate, long length) {
     this(delegate, length, null, 0);
@@ -48,6 +59,12 @@ public final class VersionedInputFile implements InputFile {
    * @param footerPrefetch bytes to prefetch on the first footer probe (0: stock behaviour)
    */
   public VersionedInputFile(InputFile delegate, long length, byte[] tail, int footerPrefetch) {
+    this(delegate, length, tail, footerPrefetch, null);
+  }
+
+  /** @param dataReads hears of the data each stream reads from storage; null: none */
+  public VersionedInputFile(
+      InputFile delegate, long length, byte[] tail, int footerPrefetch, DataReads dataReads) {
     if (tail != null && tail.length > length) {
       throw new IllegalArgumentException("Tail longer than the version: " + tail.length);
     }
@@ -55,6 +72,7 @@ public final class VersionedInputFile implements InputFile {
     this.length = length;
     this.tail = tail;
     this.footerPrefetch = footerPrefetch;
+    this.dataReads = dataReads;
   }
 
   @Override
@@ -84,6 +102,29 @@ public final class VersionedInputFile implements InputFile {
     private final byte[] one = new byte[1];
     private byte[] cached = tail; // the cached tail: given, or prefetched by this stream
     private long tailStart = tail == null ? length : length - tail.length;
+    private long footerStart = tail == null ? length : footerStart(tail, tail.length - FOOTER_PROBE);
+
+    /** Where the footer starts, from the probe at {@code b[off]} (footer length, then magic). */
+    private long footerStart(byte[] b, int off) {
+      if (off < 0) {
+        return length;
+      }
+      int footerLength =
+          (b[off] & 0xFF) | (b[off + 1] & 0xFF) << 8 | (b[off + 2] & 0xFF) << 16
+              | (b[off + 3] & 0xFF) << 24;
+      return Math.max(0, length - FOOTER_PROBE - footerLength);
+    }
+
+    /** Tells the listener of data read from storage, and locates the footer from its probe. */
+    private void served(long position, byte[] b, int off, int n) {
+      if (position == length - FOOTER_PROBE && n == FOOTER_PROBE) {
+        footerStart = footerStart(b, off);
+        return;
+      }
+      if (dataReads != null && position < footerStart) {
+        dataReads.read(position, Math.min(n, footerStart - position));
+      }
+    }
 
     /** Prefetches the tail on the first footer probe, if prefetching is on. */
     private void maybePrefetch(long position) throws IOException {
@@ -93,6 +134,7 @@ public final class VersionedInputFile implements InputFile {
         ((RangeReadable) in()).readFully(length - n, t, 0, n);
         cached = t;
         tailStart = length - n;
+        footerStart = footerStart(t, n - FOOTER_PROBE);
       }
     }
 
@@ -149,6 +191,7 @@ public final class VersionedInputFile implements InputFile {
       if (r < 0) {
         throw new EOFException("Object ended before its version length " + length + " at " + pos);
       }
+      served(pos, b, off, r);
       pos += r;
       return r;
     }
@@ -166,6 +209,7 @@ public final class VersionedInputFile implements InputFile {
       }
       int fromStorage = (int) Math.min(len, tailStart - position);
       ((RangeReadable) in()).readFully(position, buffer, offset, fromStorage);
+      served(position, buffer, offset, fromStorage);
       if (fromStorage < len) {
         System.arraycopy(cached, 0, buffer, offset + fromStorage, len - fromStorage);
       }

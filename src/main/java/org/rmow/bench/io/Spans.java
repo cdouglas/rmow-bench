@@ -33,7 +33,13 @@ public final class Spans {
     /** RMoW's footers: Thrift decoding and encoding, and merging. */
     FOOTER("footer"),
     /** Delete files: DVs and position deletes built and encoded, loaded and decoded. */
-    DELETES("deletes");
+    DELETES("deletes"),
+    /**
+     * Rows the benchmark makes for a writer from their id, event time and version (a row is a
+     * function of them), a chunk at a time as the encoder takes them: work of the harness, not of
+     * a layout, which before 2026-10-29 was the phase's remainder.
+     */
+    ROWS("rows");
 
     private final String field;
 
@@ -70,6 +76,10 @@ public final class Spans {
         c[i] = cpuNs[i] - o.cpuNs[i];
       }
       return new Totals(w, c);
+    }
+
+    public Totals plus(Totals o) {
+      return minus(o.minus(o).minus(o));
     }
 
     public long wallNs(Kind k) {

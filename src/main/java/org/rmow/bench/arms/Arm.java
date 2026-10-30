@@ -33,5 +33,11 @@ public interface Arm {
   /** Reads the table as it was after {@code steps} batches (0: the initial load alone). */
   TableHash readAfter(int steps, Reader reader) throws IOException;
 
+  /**
+   * Reads the current table in event-time order ({@code ts}, then {@code id}), as a merge of its
+   * row groups, each a sorted run ({@link Scans#readSorted}).
+   */
+  TableHash readSorted(Reader reader) throws IOException;
+
   ArmStats stats();
 }

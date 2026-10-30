@@ -42,7 +42,7 @@ class VersionDumpTest {
     cfg.arms =
         List.of("rmow-a", "rmow-b", "rmow-c", "rmow-b-split", "rmow-c-split", "mor-v3");
     cfg.reads.every = 5;
-    new Runner(cfg, dir, "t", new Runner.Options(null, false, true, false)).run();
+    new Runner(cfg, dir, "t", new Runner.Options(null, false, true, false, false)).run();
 
     Path versions = dir.resolve("versions");
     List<String> rows = Files.readAllLines(versions.resolve("versions.csv"));

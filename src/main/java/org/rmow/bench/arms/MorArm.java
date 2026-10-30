@@ -27,6 +27,7 @@ import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.iceberg.types.Conversions;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.ContentFileUtil;
+import org.rmow.bench.io.Held;
 import org.rmow.bench.io.MemFileIO;
 import org.rmow.bench.oracle.TableHash;
 import org.rmow.bench.workload.OpLog;
@@ -66,6 +67,11 @@ public abstract class MorArm implements Arm {
   private int lastBatch = -1;
   /** The footers this arm's writer has read in the current transaction (a batch, a compaction). */
   protected final WriterFooters footers;
+  /**
+   * The rows this transaction's writer holds to sort and merge ({@link Held.Kind#ROWS}): what it
+   * reads back, from the read until its files are written; null outside a transaction.
+   */
+  protected Held.Scope rowsHeld;
 
   protected MorArm(ArmContext ctx) {
     this.ctx = ctx;
@@ -225,7 +231,16 @@ public abstract class MorArm implements Arm {
       fileOfId[(int) id] = -1;
     }
 
-    ctx.phases().run("write", () -> writeDataFile(batchName(b), batchRows(b), seq));
+    ctx.phases()
+        .run(
+            "write",
+            () -> {
+              try (Held.Scope rows = Held.scope("the batch's rows written")) {
+                List<long[]> r = batchRows(b);
+                rows.hold(Held.Kind.ROWS, r.size(), "the batch's rows to sort");
+                writeDataFile(batchName(b), r, seq);
+              }
+            });
     if (!deleted.isEmpty()) {
       ctx.phases().run("delete-write", () -> writeDeletes(b.index(), seq, deleted));
     }
@@ -268,12 +283,11 @@ public abstract class MorArm implements Arm {
           Comparator.comparingLong((long[] r) -> ctx.log().ts(r[0])).thenComparingLong(r -> r[0]));
     }
     String location = String.format("%s/data/%s.parquet", ctx.root(), name);
-    List<Record> records = new ArrayList<>(rows.size());
-    List<Long> ids = new ArrayList<>(rows.size());
-    for (long[] r : rows) {
-      records.add(Rows.record(r[0], ctx.log().ts(r[0]), (int) r[1]));
-      ids.add(r[0]);
+    long[] ids = new long[rows.size()];
+    for (int i = 0; i < ids.length; i++) {
+      ids[i] = rows.get(i)[0];
     }
+    Iterable<Record> records = new MadeRows(rows, ctx.log());
     DataFile df;
     if (appendable()) {
       // encoded in memory, then created as an object the store can extend: one PUT, or on ADLS
@@ -284,7 +298,10 @@ public abstract class MorArm implements Arm {
       try (SeekableInputStream in = mem.newInputFile(location, bytes.length).newStream()) {
         IOUtil.readFully(in, bytes, 0, bytes.length);
       }
-      ctx.io().create(location, bytes);
+      try (Held.Scope pending = Held.scope("created " + name)) {
+        pending.hold(Held.Kind.PENDING, bytes.length, "encoded " + name + " to create");
+        ctx.io().create(location, bytes);
+      }
     } else {
       df = DataFileWriter.write(ctx.io(), location, records, ctx.layout().writerProperties());
     }
@@ -297,14 +314,14 @@ public abstract class MorArm implements Arm {
   }
 
   /** Adds {@code df}, which holds the rows {@code ids} in this order, as a live data file. */
-  protected int addFile(DataFile df, long seq, List<Long> ids) {
+  protected int addFile(DataFile df, long seq, long[] ids) {
     int k = files.size();
     files.add(df);
     fileSeqs.add(seq);
     removedRows.add(0);
     live.set(k);
-    for (int pos = 0; pos < ids.size(); pos++) {
-      int id = ids.get(pos).intValue();
+    for (int pos = 0; pos < ids.length; pos++) {
+      int id = (int) ids[pos];
       fileOfId[id] = k;
       posOfId[id] = pos;
     }
@@ -333,6 +350,11 @@ public abstract class MorArm implements Arm {
               Delete d = dvOf(path);
               return d == null ? null : d.file();
             });
+    long built = 0;
+    for (DeleteFile dv : result.deleteFiles()) {
+      built += dv.contentSizeInBytes();
+    }
+    Held.pulse(Held.Kind.DELETES, built, "DVs of batch " + batch);
     for (DeleteFile dv : result.deleteFiles()) {
       Delete previous = dvOf(dv.referencedDataFile());
       if (previous != null) {
@@ -354,22 +376,36 @@ public abstract class MorArm implements Arm {
     return null;
   }
 
-  /** The live rows of data file {@code k} (its deletes applied), read from storage. */
-  protected List<Record> readLive(int k) throws IOException {
-    List<Record> out = new ArrayList<>();
+  /**
+   * The live rows of data file {@code k} (its deletes applied), read from storage, as {id,
+   * version}: the rows are dropped as they are decoded ({@link MadeRows} makes them again).
+   */
+  protected List<long[]> readLive(int k) throws IOException {
+    List<long[]> out = new ArrayList<>();
     DataFile df = files.get(k);
-    scan(df, fileSeqs.get(k), deletes, Expressions.alwaysTrue(), out::add);
+    scan(df, fileSeqs.get(k), deletes, Expressions.alwaysTrue(), r -> out.add(idVersion(r)));
+    holdRead(out, df);
     return out;
+  }
+
+  /** The rows read back are held until the transaction's files are written. */
+  private void holdRead(List<long[]> rows, DataFile df) {
+    if (rowsHeld != null) {
+      String location = df.location();
+      rowsHeld.hold(
+          Held.Kind.ROWS, rows.size(),
+          "read back rows of " + location.substring(location.lastIndexOf('/') + 1));
+    }
   }
 
   /**
    * The live rows of one split of data file {@code k} (its deletes applied), {@code [start, start +
    * length)}, which holds one row group, opened with {@code tail}: from {@code held}, the file the
-   * writer fetched whole, or, if null, from storage.
+   * writer fetched whole, or, if null, from storage. As {id, version}, as {@link #readLive(int)}.
    */
-  protected List<Record> readLive(int k, InputFile held, byte[] tail, long start, long length)
+  protected List<long[]> readLive(int k, InputFile held, byte[] tail, long start, long length)
       throws IOException {
-    List<Record> out = new ArrayList<>();
+    List<long[]> out = new ArrayList<>();
     DataFile df = files.get(k);
     Scans.scan(
         ctx,
@@ -383,8 +419,13 @@ public abstract class MorArm implements Arm {
         start,
         length,
         null,
-        out::add);
+        r -> out.add(idVersion(r)));
+    holdRead(out, df);
     return out;
+  }
+
+  private static long[] idVersion(Record r) {
+    return new long[] {(Long) r.get(Rows.ID), (Integer) r.get(Rows.VERSION)};
   }
 
   /** Whether compaction may rewrite data file {@code k} (TailCoW keeps its open tail files). */
@@ -438,12 +479,16 @@ public abstract class MorArm implements Arm {
         continue;
       }
       List<long[]> rows = new ArrayList<>();
-      for (int k : g) {
-        for (Record r : readLive(k)) {
-          rows.add(new long[] {(Long) r.get(Rows.ID), (Integer) r.get(Rows.VERSION)});
+      rowsHeld = Held.scope("a compaction group written");
+      try {
+        for (int k : g) {
+          rows.addAll(readLive(k));
         }
+        writeDataFile(String.format("compact-%05d-%03d", lastBatch, n++), rows, seq);
+      } finally {
+        rowsHeld.close();
+        rowsHeld = null;
       }
-      writeDataFile(String.format("compact-%05d-%03d", lastBatch, n++), rows, seq);
       for (int k : g) {
         retire(k);
       }
@@ -458,6 +503,17 @@ public abstract class MorArm implements Arm {
   @Override
   public TableHash readAfter(int steps, Reader reader) throws IOException {
     return read(history.get(steps), Expressions.alwaysTrue(), reader);
+  }
+
+  @Override
+  public TableHash readSorted(Reader reader) throws IOException {
+    State state = snapshot();
+    List<Scans.ReadFile> toRead = new ArrayList<>();
+    for (int i = 0; i < state.files().size(); i++) {
+      DataFile df = state.files().get(i);
+      toRead.add(new Scans.ReadFile(df, deletesFor(df, state.fileSeqs().get(i), state.deletes())));
+    }
+    return Scans.readSorted(ctx, reader, toRead);
   }
 
   /**
@@ -526,16 +582,17 @@ public abstract class MorArm implements Arm {
         return;
       }
       if (tail != null) {
-        Map<String, PositionDeleteIndex> loaded = new HashMap<>(); // the deletes, once per scan
-        Set<Long> dead =
-            Scans.deadRowGroups(ctx, writer.footerPrefetchBytes(), df, ds, tail, loaded);
-        if (dead.isEmpty()) {
-          Scans.scan(ctx, writer, df, ds, projection, filter, tail, -1, -1, loaded, rows);
-          return;
-        }
-        for (long[] g : Scans.rowGroups(tail)) {
-          if (!dead.contains(g[2])) {
-            Scans.scan(ctx, writer, df, ds, projection, filter, tail, g[2], g[3], loaded, rows);
+        try (DeleteCache loaded = new DeleteCache()) { // the deletes, once per scan
+          Set<Long> dead =
+              Scans.deadRowGroups(ctx, writer.footerPrefetchBytes(), df, ds, tail, loaded);
+          if (dead.isEmpty()) {
+            Scans.scan(ctx, writer, df, ds, projection, filter, tail, -1, -1, loaded, rows);
+            return;
+          }
+          for (long[] g : Scans.rowGroups(tail)) {
+            if (!dead.contains(g[2])) {
+              Scans.scan(ctx, writer, df, ds, projection, filter, tail, g[2], g[3], loaded, rows);
+            }
           }
         }
         return;

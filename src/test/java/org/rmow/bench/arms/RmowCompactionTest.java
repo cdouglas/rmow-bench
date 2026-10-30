@@ -38,6 +38,7 @@ class RmowCompactionTest {
     final OpLog log;
     final ReferenceModel model;
     final RmowArm arm;
+    final Phases phases; // the arm's, which times each batch and compaction as the runner does
     int next = 0;
 
     Run(LayoutSpec layout, boolean split) throws IOException {
@@ -50,13 +51,14 @@ class RmowCompactionTest {
       MemFileIO mem = new MemFileIO();
       RegionAppender appender = new AtomicAppender(mem);
       IoTrace trace = new IoTrace();
+      phases = new Phases(trace);
       ArmContext ctx =
           new ArmContext(
               "t",
               "mem://t/arm",
               new TracingFileIO(mem, appender, trace),
               mem,
-              new Phases(trace),
+              phases,
               layout,
               log,
               true);
@@ -69,7 +71,7 @@ class RmowCompactionTest {
     void batches(int n) throws IOException {
       for (int end = next + n; next < end; next++) {
         OpLog.Batch b = log.batches().get(next);
-        arm.apply(b);
+        phases.run("batch", () -> arm.apply(b));
         model.apply(b);
         assertThat(arm.read(Expressions.alwaysTrue(), READER)).isEqualTo(model.expected());
       }
@@ -110,7 +112,7 @@ class RmowCompactionTest {
     Map<LogicalFile, Long> garbage = new HashMap<>();
     before.forEach(f -> garbage.put(f, f.garbageBytes()));
 
-    run.arm.compact();
+    run.phases.run("compact", () -> run.arm.compact());
 
     // same files, each at most one version later; no object it reads is 30% dead any more
     List<LogicalFile> after = run.arm.files();
@@ -140,7 +142,7 @@ class RmowCompactionTest {
       long smallBefore = small(run.arm, target);
       assertThat(smallBefore).as("one small row group of inserts per batch").isGreaterThan(4);
 
-      run.arm.compact();
+      run.phases.run("compact", () -> run.arm.compact());
 
       assertThat(rowGroups(run.arm)).isLessThan(rowGroups);
       assertThat(small(run.arm, target)).isLessThan(smallBefore);

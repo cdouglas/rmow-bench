@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 import org.apache.iceberg.DeleteFile;
+import org.rmow.bench.io.Held;
 import org.apache.iceberg.data.Record;
 import org.rmow.bench.workload.OpLog;
 import org.rmow.bench.workload.Rows;
@@ -40,7 +41,19 @@ public final class CowArm extends MorArm {
       fileOfId[(int) id] = -1;
     }
 
-    Map<Integer, List<Record>> rows = new HashMap<>();
+    rowsHeld = Held.scope("the batch's files written");
+    try {
+      applyHeld(b, seq, touched);
+    } finally {
+      rowsHeld.close();
+      rowsHeld = null;
+    }
+    endBatch();
+  }
+
+  private void applyHeld(OpLog.Batch b, long seq, Map<Integer, Map<Long, Integer>> touched)
+      throws IOException {
+    Map<Integer, List<long[]>> rows = new HashMap<>();
     if (!touched.isEmpty()) {
       ctx.phases()
           .run(
@@ -58,13 +71,12 @@ public final class CowArm extends MorArm {
               int n = 0;
               for (Map.Entry<Integer, Map<Long, Integer>> e : touched.entrySet()) {
                 List<long[]> merged = new ArrayList<>();
-                for (Record r : rows.get(e.getKey())) {
-                  long id = (Long) r.get(Rows.ID);
-                  Integer v = e.getValue().get(id);
+                for (long[] r : rows.get(e.getKey())) {
+                  Integer v = e.getValue().get(r[0]);
                   if (v == null) {
-                    merged.add(new long[] {id, (Integer) r.get(Rows.VERSION)});
+                    merged.add(r);
                   } else if (v >= 0) {
-                    merged.add(new long[] {id, v});
+                    merged.add(new long[] {r[0], v});
                   }
                 }
                 writeDataFile(String.format("%s-%03d", batchName(b), n++), merged, seq);
@@ -74,9 +86,10 @@ public final class CowArm extends MorArm {
               for (long id : b.insertIds()) {
                 inserts.add(new long[] {id, 0});
               }
+              rowsHeld.hold(Held.Kind.ROWS, inserts.size(), "the batch's inserts to sort");
               writeDataFile(String.format("%s-%03d", batchName(b), n), inserts, seq);
+              rowsHeld.close(); // the batch's files are written
             });
-    endBatch();
   }
 
   @Override

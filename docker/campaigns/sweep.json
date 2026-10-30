@@ -1,20 +1,18 @@
 {
-  "description": "The sweeps from the 16 MiB base point, one axis at a time: update share, skew, row-group size and arrival window, with the ingest window as a reference; the five arms, payload checks off, requests logged (docs/HYPOTHESES.md, 2026-10-29).",
-  "flags": [
-    "--log-requests"
-  ],
+  "description": "The sweeps from the 16 MiB base point, one axis at a time: update share, skew, row-group size and arrival window, with the ingest window as a reference; the five arms, a sorted read under the cached reader, payload checks off, requests and held memory logged (docs/HYPOTHESES.md, 2026-10-29).",
+  "flags": ["--log-requests", "--log-held"],
   "cores_per_job": 10,
   "jobs": [
-    {"config": "configs/sweep-rg64m.json", "heap": "48g", "store_gib": 70},
-    {"config": "configs/sweep-rg32m.json", "heap": "48g", "store_gib": 50},
-    {"config": "configs/sweep-ingest-rows.json", "heap": "32g", "store_gib": 45},
-    {"config": "configs/sweep-s0.json", "heap": "32g", "store_gib": 32},
-    {"config": "configs/sweep-base.json", "heap": "32g", "store_gib": 30},
-    {"config": "configs/sweep-late99-1.json", "heap": "32g", "store_gib": 30},
-    {"config": "configs/sweep-late99-20.json", "heap": "32g", "store_gib": 30},
-    {"config": "configs/sweep-s2.json", "heap": "32g", "store_gib": 25},
-    {"config": "configs/sweep-ingest.json", "heap": "32g", "store_gib": 22},
-    {"config": "configs/sweep-p10.json", "heap": "32g", "store_gib": 20},
-    {"config": "configs/sweep-p30.json", "heap": "32g", "store_gib": 16}
+    {"config": "configs/sweep-rg64m.json", "heap": "16g", "store_gib": 70},
+    {"config": "configs/sweep-rg32m.json", "heap": "16g", "store_gib": 50},
+    {"config": "configs/sweep-ingest-rows.json", "heap": "16g", "store_gib": 45},
+    {"config": "configs/sweep-s0.json", "heap": "16g", "store_gib": 32},
+    {"config": "configs/sweep-base.json", "heap": "16g", "store_gib": 30},
+    {"config": "configs/sweep-late99-1.json", "heap": "16g", "store_gib": 30},
+    {"config": "configs/sweep-late99-20.json", "heap": "16g", "store_gib": 30},
+    {"config": "configs/sweep-s2.json", "heap": "16g", "store_gib": 25},
+    {"config": "configs/sweep-ingest.json", "heap": "16g", "store_gib": 22},
+    {"config": "configs/sweep-p10.json", "heap": "16g", "store_gib": 20},
+    {"config": "configs/sweep-p30.json", "heap": "16g", "store_gib": 16}
   ]
 }

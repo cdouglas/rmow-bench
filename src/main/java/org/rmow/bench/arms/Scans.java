@@ -7,7 +7,10 @@ import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.HashSet;
+import java.util.PriorityQueue;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -40,6 +43,7 @@ import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.parquet.format.FileMetaData;
 import org.apache.parquet.format.RowGroup;
 import org.rmow.bench.bench.ThreadCounters;
+import org.rmow.bench.io.Held;
 import org.rmow.bench.io.IoTrace;
 import org.rmow.bench.io.Spans;
 import org.rmow.bench.oracle.TableHash;
@@ -114,7 +118,7 @@ final class Scans {
       byte[] tail,
       long start,
       long length,
-      Map<String, PositionDeleteIndex> deleteCache,
+      DeleteCache deleteCache,
       Consumer<Record> rows)
       throws IOException {
     // storage holds what is below a cached tail (for a split file's object, the tail is not in
@@ -124,7 +128,10 @@ final class Scans {
         tail, start, length, deleteCache, rows);
   }
 
-  /** @param stored the file's bytes below {@code tail}, as the scan opens them */
+  /**
+   * @param stored the file's bytes below {@code tail}, as the scan opens them. What the scan holds
+   *     ({@link ChunksHeld}, and its deletes without a cache) is released when it ends.
+   */
   static void scan(
       ArmContext ctx,
       Reader reader,
@@ -136,21 +143,40 @@ final class Scans {
       byte[] tail,
       long start,
       long length,
-      Map<String, PositionDeleteIndex> deleteCache,
+      DeleteCache deleteCache,
       Consumer<Record> rows)
       throws IOException {
     FileScanTask task =
         new BaseFileScanTask(
             df, deletes, SCHEMA_JSON, SPEC_JSON, ResidualEvaluator.unpartitioned(filter));
-    LengthAwareDeleteFilter deleteFilter =
-        new LengthAwareDeleteFilter(
-            ctx.io(), task, Rows.SCHEMA, projection, reader.footerPrefetchBytes(), deleteCache);
-    Schema required = deleteFilter.requiredSchema();
-    Evaluator residual =
-        filter == Expressions.alwaysTrue() ? null : new Evaluator(required.asStruct(), filter);
-    InternalRecordWrapper wrapper = new InternalRecordWrapper(required.asStruct());
-    VersionedInputFile in =
-        new VersionedInputFile(stored, df.fileSizeInBytes(), tail, reader.footerPrefetchBytes());
+    try (ChunksHeld chunks = new ChunksHeld(df);
+        Held.Scope scanDeletes = Held.scope("scan's deletes released")) {
+      LengthAwareDeleteFilter deleteFilter =
+          new LengthAwareDeleteFilter(
+              ctx.io(), task, Rows.SCHEMA, projection, reader.footerPrefetchBytes(), deleteCache,
+              scanDeletes);
+      Schema required = deleteFilter.requiredSchema();
+      Evaluator residual =
+          filter == Expressions.alwaysTrue() ? null : new Evaluator(required.asStruct(), filter);
+      InternalRecordWrapper wrapper = new InternalRecordWrapper(required.asStruct());
+      VersionedInputFile in =
+          new VersionedInputFile(
+              stored, df.fileSizeInBytes(), tail, reader.footerPrefetchBytes(), chunks);
+      decode(deleteFilter, in, required, filter, start, length, residual, wrapper, rows);
+    }
+  }
+
+  private static void decode(
+      LengthAwareDeleteFilter deleteFilter,
+      VersionedInputFile in,
+      Schema required,
+      Expression filter,
+      long start,
+      long length,
+      Evaluator residual,
+      InternalRecordWrapper wrapper,
+      Consumer<Record> rows)
+      throws IOException {
     try (Spans.Span decode = Spans.open(Spans.Kind.DECODE);
         CloseableIterable<Record> rs =
             deleteFilter.filter(ParquetReads.open(in, required, filter, start, length))) {
@@ -203,8 +229,20 @@ final class Scans {
    */
   static TableHash readAll(ArmContext ctx, Reader reader, List<ReadFile> files, Expression filter)
       throws IOException {
+    DeleteCache deletes = reader.deleteCache() ? new DeleteCache() : null;
+    try {
+      return readAll(ctx, reader, files, filter, deletes);
+    } finally {
+      if (deletes != null) {
+        deletes.close();
+      }
+    }
+  }
+
+  private static TableHash readAll(
+      ArmContext ctx, Reader reader, List<ReadFile> files, Expression filter, DeleteCache deletes)
+      throws IOException {
     List<Callable<TableHash>> tasks = new ArrayList<>();
-    Map<String, PositionDeleteIndex> deletes = reader.deleteCache() ? new ConcurrentHashMap<>() : null;
     for (ReadFile f : files) {
       if (reader.skipDeadRowGroups() && deadWhole(f)) {
         continue; // its DV covers every row
@@ -285,7 +323,7 @@ final class Scans {
       DataFile df,
       DeleteFile[] deletes,
       byte[] tail,
-      Map<String, PositionDeleteIndex> deleteCache) {
+      DeleteCache deleteCache) {
     FileScanTask task =
         new BaseFileScanTask(
             df,
@@ -293,10 +331,17 @@ final class Scans {
             SCHEMA_JSON,
             SPEC_JSON,
             ResidualEvaluator.unpartitioned(Expressions.alwaysTrue()));
-    LengthAwareDeleteFilter filter =
-        new LengthAwareDeleteFilter(
-            ctx.io(), task, Rows.SCHEMA, Rows.SCHEMA, footerPrefetch, deleteCache);
-    PositionDeleteIndex deleted = filter.deletedRowPositions();
+    // without the read's cache, what planning loads is held while it plans
+    try (DeleteCache planning = deleteCache == null ? new DeleteCache() : null) {
+      LengthAwareDeleteFilter filter =
+          new LengthAwareDeleteFilter(
+              ctx.io(), task, Rows.SCHEMA, Rows.SCHEMA, footerPrefetch,
+              deleteCache == null ? planning : deleteCache, null);
+      return deadRowGroups(filter.deletedRowPositions(), tail);
+    }
+  }
+
+  private static Set<Long> deadRowGroups(PositionDeleteIndex deleted, byte[] tail) {
     if (deleted == null || deleted.isEmpty()) {
       return Set.of();
     }
@@ -320,7 +365,7 @@ final class Scans {
       FileScanTask task,
       List<FileScanTask> splits,
       byte[] tail,
-      Map<String, PositionDeleteIndex> deleteCache) {
+      DeleteCache deleteCache) {
     Set<Long> dead =
         deadRowGroups(
             ctx, reader.footerPrefetchBytes(), task.file(), task.deletes().toArray(new DeleteFile[0]),
@@ -344,6 +389,196 @@ final class Scans {
       }
     }
     return true;
+  }
+
+  /**
+   * Reads the files in event-time order ({@code ts}, then {@code id}), as a merge of sorted runs,
+   * one per row group, on one thread. The read fetches each file's footer once and opens each row
+   * group only when the merge reaches its smallest {@code ts} (its statistics), so it holds at once
+   * only the row groups whose event times overlap: one per run in flight ({@link ChunksHeld}). A
+   * file of at most 1 MiB, which Iceberg fetches whole, is decoded and sorted in memory as one run,
+   * its rows held until merged. Every run must come out sorted, so every write must be
+   * ({@code sortWrites}) and the initial load's event times in id order ({@code
+   * initialJitterRows} 0); a row out of order fails the read. Needs {@code footerCache}; with
+   * {@code deleteCache}, each file's deletes load once.
+   */
+  static TableHash readSorted(ArmContext ctx, Reader reader, List<ReadFile> files)
+      throws IOException {
+    if (!reader.footerCache()) {
+      throw new IllegalArgumentException(
+          "Reader " + reader.name() + ": a sorted read plans from footers, so needs footerCache");
+    }
+    try (DeleteCache deletes = reader.deleteCache() ? new DeleteCache() : null) {
+      List<Run> runs = new ArrayList<>();
+      for (ReadFile f : files) {
+        if (reader.skipDeadRowGroups() && deadWhole(f)) {
+          continue; // its DV covers every row
+        }
+        long size = f.file().fileSizeInBytes();
+        if (size <= EAGER_BYTES) {
+          runs.add(new Run(f, null, -1, -1, Long.MIN_VALUE)); // fetched whole: opened first
+          continue;
+        }
+        byte[] tail = readTail(ctx, reader, f.file().location(), size);
+        for (RowGroup rg : FooterCodec.read(tail, 0, tail.length - 8).getRow_groups()) {
+          runs.add(
+              new Run(f, tail, FooterCodec.startOffset(rg), FooterCodec.compressedSize(rg),
+                  minTs(rg)));
+        }
+      }
+      runs.sort(Comparator.comparingLong(Run::minTs));
+      return merge(ctx, reader, runs, deletes);
+    }
+  }
+
+  /** A row group of a merge, a sorted run: all of a small file ({@code start} -1), or one. */
+  private record Run(ReadFile file, byte[] tail, long start, long length, long minTs) {}
+
+  private static final int TS_COLUMN = Rows.SCHEMA.columns().indexOf(Rows.SCHEMA.findField("ts"));
+
+  /** A row group's smallest {@code ts}, from its statistics; the least long without them. */
+  private static long minTs(RowGroup rg) {
+    var meta = rg.getColumns().get(TS_COLUMN).getMeta_data();
+    if (!meta.isSetStatistics() || !meta.getStatistics().isSetMin_value()) {
+      return Long.MIN_VALUE;
+    }
+    byte[] b = meta.getStatistics().getMin_value();
+    return ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN).getLong();
+  }
+
+  private static TableHash merge(
+      ArmContext ctx, Reader reader, List<Run> runs, DeleteCache deletes) throws IOException {
+    TableHash h = new TableHash();
+    PriorityQueue<OpenRun> open =
+        new PriorityQueue<>(
+            Comparator.comparingLong((OpenRun o) -> o.ts).thenComparingLong(o -> o.id));
+    int next = 0;
+    long lastTs = Long.MIN_VALUE;
+    long lastId = Long.MIN_VALUE;
+    try (Spans.Span decode = Spans.open(Spans.Kind.DECODE)) {
+      try {
+        while (true) {
+          // every run that may hold a row at or before the smallest open one is opened first
+          while (next < runs.size() && (open.isEmpty() || runs.get(next).minTs() <= open.peek().ts)) {
+            OpenRun o = OpenRun.open(ctx, reader, runs.get(next++), deletes);
+            if (o.advance()) {
+              open.add(o);
+            } else {
+              o.close();
+            }
+          }
+          OpenRun o = open.poll();
+          if (o == null) {
+            return h;
+          }
+          if (o.ts < lastTs || (o.ts == lastTs && o.id < lastId)) {
+            o.close();
+            throw new IllegalStateException(
+                "Sorted read out of order: row " + o.id + " at ts " + o.ts + " after row " + lastId
+                    + " at ts " + lastTs + ", in " + o.what);
+          }
+          lastTs = o.ts;
+          lastId = o.id;
+          h.add(o.row, ctx.verifyRows());
+          if (o.advance()) {
+            open.add(o);
+          } else {
+            o.close();
+          }
+        }
+      } finally {
+        for (OpenRun o : open) {
+          o.close();
+        }
+      }
+    }
+  }
+
+  /** An open run of a merge: its rows, and the one it gives next. */
+  private static final class OpenRun implements AutoCloseable {
+    private final String what;
+    private final Iterator<Record> rows;
+    private final AutoCloseable resources;
+    private Record row;
+    private long ts;
+    private long id;
+
+    private OpenRun(String what, Iterator<Record> rows, AutoCloseable resources) {
+      this.what = what;
+      this.rows = rows;
+      this.resources = resources;
+    }
+
+    /**
+     * A row group's scan, pulled a row at a time; or a small file, read whole and sorted in
+     * memory, its rows held until merged.
+     */
+    static OpenRun open(ArmContext ctx, Reader reader, Run run, DeleteCache deletes)
+        throws IOException {
+      DataFile df = run.file().file();
+      String what = df.location() + (run.start() < 0 ? "" : " at " + run.start());
+      if (run.start() < 0) {
+        List<Record> rows = new ArrayList<>();
+        scan(ctx, reader, df, run.file().deletes(), Rows.SCHEMA, Expressions.alwaysTrue(), null,
+            -1, -1, deletes, rows::add);
+        rows.sort(
+            Comparator.comparingLong((Record r) -> (Long) r.get(Rows.TS))
+                .thenComparingLong(r -> (Long) r.get(Rows.ID)));
+        Held.Scope held = Held.scope("merged " + what);
+        held.hold(Held.Kind.ROWS, rows.size(), "read " + what + " whole to sort");
+        return new OpenRun(what, rows.iterator(), held);
+      }
+      FileScanTask task =
+          new BaseFileScanTask(
+              df, run.file().deletes(), SCHEMA_JSON, SPEC_JSON,
+              ResidualEvaluator.unpartitioned(Expressions.alwaysTrue()));
+      ChunksHeld chunks = new ChunksHeld(df);
+      Held.Scope scanDeletes = Held.scope("scan's deletes released");
+      LengthAwareDeleteFilter filter =
+          new LengthAwareDeleteFilter(
+              ctx.io(), task, Rows.SCHEMA, Rows.SCHEMA, reader.footerPrefetchBytes(), deletes,
+              scanDeletes);
+      VersionedInputFile in =
+          new VersionedInputFile(
+              ctx.io().newInputFile(df.location(), df.fileSizeInBytes() - run.tail().length),
+              df.fileSizeInBytes(), run.tail(), reader.footerPrefetchBytes(), chunks);
+      CloseableIterable<Record> rs =
+          filter.filter(
+              ParquetReads.open(in, filter.requiredSchema(), Expressions.alwaysTrue(),
+                  run.start(), run.length()));
+      return new OpenRun(
+          what,
+          rs.iterator(),
+          () -> {
+            try {
+              rs.close();
+            } finally {
+              scanDeletes.close();
+              chunks.close();
+            }
+          });
+    }
+
+    boolean advance() {
+      if (!rows.hasNext()) {
+        return false;
+      }
+      row = rows.next();
+      id = (Long) row.get(Rows.ID);
+      ts = (Long) row.get(Rows.TS);
+      return true;
+    }
+
+    @Override
+    public void close() throws IOException {
+      try {
+        resources.close();
+      } catch (IOException | RuntimeException e) {
+        throw e;
+      } catch (Exception e) {
+        throw new IOException(e);
+      }
+    }
   }
 
   /**

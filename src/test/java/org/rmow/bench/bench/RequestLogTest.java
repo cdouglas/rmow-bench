@@ -58,7 +58,7 @@ class RequestLogTest {
   }
 
   private static List<JsonNode> run(BenchConfig cfg, Path dir) throws IOException {
-    new Runner(cfg, dir, "t", new Runner.Options(null, false, false, true)).run();
+    new Runner(cfg, dir, "t", new Runner.Options(null, false, false, true, false)).run();
     return lines(dir.resolve("steps.jsonl"));
   }
 

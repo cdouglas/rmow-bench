@@ -88,6 +88,33 @@ reads.
 
 ## Harness (rmow-bench)
 
+- [x] **Writers stream** (found and built 2026-10-29). Writers held every row a batch rewrote or
+  merged as an Iceberg record (hundreds of bytes each) until the write, and built every file's rows
+  as records before encoding: harmless at 1–4 MiB row groups, but 14 GB of live heap by batch 2 of
+  the 16 MiB base point. Now RMoW reads, rewrites and encodes one row group at a time, as parts of
+  `merge-read` and `write` (`Phases.part`, recorded once each), and the MoR family keeps each row
+  it reads back as its id and version and makes the rows again as the encoder takes them, as it
+  always made them (a `rows` span keeps that work out of `encode`). Requests, bytes, rows and table
+  state are unchanged in every record of three configurations (1,939 records), and instructions
+  moved by at most 3%. The base point runs in an 8 GB heap (7 batches, no full collection), so the
+  sweep's jobs take 16 GB.
+- [x] **What readers and writers hold** (`Held`, built 2026-10-29): the most each phase held at
+  once, in rows kept to sort or merge and in encoded bytes (column chunks in flight, writers'
+  buffers, encoded data waiting for its request, deletes loaded), counted where the code holds
+  them, so they repeat from run to run as requests and bytes do (README, What is held). The JVM's
+  heap was rejected as the measure (the user's question): it holds the benchmark's own state and
+  moves with the collector, and allocation counters (`ThreadMXBean`, async-profiler) count churn,
+  not what is held. `--log-held` writes every change, for memory against the stages of a phase.
+  A JFR run is still to check that the heap follows the counted levels' shape.
+- [x] **A sorted read** (`read_sorted`, built 2026-10-29, the user's): the table in event-time
+  order, as a merge of its row groups opened as the merge reaches them, so it holds every row group
+  whose event times overlap. It needs every run sorted, so sorted writes and an initial load in
+  event-time order (`initialJitterRows` 0, set in the sweeps). On the calibration's workload with
+  region statements, RMoW-C's sorted read held 0.33 MB of row groups at the start and 1.21 MB by
+  batch 20 (its tail row groups take late inserts, so their event times reach back across older
+  regions), while MoR-v3's small batch files were fetched whole and sorted in memory (36,328 rows
+  held by batch 20).
+
 - [x] **`AzureRecorder` counted the managed identity's token requests** (found and fixed
   2026-10-28). Its policies join every Azure SDK pipeline in the JVM, Azure Identity's too, so on a
   VM the token request to the instance metadata service (a GET with `resource=` in its query)
@@ -313,7 +340,10 @@ lower.
   update share, skew, arrival window and row-group size, for the five arms, with the ingest
   window as a reference. Requests and bytes are exact, so the simulation finds each crossover.
   Eleven configurations (`configs/sweep-*.json`), too large for the laptop: the campaign
-  `docker/campaigns/sweep.json` runs them on havoc, as the user's runs.
+  `docker/campaigns/sweep.json` runs them on havoc, as the user's runs, in 16 GB heaps. Each also
+  reads the table sorted under the cached reader, and logs what every phase held (decided
+  2026-10-29). A first start on havoc was stopped the same day, before the writers streamed and
+  memory was measured; it needs the image rebuilt from the commit that has them.
 - [ ] **Hot-region isolation** (a micro-benchmark question, not a Parquet benchmark). Can RMoW
   isolate frequently updated regions as row groups of their own, and so cut its amplification?
   - RMoW sets row-group boundaries on every rewrite, so it can cut a hot range out as its own row
@@ -326,7 +356,11 @@ lower.
 - [ ] **Register the hypotheses** before the runs that decide them. HYPOTHESES.md was refocused
   on 2026-10-27 on the write and read trade-off; the earlier ones are the file at commit 1145f89.
   - [x] the calibration's C1–C4 (registered 2026-10-27);
-  - [x] the sweeps' U1–U3, K1 and G1 (registered 2026-10-29).
+  - [x] the sweeps' U1–U3, K1 and G1 (registered 2026-10-29);
+  - [x] the sweeps' memory and sorted read, M1–M4 (registered 2026-10-29, after a pilot).
+- [ ] **A JFR run to check the held levels** against the heap: a sorted read of MoR-v3 at the base
+  point, whose counted level climbs by a row group per batch file, should move the heap after
+  collection by about as much. A check of the measure, not a result.
 - [ ] **Cloud campaign,** on the fork build with the five arms, on S3 Express and Azure:
   - the base point;
   - settings on either side of each crossover the sweeps find;

@@ -334,6 +334,10 @@ public final class IoTrace {
           deletes - o.deletes);
     }
 
+    public Counters plus(Counters o) {
+      return minus(o.minus(o).minus(o));
+    }
+
     public long gets() {
       return getRange + getStream;
     }

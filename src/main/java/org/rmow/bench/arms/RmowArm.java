@@ -23,6 +23,7 @@ import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.parquet.format.FileMetaData;
 import org.apache.parquet.format.RowGroup;
 import org.apache.parquet.format.Statistics;
+import org.rmow.bench.io.Held;
 import org.rmow.bench.oracle.TableHash;
 import org.rmow.bench.rmow.FooterCodec;
 import org.rmow.bench.rmow.LogicalFile;
@@ -87,6 +88,9 @@ public final class RmowArm implements Arm {
   private double bytesPerRow = 40; // running estimate, for planning merges
   private long packBytes; // compaction's row-group target: a full row group of the initial load
   private final WriterFooters footers; // what the writer has read in this batch or compaction
+  // what this batch's or compaction's writer holds (rows, regions waiting for their append);
+  // null outside one
+  private Held.Scope held;
 
   public RmowArm(ArmContext ctx, TailPolicy.Kind kind) {
     this(ctx, kind, false);
@@ -249,17 +253,47 @@ public final class RmowArm implements Arm {
       touched.computeIfAbsent(u.id(), k -> new Touched());
     }
 
-    if (!touched.isEmpty()) {
-      ctx.phases().run("merge-read", () -> readTouched(touched));
+    // a row group at a time, as parts of the batch's merge-read and write: read it, rewrite it,
+    // and drop its rows; the open tail row groups the policy merges are read, then written with
+    // the inserts
+    Map<Integer, Pending> pending = new TreeMap<>();
+    Map<Long, List<Long>> idsOfNewRg = new HashMap<>();
+    held = Held.scope("the batch's appends sent");
+    try {
+      for (Map.Entry<Long, Touched> e : touched.entrySet()) {
+        long rg = e.getKey();
+        if (mergeIds.contains(rg)) {
+          continue;
+        }
+        Touched t = e.getValue();
+        ctx.phases().part("merge-read", () -> t.rows = readRowGroup(rg));
+        ctx.phases()
+            .part(
+                "write",
+                () -> {
+                  rewrite(rg, t, pending, idsOfNewRg);
+                  held.release(Held.Kind.ROWS, t.rows.size(), "row group " + rg + " rewritten");
+                });
+        t.rows = null;
+      }
+      for (long rg : mergeIds) {
+        Touched t = touched.get(rg);
+        ctx.phases().part("merge-read", () -> t.rows = readRowGroup(rg));
+      }
+      ctx.phases()
+          .part("write", () -> writeRegions(b, touched, plan, mergeIds, pending, idsOfNewRg));
+    } finally {
+      held.close();
+      held = null;
     }
-    ctx.phases().run("write", () -> writeRegions(b, touched, plan, mergeIds));
     history.add(versions());
   }
 
-  private void readTouched(Map<Long, Touched> touched) throws IOException {
-    for (Map.Entry<Long, Touched> e : touched.entrySet()) {
-      e.getValue().rows = readRowGroup(files.get(fileOfRg.get(e.getKey())), e.getKey());
-    }
+  /** A row group's rows, held until the writer has encoded them. */
+  private List<Record> readRowGroup(long rg) throws IOException {
+    List<Record> rows = readRowGroup(files.get(fileOfRg.get(rg)), rg);
+    held.hold(Held.Kind.ROWS, rows.size(), "read back row group " + rg);
+    return rows;
   }
 
   /** The rows of one row group of {@code f}'s current version, read as a writer reads. */
@@ -319,38 +353,40 @@ public final class RmowArm implements Arm {
                 : new Pending(null, newLocation(String.format("%s/data/rmow-%05d", ctx.root(), i))));
   }
 
+  /**
+   * Row-group-level copy-on-write of a touched row group the tail merge does not absorb: its rows
+   * with the batch's changes, as a new region of its file.
+   */
+  private void rewrite(
+      long rg, Touched t, Map<Integer, Pending> pending, Map<Long, List<Long>> idsOfNewRg)
+      throws IOException {
+    Pending p = pending(pending, fileOfRg.get(rg));
+    p.drop.add(rg);
+    Region r = addRegion(p, t.merged(), idsOfNewRg, inPlace ? rg : null);
+    if (policy.isOpen(rg)) {
+      policy.replace(
+          rg,
+          r == null ? -1 : p.newRgIds.get(p.newRgIds.size() - 1),
+          r == null ? 0 : r.bytes().length);
+    }
+  }
+
+  /** The inserts, with the open tail row groups merged into them, and every file's append. */
   private void writeRegions(
       OpLog.Batch b,
       Map<Long, Touched> touched,
       TailPolicy.Plan plan,
-      Set<Long> mergeIds)
+      Set<Long> mergeIds,
+      Map<Integer, Pending> pending,
+      Map<Long, List<Long>> idsOfNewRg)
       throws IOException {
-    Map<Integer, Pending> pending = new TreeMap<>();
-    Map<Long, List<Long>> idsOfNewRg = new HashMap<>();
-
-    // row-group-level copy-on-write of touched row groups the tail merge does not absorb
-    for (Map.Entry<Long, Touched> e : touched.entrySet()) {
-      long rg = e.getKey();
-      if (mergeIds.contains(rg)) {
-        continue;
-      }
-      Pending p = pending(pending, fileOfRg.get(rg));
-      p.drop.add(rg);
-      Region r = addRegion(p, e.getValue().merged(), idsOfNewRg, inPlace ? rg : null);
-      if (policy.isOpen(rg)) {
-        policy.replace(
-            rg,
-            r == null ? -1 : p.newRgIds.get(p.newRgIds.size() - 1),
-            r == null ? 0 : r.bytes().length);
-      }
-    }
-
     // the inserts, merged with the open tail row groups the policy picked
     if (b.insertIds().length > 0) {
       List<Record> rows = new ArrayList<>(b.insertIds().length);
       for (long id : b.insertIds()) {
         rows.add(Rows.record(id, ctx.log().ts(id), 0));
       }
+      held.hold(Held.Kind.ROWS, rows.size(), "the batch's inserts");
       Pending p = pending(pending, tail >= 0 ? tail : files.size());
       for (long rg : mergeIds) {
         rows.addAll(touched.get(rg).merged());
@@ -359,6 +395,11 @@ public final class RmowArm implements Arm {
       Region r = addRegion(p, rows, idsOfNewRg, null);
       bytesPerRow = r.bytes().length / (double) r.rows();
       policy.commit(plan, p.newRgIds.get(p.newRgIds.size() - 1), r.bytes().length);
+      long merged = 0;
+      for (long rg : mergeIds) {
+        merged += touched.get(rg).rows.size();
+      }
+      held.release(Held.Kind.ROWS, b.insertIds().length + merged, "the inserts' region encoded");
     }
 
     for (Map.Entry<Integer, Pending> e : pending.entrySet()) {
@@ -387,6 +428,11 @@ public final class RmowArm implements Arm {
           ctx.io(), ctx.io(), p.regions, p.drop, p.newRgIds, inPlace ? p.inPlaceOf : null);
     }
     footers.wrote(files.get(k).location(), files.get(k).length());
+    long sent = 0;
+    for (Region r : p.regions) {
+      sent += r.bytes().length;
+    }
+    held.release(Held.Kind.PENDING, sent, "append to " + name(files.get(k).location()) + " sent");
     if (inPlace && outOfOrder(files.get(k)) > 0) {
       throw new IllegalStateException(
           "Footer of " + files.get(k).location() + " lists row groups out of id order");
@@ -425,11 +471,16 @@ public final class RmowArm implements Arm {
       ids.add((Long) r.get(Rows.ID));
     }
     Region region = regions.write(p.location, p.nextBase(), rows);
+    held.hold(Held.Kind.PENDING, region.bytes().length, "a region of " + name(p.location));
     p.regions.add(region);
     p.newRgIds.add(rg);
     p.inPlaceOf.add(inPlaceOf);
     idsOfNewRg.put(rg, ids);
     return region;
+  }
+
+  private static String name(String location) {
+    return location.substring(location.lastIndexOf('/') + 1);
   }
 
   // --- locating the rows a batch changes --------------------------------------------------------
@@ -522,6 +573,21 @@ public final class RmowArm implements Arm {
     return h;
   }
 
+  @Override
+  public TableHash readSorted(Reader reader) throws IOException {
+    List<Scans.ReadFile> toRead = new ArrayList<>();
+    for (LogicalFile f : files) {
+      if (f.liveRows() == 0) {
+        continue;
+      }
+      if (f.current().footerOnly()) {
+        throw new UnsupportedOperationException("A sorted read of split files: " + f.location());
+      }
+      toRead.add(new Scans.ReadFile(f.dataFile(), NO_DELETES));
+    }
+    return Scans.readSorted(ctx, reader, toRead);
+  }
+
   /**
    * Old versions are planned as a snapshot's manifest entries would plan them: an ordinary
    * version with the split offsets of its own footer, so stock readers split it per row group as
@@ -570,6 +636,16 @@ public final class RmowArm implements Arm {
    */
   @Override
   public void compact() throws IOException {
+    held = Held.scope("the compaction's appends sent");
+    try {
+      compactHeld();
+    } finally {
+      held.close();
+      held = null;
+    }
+  }
+
+  private void compactHeld() throws IOException {
     footers.begin();
     LayoutSpec layout = ctx.layout();
     for (int i = 0; i < files.size(); i++) {
@@ -689,8 +765,10 @@ public final class RmowArm implements Arm {
       for (long rg : g) {
         rows.addAll(readRowGroup(f, rg));
       }
+      held.hold(Held.Kind.ROWS, rows.size(), "read back a pack of " + name(f.location()));
       p.drop.addAll(g);
       addRegion(p, rows, idsOfNewRg, inPlace ? g.get(0) : null);
+      held.release(Held.Kind.ROWS, rows.size(), "a pack of " + name(f.location()) + " encoded");
     }
     commit(i, p, idsOfNewRg);
     f.dataFile();
@@ -730,6 +808,12 @@ public final class RmowArm implements Arm {
           group);
     }
 
+    long read = 0;
+    for (List<Record> rs : byRg.values()) {
+      read += rs.size();
+    }
+    held.hold(Held.Kind.ROWS, read, "read back " + name(f.location()) + " whole");
+
     // pack the row groups in id order (footer order puts rewritten row groups last) into row
     // groups of up to the writer's size, as bin-packing does (MorArm.compact), so a full row
     // group stays as it is and the packed ones keep disjoint id ranges
@@ -753,6 +837,12 @@ public final class RmowArm implements Arm {
     }
     addRegion(p, packed, idsOfNewRg, null);
     LogicalFile compacted = create(p);
+    held.release(Held.Kind.ROWS, read, name(f.location()) + " rewritten");
+    long sent = 0;
+    for (Region r : p.regions) {
+      sent += r.bytes().length;
+    }
+    held.release(Held.Kind.PENDING, sent, name(compacted.location()) + " created");
     footers.wrote(compacted.location(), compacted.length());
     compacted.dataFile();
     for (long rg : f.rgIds()) {

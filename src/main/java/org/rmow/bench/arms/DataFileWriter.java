@@ -1,6 +1,7 @@
 package org.rmow.bench.arms;
 
 import java.io.IOException;
+import java.util.List;
 import java.util.Map;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DataFiles;
@@ -11,6 +12,7 @@ import org.apache.iceberg.data.parquet.GenericParquetWriter;
 import org.apache.iceberg.io.FileAppender;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.parquet.Parquet;
+import org.rmow.bench.io.Held;
 import org.rmow.bench.io.Spans;
 import org.rmow.bench.workload.Rows;
 
@@ -29,9 +31,30 @@ public final class DataFileWriter {
   public static DataFile write(
       FileIO io, String location, Iterable<Record> rows, Map<String, String> writerProperties)
       throws IOException {
+    DataFile df;
     try (Spans.Span s = Spans.open(Spans.Kind.ENCODE)) {
-      return encode(io, location, rows, writerProperties);
+      df = encode(io, location, rows, writerProperties);
     }
+    Held.pulse(Held.Kind.WRITER, largestRowGroup(df),
+        "encode " + location.substring(location.lastIndexOf('/') + 1));
+    return df;
+  }
+
+  /**
+   * The largest row group a writer buffered for {@code df}, from its split offsets (the last one
+   * runs to the end, its footer included).
+   */
+  static long largestRowGroup(DataFile df) {
+    List<Long> offsets = df.splitOffsets();
+    if (offsets == null || offsets.isEmpty()) {
+      return df.fileSizeInBytes();
+    }
+    long largest = 0;
+    for (int i = 0; i < offsets.size(); i++) {
+      long end = i + 1 < offsets.size() ? offsets.get(i + 1) : df.fileSizeInBytes();
+      largest = Math.max(largest, end - offsets.get(i));
+    }
+    return largest;
   }
 
   private static DataFile encode(
