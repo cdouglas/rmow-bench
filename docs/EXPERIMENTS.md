@@ -594,6 +594,10 @@ sweeps' (2026-10-29). The sweeps' M1–M4, on memory, are not the cpu measure's 
 | K1 | Skew moves the region arms' writes, not MoR-v3's, nor the full reads | **Open:** the sweeps. |
 | G1 | Bigger row groups cost the region arms' writes | **Open:** the sweeps. |
 | M1–M4 (memory) | A sorted read holds MoR-v3's batch files at once; RMoW-C's holds less, but grows too; RMoW-C's batch holds more bytes than MoR-v3's; RMoR-C sorts its whole batch file | **Open:** the sweeps. |
+| C5 | The base point's cloud runs send what the twins count (a control) | **Open:** the base point in the cloud, S3 Express first. |
+| C6 | Priced by request size, each arm's mean batch and full read is within 25% of its wall time | **Open:** the base point in the cloud. |
+| C7 | At the base point the trade-off falls where the laptop twin puts it: the region arms' batches slower than MoR-v3's on both stores | **Open:** the base point in the cloud. |
+| C8 | At the base point a phase is mostly CPU: the store takes under half of every mean batch and full read | **Open:** the base point in the cloud. |
 | H6 | When to compact | **Mixed** (unchanged on the reruns). The read half held for RMoW-B, not RMoW-C; the space and write-for-read halves held; the costs half held for split RMoW, not for MoR-v3 (its cheapest on S3 Express is every 10 batches, 4%). |
 
 ## What is next

@@ -249,3 +249,112 @@ single create (175 MB in the pilot); deletes held by readers.
 (a sort in memory without spilling, one append per file, a merge that opens a row group per run);
 another engine could stream differently, so the measure compares the designs as written, not
 every implementation of them. A JFR run is still to check that the heap follows the counted levels.
+
+## The base point in the cloud (registered 2026-10-30)
+
+**What they decide:** whether the latency model, priced by request size, holds at the sweeps'
+scale on the real stores, where a read is mostly 16 MiB ranges and a region arm's batch rewrites
+whole regions of 15.2 MiB; and where the trade-off falls at the base point on each store,
+measured. At the calibration's scale (1 MiB row groups) the region arms' batches were predicted
+faster than MoR-v3's on Azure; here every region arm's batch is predicted slower on both stores.
+
+**Setup:** `configs/sweep-base.json` (the sweeps' base point, 2026-10-29), run by the deploy's
+`bench` step as `sweep-base-s3x` on S3 Express (usw2-az3, from a `c7a.4xlarge`) and then
+`sweep-base-azure` on Azure Blob (ADLS Gen2, Standard, westus, from a `D8as_v6`): one run each,
+a 16 GB heap, requests and held memory logged (`--log-requests --log-held`). The build is
+f51796a, the laptop twin's (its build snapshot `20261030T054758Z-f51796a7d09b-dirty` is dirty in
+`bin/matrix.sh` only); its `src/main` and `pom.xml` are havoc's sweeps' (a5e2ee2 on, unchanged
+since but for a Javadoc). Each store's spike, from main, runs on the same VM just before. The VMs
+allow instruction counts (`perf_event_paranoid` 2, from 2026-10-30), which the calibration's
+lacked; each run's manifest says whether the hypervisor gave them. The twins: the laptop's
+`sweep-base-f970149711a9/20261030T054758Z`, with instruction counts, and havoc's
+`sweep-base-f970149711a9/20261030T055938Z`, whose CPU decides nothing (every phase under foreign
+load).
+
+**The model** (`lab/views/65_sized.sql`): a one-thread phase takes its CPU plus each logged
+request's expected latency at its size, from a spike: the lognormal mean at each size measured
+(64 KiB to 128 MiB), linear between them, flat below, the last slope beyond, a smaller size never
+priced above a larger one; an appendable create costs an append of its size plus the create's
+overhead; an append past Azure's 100 MiB cap is several. Its rules were drawn from the
+calibration's runs, where it put each arm's batches within 25% in 83–100% of phases on S3 Express
+and 72–92% on Azure, and reads apart from `stock` in 80% and 89% (ROADMAP.md, A profile priced by
+request size). This is its first test on runs it was not drawn from, and its first at sizes past
+1 MiB.
+
+**Requests and bytes, from the twin** (exact, and the same on both stores; means over batches 1–30
+and the full reads after the initial load, steps 5–30, under `cached`, RMoR-C's also under
+`cached-skip`):
+
+| Arm | A batch: requests | of them PUTs and appends | MB read | MB written | A full read: requests | MB read |
+|---|---|---|---|---|---|---|
+| MoR-v3 | 128.4 | 2.0 | 38.3 | 17.4 | 116.0 | 1,050 |
+| TailCoW-C | 128.4 | 2.0 | 38.3 | 17.4 | 116.0 | 1,050 |
+| RMoR-C | 118.2 | 2.0 | 459 | 438 | 285.7 (87.2) | 4,096 (973) |
+| RMoR-C with footers | 86.2 | 4.6 | 456 | 438 | 76.3 | 973 |
+| RMoW-C | 36.7 | 6.2 | 224 | 236 | 77.2 | 968 |
+
+MoR-v3's batch file is about 15 MiB, at the tail seal, so TailCoW-C seals each at once and sends
+what MoR-v3 sends (as the sweeps' M1 expects). RMoR-C's batch file is one PUT of 418 MiB on
+average (up to 735 MiB); RMoR-C with footers creates the same as an appendable file (3.8 Append
+Blocks beyond the first on Azure, `append_splits`), then appends its footers. RMoW-C's appends
+average 37 MiB (up to 109 MiB), and it creates 3 files in 30 batches.
+
+**Predicted, from the twin** (each arm's mean batch and mean full read under `cached`, over
+MoR-v3's; the twin's work at its arm's pace, `phase_work`, plus its requests priced with the
+2026-10-28 spikes, `spike/s3x-spike-20261028T221407Z` and `spike/azure-spike-20261028T233151Z`):
+
+| Arm | S3 Express: a batch | a full read | Azure Blob: a batch | a full read |
+|---|---|---|---|---|
+| TailCoW-C | 1.02 | 1.00 | 1.01 | 1.00 |
+| RMoR-C | 6.59 | 3.85 (`cached-skip` 0.96) | 4.94 | 3.78 (0.95) |
+| RMoR-C with footers | 6.23 | 0.87 | 4.75 | 0.87 |
+| RMoW-C | 2.98 | 0.85 | 2.21 | 0.87 |
+
+MoR-v3's simulated batch takes 4.5 s on S3 Express and 6.6 s on Azure, its full read 20.6 s and
+22.9 s. The requests' share of each simulated phase (C8):
+
+| Arm | S3 Express: a batch | a full read | Azure Blob: a batch | a full read |
+|---|---|---|---|---|
+| MoR-v3 | 0.19 | 0.35 | 0.44 | 0.42 |
+| TailCoW-C | 0.18 | 0.35 | 0.44 | 0.42 |
+| RMoR-C | 0.23 | 0.35 (`cached-skip` 0.34) | 0.30 | 0.40 (0.40) |
+| RMoR-C with footers | 0.25 | 0.37 | 0.33 | 0.43 |
+| RMoW-C | 0.27 | 0.37 | 0.33 | 0.45 |
+
+- **C5: the cloud runs send what the twins count** (a control). Every record's requests and
+  bytes, and every one-thread phase's held peaks (`held_*`), equal the laptop twin's, as havoc's
+  run's do (all 1,325 records). A parallel read's held peak depends on how its tasks interleave:
+  havoc's `cached-p8` reads differ from the laptop's by under 0.6% in 38 records. S3
+  Express's `CreateSession` is outside the model; on Azure, an appendable create costs a staged
+  Append Blob, an Append Block and a rename, and an append past 100 MiB several Append Blocks.
+- **C6: a phase's time is its CPU plus its requests' prices, by size.** Priced with its own VM's
+  spike, each arm's mean batch and mean full read under `cached` (RMoR-C's also under
+  `cached-skip`), simulated as its thread CPU on the wall clock plus its requests' prices, is
+  within 25% of its mean wall time, on both stores.
+- **C7: the trade-off falls where the twin puts it.** Each ratio in the first table lands on the
+  same side of 1 in the cloud run's mean wall times, wherever the prediction is at least 10% from
+  1. So on both stores the region arms' batches are slower than MoR-v3's, the full reads of RMoW-C
+  and RMoR-C with footers faster, and RMoR-C's full read under `cached` slower. TailCoW-C's ratios
+  and RMoR-C's under `cached-skip` are not judged.
+- **C8: at this scale a phase is mostly CPU, on both stores.** In `phase_breakdown`, the store
+  (store client CPU and waiting on the store) takes less than half of the wall time of every
+  arm's mean batch and mean full read under `cached` (RMoR-C's also under `cached-skip`), on both
+  stores: 18–27% of the batches and 34–37% of the full reads simulated on S3 Express, 30–44% and
+  40–45% on Azure. The calibration's C4, at 1 MiB row groups, predicted CPU under a third of every
+  phase on Azure.
+
+**Measured, not judged:**
+- each request's time against its price, by op and size (the cloud run's request log);
+- the share of one-thread phases within 25%, per arm and phase;
+- the reads under `cached-p8` (parallel, not modelled), `one-footer` and `stock` (whose streamed
+  GETs of 64 KiB or less the model prices at half their time), and the sorted read;
+- the new VM's spike against the 2026-10-28 spikes.
+
+**Limits:** one run per store to begin with. The model's rules were drawn from the calibration's
+runs; its prices past 128 MiB extrapolate the spike's last slope. A PUT past 48 MiB is a multipart
+upload on S3 (Iceberg's `S3OutputStream`), whose parts go out while the file is still being
+written, where the model prices one request of its size after the CPU; RMoR-C's batch file is
+3.5 s of its 29.8 s simulated on S3 Express. A phase's thread CPU includes the client's (TLS, checksums),
+which the spike's latencies include too, so it counts twice. CPU on the cloud VMs runs at its own
+pace, which moved the calibration's S3 Express ratios by up to 0.12 across runs; the full-read
+ratios C7 judges sit 13–15% from 1.
