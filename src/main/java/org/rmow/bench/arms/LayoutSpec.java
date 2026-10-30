@@ -57,9 +57,10 @@ public final class LayoutSpec {
    */
   public String footerOrder = "logical";
   /**
-   * Readers (every arm, data and delete files alike) prefetch this many trailing bytes on a
-   * file's first footer probe, so a footer that fits costs one request. 0: stock parquet-java,
-   * which reads the 8-byte tail and then the footer, two requests.
+   * Writers (every arm's locate scans, merge reads and compaction, data and delete files alike)
+   * prefetch this many trailing bytes on a file's first footer probe, so a footer that fits costs
+   * one request. 0: stock parquet-java, which reads the 8-byte tail and then the footer, two
+   * requests. Each reader model sets its own ({@code reads.readers}).
    */
   public int footerPrefetchBytes = 0;
 

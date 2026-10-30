@@ -19,7 +19,7 @@ built there. The approach is the shield harness's (`~/work/shield/shield-rs/dock
 
 ## Running a campaign
 
-The repository has no remote, so the code travels as a bundle of `main`. The atomicio fork
+The repository's remote (`self`, on GitHub) is private, so the code travels as a bundle of `main`. The atomicio fork
 (`1.12.0-atomicio-SNAPSHOT`) is in no remote Maven repository either, so its artifacts travel as
 a tar from the laptop's `~/.m2` (`fork-m2.sh`), and `build` installs them in the image's. Every
 run's manifest names the fork's commit (`versions.iceberg`); repack after rebuilding the fork.

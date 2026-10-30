@@ -116,6 +116,7 @@ a new hash under the same label.
 | **scale** (`configs/scale-recency-*`, on havoc) | Do the 4 MiB recency setting's requests, bytes, CPU and simulated latency hold at Iceberg's defaults (P1–P6)? | row group R = tail seal = 4, 16, 64, 128 MiB, with rows, operations per batch and files scaled by R; recency, no compaction, payload checks off, requests logged | MoR-v3, TailCoW-C, RMoW-B and -C in both layouts | 4, 4 in the rerun, 4 on the laptop | [lab/pages/scale.md](../lab/pages/scale.md). CPU decided on the laptop, in instructions: on havoc, foreign load and then noise beyond it left it undecided. |
 | **cpu measure** (`configs/cal-cpu-recency-4m.json`) | How to measure CPU so that one phase can decide a 10% question (M1–M4)? | the measure: thread CPU time against each thread's user-mode instructions and cycles (`perf_event_open`); the 4 MiB scale setting, all six arms, `cached` and `cached-p8`, run twice | all six of the scale campaign | 2 | [lab/pages/cpu-measure.md](../lab/pages/cpu-measure.md) |
 | **dv ablation** (`configs/local-dv-*`) | H3's attribution: how much of RMoW against TailCoW is the layout, and how much the update handling (region rewrites against DVs)? | key distribution (recency, uniform); 4 MiB, no compaction | MoR-v3, CoW, TailCoW-B and -C, RMoW-A, -B and -C, RMoW-A-dv, -B-dv and -C-dv | 3, deleted | Conclusions in [DESIGN.md](DESIGN.md#deletion-vectors-on-an-appendable-file-an-ablation-removed); numbers under Retired runs. |
+| **sweeps** (`configs/sweep-*`, on havoc) | U1–U3, K1, G1: where the region arms' extra write cost is repaid against MoR-v3 while a batch changes a minority of the regions; M1–M4 of 2026-10-29: what the arms hold in memory, and a sorted read. | from a base point of 16 MiB row groups (`sweep-base`), one axis at a time: update share p = 0.03, 0.1, 0.3; region skew 0, 1, 2; row groups 16, 32, 64 MiB; insert lateness with a p99 of 1, 5 and 20 batches; the ingest window, by statement and a row a change. No compaction, payload checks off, requests and held memory logged | MoR-v3, TailCoW-C, RMoR-C, RMoR-C with footers, RMoW-C | 11 on havoc, running (2026-10-29), and a laptop twin of the base point, with counters, for the cloud runs | None yet. |
 
 The compaction sweep's threshold levels:
 
@@ -573,7 +574,8 @@ Against the runs they replaced (controls K1–K3):
 ## The hypotheses
 
 H1–H6 are HYPOTHESES.md as of commit 1145f89; the refocused file (2026-10-27) carries
-what they settled, and the calibration's C1–C4, decided by the cloud runs of 2026-10-28.
+what they settled, the calibration's C1–C4, decided by the cloud runs of 2026-10-28, and the
+sweeps' (2026-10-29). The sweeps' M1–M4, on memory, are not the cpu measure's M1–M4.
 
 | | Claim, in short | Status |
 |---|---|---|
@@ -586,6 +588,12 @@ what they settled, and the calibration's C1–C4, decided by the cloud runs of 2
 | C2 | A phase's time is its CPU plus its requests' latencies, within 25%, priced with the measured latencies | **Contradicted** as registered: the spikes' profiles misprice small GETs. The structure holds (0.6% unexplained). |
 | C3 | The trade-off falls where the twins put it | **Contradicted** for S3 Express's batches (the region arms beat MoR-v3) and RMoR-C with footers' batch on Azure; held for every judged full read. |
 | C4 | CPU is the bottleneck only of the region arms' batches on S3 Express | **Held** on S3 Express (56–67%), **contradicted** on Azure (RMoW-C's batches 39%, more than a third). |
+| U1 | A region rewrite pays more as the update share p rises: the region arms' batch time over MoR-v3's is lower at p = 0.3 than at 0.03 | **Open:** the sweeps, on havoc. |
+| U2 | RMoW-C's batch takes fewer requests and less time than both RMoR-C arms' at every p | **Open:** the sweeps. |
+| U3 | No region arm writes fewer bytes than MoR-v3, at any p | **Open:** the sweeps. |
+| K1 | Skew moves the region arms' writes, not MoR-v3's, nor the full reads | **Open:** the sweeps. |
+| G1 | Bigger row groups cost the region arms' writes | **Open:** the sweeps. |
+| M1–M4 (memory) | A sorted read holds MoR-v3's batch files at once; RMoW-C's holds less, but grows too; RMoW-C's batch holds more bytes than MoR-v3's; RMoR-C sorts its whole batch file | **Open:** the sweeps. |
 | H6 | When to compact | **Mixed** (unchanged on the reruns). The read half held for RMoW-B, not RMoW-C; the space and write-for-read halves held; the costs half held for split RMoW, not for MoR-v3 (its cheapest on S3 Express is every 10 batches, 4%). |
 
 ## What is next
@@ -607,8 +615,12 @@ would need its own arms and reader checks.
   - The compaction sweep, until now only a static report, gets a lab page.
   - A summary page holds every number the post quotes.
 - **Done: the cloud calibration** on S3 Express and Azure (2026-10-28,
-  [lab/pages/cloud.md](../lab/pages/cloud.md)). Next there: a profile from the spikes priced by
-  request size, to test the latency model.
+  [lab/pages/cloud.md](../lab/pages/cloud.md)). A profile that prices each logged request at its
+  size from the spikes (lab/views/65_sized.sql, 2026-10-29) fits the calibration's requests better
+  than the spikes' latency-plus-slope; the base point's cloud runs are its first test.
+- **Running: the sweeps** on havoc (2026-10-29), and a laptop twin of their base point. **Next:**
+  the base point on S3 Express, then Azure, through the deploy's `bench` step, once its hypotheses
+  are registered.
 - **Both calibrations run the five arms new campaigns run** (MoR-v3, TailCoW-C, RMoR-C, RMoR-C
   with footers, RMoW-C) since 2026-10-27, RMoR-C with the writer that skips dead row groups and a `cached-skip` reader beside
   the others, and their spikes time GETs by size for the read rate per MiB.
@@ -617,8 +629,6 @@ would need its own arms and reader checks.
   - a CDC-like workload with late arrivals;
   - a server core's pace on havoc. P3–P5 were decided on this laptop; havoc could check them once
     an admin allows counters (`sysctl -w kernel.perf_event_paranoid=2`; it is 4);
-  - docker/README.md still says the repository has no remote; it has one (`self`, on GitHub), so
-    havoc could pull instead of taking a bundle;
   - split files on standard S3.
 - **Gaps in the old runs**, which the rerun closes:
   - no `cached` reader model in runs before 2026-10-23, so MoR-v3's and TailCoW's reads load a

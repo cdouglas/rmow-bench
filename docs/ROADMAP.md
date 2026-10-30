@@ -459,5 +459,4 @@ lower.
 ## Still open from before
 
 - A second seed, and repetitions.
-- docker/README.md says the repository has no remote; it has one (`self`).
 - A server core's pace on havoc, if an admin allows counters.

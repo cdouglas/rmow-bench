@@ -43,8 +43,9 @@ bin/matrix.sh --build configs/local-compact-*.json   # several, from a build sna
   configs, and the diff if the tree is dirty), so you can keep editing and rebuilding while runs
   go. Each run's manifest names its snapshot.
 - **Flags:** `--dump-versions` keeps every version of the appendable objects for
-  `analysis/interop_check.py`, `--keep-store` keeps the objects, and `--log-requests` writes every
-  request to `requests.jsonl` for the latency replay. `store.latency` in a config injects a
+  `analysis/interop_check.py`, `--keep-store` keeps the objects, `--log-requests` writes every
+  request to `requests.jsonl` for the latency replay, and `--log-held` every change of what the
+  phases hold to `held.jsonl` (README, What is held). `store.latency` in a config injects a
   simulated store's latency (README).
 - **Never edit `bin/matrix.sh` while it runs:** bash reads the script as it goes.
 - **Campaigns too large for the laptop** (the production-sized `scale`) run on havoc, in a

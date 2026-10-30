@@ -27,10 +27,11 @@ as updates accumulate. Ingest in rough timestamp order, where updates mostly hit
 the case of most interest. The measurement is of I/O; this does not patch Iceberg to accept the
 layout.
 
-Four documents go with this one:
+Five documents go with this one:
 - [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md): a map of what has been run, what each experiment
   varied and found, and where each hypothesis stands. Start here.
-- [docs/PLAN.md](docs/PLAN.md): the plan, with its milestones.
+- [docs/ROADMAP.md](docs/ROADMAP.md): the outstanding work, and what was decided about it.
+- [docs/PLAN.md](docs/PLAN.md): the original plan, with its milestones.
 - [docs/DESIGN.md](docs/DESIGN.md): the format-level findings and the writer's rules.
 - [docs/HYPOTHESES.md](docs/HYPOTHESES.md): the question, what is settled, and the hypotheses of
   the runs to come, each fixed before them (the earlier ones: the file at commit 1145f89).
@@ -59,16 +60,23 @@ bin/matrix.sh --build configs/local-m1-*.json
 ```
 
 The snapshot holds the jar, hard links to its released dependencies, the configurations, and for a
-dirty tree the diff and the untracked files; each run's manifest names it. Runs keep their objects
-under `store/` and delete them when they end (`--keep-store` keeps them).
+dirty tree the diff and the untracked files; each run's manifest names it. The script refuses a
+jar older than `src/main` or `pom.xml` (`--build` rebuilds it first). Runs keep their objects under `store/` and
+delete them when they end (`--keep-store` keeps them). Both scripts give the JVM `-Xmx8g` unless
+`JAVA_OPTS` sets its options.
 
 Campaigns too large for a laptop run in a container on another machine, each configuration on
-whole idle cores of one NUMA node: `docker/run.sh build`, then `docker/run.sh start <campaign>`
-([docker/README.md](docker/README.md)).
+whole idle cores of one NUMA node: `docker/run.sh build`, on the fork's artifacts carried as a tar
+(`docker/fork-m2.sh`), then `docker/run.sh start <campaign>` ([docker/README.md](docker/README.md)).
 
-`--log-requests` writes every request each phase issued to `<run>/requests.jsonl`, for the
-latency replay, and `--log-held` every change of what each phase's readers and writers hold to
-`<run>/held.jsonl` ([What is held](#what-is-held)).
+Cloud runs go on a VM beside the store, deployed by [deploy/](deploy/README.md). Its `bench` step
+runs the configurations it is given at one commit; one with a local store runs on the cloud's
+store, its label suffixed `-s3x` or `-azure`, so it is the twin of a run made on the laptop or
+havoc.
+
+`--log-requests` (on `bin/run.sh` and `bin/matrix.sh`) writes every request each phase issued to
+`<run>/requests.jsonl`, for the latency replay, and `--log-held` every change of what each phase's
+readers and writers hold to `<run>/held.jsonl` ([What is held](#what-is-held)).
 
 `--dump-versions` (on `bin/run.sh` or `bin/matrix.sh`) keeps every version of every appendable
 object in `<run>/versions/`, checked against the reference model at every step, for
@@ -88,6 +96,8 @@ A run writes `results/<label>-<config hash>/<UTC start>/`:
   JVM versions, the host, and the op log's SHA-256.
 - `oplog.bin`: the exact operations that were replayed.
 - `steps.jsonl`: one record per arm, step and phase.
+- `requests.jsonl` with `--log-requests`, `held.jsonl` with `--log-held`, and `versions/` with
+  `--dump-versions`.
 
 Runs that share a configuration share the `<label>-<hash>` directory. Requests and bytes are a
 function of the op log, the configuration and the code, so `analysis/compare_runs.py` checks that
@@ -104,10 +114,12 @@ The phases recorded in `steps.jsonl` are:
 
 | Phase | What it covers |
 |---|---|
-| `batch` | One whole batch. It contains the phases below, so don't add them to it. |
-| `merge-read` | Reading back what the batch rewrites or merges: RMoW's touched row groups, TailCoW's and RMoR's tail files and regions. |
+| `batch` | One whole batch. It contains `locate`, `merge-read`, `write` and `delete-write`, so don't add them to it. |
+| `locate` | With the `locate` knob at `scan`: finding the rows the batch changes, as a MERGE would. |
+| `merge-read` | Reading back what the batch rewrites or merges: RMoW's touched row groups, CoW's touched files, TailCoW's and RMoR's tail files and regions. |
 | `write` | Writing data files, or appending regions and footers. |
-| `delete-write` | MoR only: loading the previous DV and writing the new Puffin file. |
+| `delete-write` | The MoR family's deletes: position-delete files (v2), or each file's DV merged with its previous one into the batch's Puffin file (MoR-v3, TailCoW, RMoR-C); for RMoR-C with footers, the footers appended to hide the old row groups. |
+| `compact` | A compaction, after the batch, every `compactEvery` batches; not part of `batch`. |
 | `read_full` | Reading the whole current table. |
 | `read_recent` | Reading rows in the newest 1% of event time. Files are pruned by column metrics, row groups by stats. |
 | `read_old` | Reading the table as it was `travelBack` batches ago. |
@@ -120,7 +132,13 @@ way Iceberg's object-store streams issue them. An append counts as one APPEND an
 file as one PUT on every store. Where a store caps an append (Azure's Append Block, 100 MiB), the
 fork splits a larger one into several, and `append_splits` counts the extra ones, for a store
 profile with a cap to price (since 2026-10-27; the lab takes older runs' splits from their request
-logs, appends only). Every read is checked against a reference model,
+logs, appends only). Besides thread CPU time (`cpu_ns`), a phase records the thread's user-mode
+time (`user_ns`), the process's CPU time (`process_cpu_ns`), and, where the kernel allows the
+CPU's counters (`ThreadCounters`, through `perf_event_open`, with `kernel.perf_event_paranoid` at
+most 2), the thread's user-mode `instructions` and `cycles`. Thread CPU time moves with the clock
+speed and instructions do not, so instructions are a phase's work
+([lab/pages/cpu-measure.md](lab/pages/cpu-measure.md)). Every read is checked against a reference
+model,
 using an order-independent hash of (id, version), and a mismatch stops the run. With `verifyRows`
 (the default), every decoded row's payload is checked as well. That check is the harness's, not an
 engine's, and it costs about 70% of a read's CPU, so runs made for latency simulation turn it off.
@@ -249,9 +267,9 @@ not in the model), and latency. Two things check them, given a directory bucket:
   GETs (whole, last 64 KiB, middle 64 KiB) of objects of 1 to 1000 appended parts. It writes
   `results/spike/s3x-spike-<UTC>/spike.jsonl`.
 
-`configs/s3x-calibration.json` is the first cloud run, to make once the bucket exists: a small
-workload and the five arms new campaigns run (MoR-v3, TailCoW-C, RMoR-C, RMoR-C with footers and
-RMoW-C), from an EC2 instance in the bucket's zone. Its twin,
+`configs/s3x-calibration.json` was the first cloud run (2026-10-28): a small workload and the five
+arms new campaigns run (MoR-v3, TailCoW-C, RMoR-C, RMoR-C with footers and RMoW-C), from an EC2
+instance in the bucket's zone. Its twin,
 `configs/s3x-calibration-local.json`, differs only in the store. Its requests and bytes are what
 the S3 Express run's model and SDK counts must match exactly, apart from `CreateSession`.
 
@@ -302,7 +320,7 @@ too), from 64 KiB to 128 MiB, a row group at Iceberg's default (a 128 MiB append
 Blocks); GETs by size, of the Put Blobs' blobs whole and as ranges of a 128 MiB one; creates (an
 empty Append Blob, the store's own appendable file, and RMoW's atomic one) and HEADs; GETs of
 Append Blobs of 1 to 1000 blocks; and Iceberg's ranged read of a 32 MiB file against the SDK's.
-`configs/azure-calibration.json` is the calibration run. Its
+`configs/azure-calibration.json` is the calibration run (2026-10-28). Its
 Azurite twin (`-azurite.json`) gives the requests it must send, but for its creates: each costs a
 HEAD there where Azure's costs a rename.
 
@@ -413,17 +431,17 @@ has what they showed.
 | Knob | Meaning |
 |---|---|
 | `codec` | The Parquet codec. The default is zstd. |
-| `rowGroupBytes` | The row-group target of data files and the initial load, as Parquet counts it (buffered bytes), so row groups are smaller on disk: about a third of a 1 MiB target for this schema, three quarters of a 4 MiB one. RMoW compaction packs row groups up to the size the writer's come out at on disk. |
+| `rowGroupBytes` | The row-group target of data files and the initial load, as Parquet counts it (buffered bytes), so row groups are smaller on disk: about a third of a 1 MiB target for this schema, three quarters of a 4 MiB one, and 15.2 MiB of a 16 MiB one (the default). RMoW compaction packs row groups up to the size the writer's come out at on disk. |
 | `targetFileBytes` | The size at which data files, and an appendable file's live bytes, roll over. |
-| `sortWrites` | Sort every write by `ts`. |
+| `sortWrites` | Sort every write by `ts` (on by default). |
 | `tailSealBytes` | The compressed size at which an open tail unit is sealed (policies B and C). An RMoW unit is a row group of inserts; a TailCoW unit is a batch's data file, updated versions included. |
 | `tierFanout` | How many units of one level merge into one (policy C). |
 | `maxRowGroupsPerFile` | The RMoW tail rolls over at this many row groups. Footers cost about 1.2 KB and 30 µs per row group. |
 | `footerOrder` | Where RMoW lists a row group that replaces another. `logical` (the default) puts it in the replaced one's place, so footer order, which is row order, stays id order and a sorted file stays sorted. `offset` lists it last, keeping the footer in file-offset order. The Parquet spec requires neither, and the I/O is the same ([docs/DESIGN.md](docs/DESIGN.md#footer-order)). |
 | `writerFooters` | What every arm's writer holds of the footers it reads (I/O parity rule 6). `transaction` (the default): a file version's footer is read once per batch or compaction and reused within it. `open`: every open reads it again, as parquet-java does. Nothing carries over from one transaction to the next. It replaces `writerCachesFooters`, under which RMoW's writer kept its footers across batches. |
-| `footerPrefetchBytes` | Every reader prefetches this tail on its first footer probe, so a footer costs 1 request instead of 2. 0 means stock parquet-java. |
+| `footerPrefetchBytes` | Writers (locate scans, merge reads, compaction) prefetch this tail on a file's first footer probe, so a footer costs 1 request instead of 2. 0 (the default) means stock parquet-java. Each reader model sets its own (`reads.readers`). |
 | `locate` | `oracle` (the default) takes row positions from an in-memory index, at no cost. `scan` finds them the way a MERGE would, in a timed `locate` phase checked against the index. MoR scans `id` and `_pos` of every file whose `id` bounds may hold a target; RMoW looks the ids up in its footers' row-group statistics. |
-| `reads.readers` | The reader models every probe runs under, on the same table state. The first is primary. `one-footer` (the default) opens each file at one version and reads that version's one footer once, in one request (a 64 KiB prefetch), then only the row groups it needs. `stock` is stock Iceberg today: one split per row group (`FileScanTask.split`), each split re-reading the footer with two requests. Each model also sets `splitTargetBytes` and `parallelism`, the threads a read's split tasks run on. With `sortedRead`, the model also reads the table in event-time order at each probe (`read_sorted`), on one thread: a merge of the table's row groups, each a sorted run, opened when the merge reaches its smallest `ts`, so it holds every row group whose event times overlap. A file of at most 1 MiB, which Iceberg fetches whole, is decoded and sorted in memory. It needs `footerCache`, and every run sorted: sorted writes and an initial load in event-time order (`initialJitterRows` 0); a row out of order stops the run. Left out of the configuration's hash when off. |
+| `reads.readers` | The reader models every probe runs under, on the same table state. The first is primary; the default is `one-footer`, then `stock`. `one-footer` opens each file at one version and reads that version's one footer once, in one request (a 64 KiB prefetch), then only the row groups it needs. `stock` is stock Iceberg today: one split per row group (`FileScanTask.split`), each split re-reading the footer with two requests. Each model also sets `splitTargetBytes` and `parallelism`, the threads a read's split tasks run on. With `sortedRead`, the model also reads the table in event-time order at each probe (`read_sorted`), on one thread: a merge of the table's row groups, each a sorted run, opened when the merge reaches its smallest `ts`, so it holds every row group whose event times overlap. A file of at most 1 MiB, which Iceberg fetches whole, is decoded and sorted in memory. It needs `footerCache`, and every run sorted: sorted writes and an initial load in event-time order (`initialJitterRows` 0); a row out of order stops the run. Left out of the configuration's hash when off. |
 | `compactEvery` | Check the compaction triggers every this many batches (0 means never). MoR-family arms bin-pack files smaller than `compactSmallFileFraction` of the target and files whose delete ratio is at least `compactDeleteRatio`, as Iceberg's `RewriteDataFiles` does. RMoW triggers on space and on reads separately: it rewrites an appendable file, or moves the live row groups out of a split file's objects, whose dead bytes are at least `compactGarbageRatio` of their length; and it packs small sealed row groups once a file holds `compactSmallRowGroups` of them ([docs/DESIGN.md](docs/DESIGN.md#compaction)). When to compact is an outcome: see `analysis/compaction.py`. |
 | `rmorRewriteShare` | `rmor-c`'s θ: a batch rewrites a region it changes (a sealed file's row group, or an open tail file) when it updates or deletes at least this share of the region's live rows, counted per batch, and otherwise puts DVs on the rows. 0 (the default) rewrites every region a batch changes; above 1 none, which is `tailcow-c`. |
 | `writerSkipsDeadRowGroups` | The MoR family's writers (their scans to locate rows, merge reads and compaction) read no row group the file's deletes cover whole, nor any file whose DV covers every row, as the `skipDeadRowGroups` reader does. Off (the default) is Iceberg's MERGE scan, which fetches such row groups and drops their rows. In practice only RMoR-C has them: on two configurations, it changed no other arm's request or byte. Configurations that report RMoR set it, with the `cached-skip` reader beside a stock one. |
@@ -439,9 +457,10 @@ order, so a range of ids stands for a region of the table. The manifest records 
 | `seed`, `initialRows`, `batches`, `opsPerBatch` | The log's seed and size. |
 | `insertFrac`, `updateFrac`, `deleteFrac` | Each batch's operations, by share. The rows updated and deleted per batch are fixed. |
 | `keyDist` | How updates and deletes pick rows. `RECENCY_EXP` (the ingest window): a row's age in rows, newest first, is exponential with mean `recencyMeanBatches` batches of inserts. `UNIFORM`: every live row alike. `REGIONS`: by region, each with a heat drawn once from the seed, `U^-regionSkew` for a uniform U, so regions ranked by heat follow Zipf's law with exponent `regionSkew`. A region is picked with weight heat times live rows (as of the batch's start), then a row in it. Hot regions can be anywhere and stay hot; a skew of 0 is uniform over live rows. |
-| `regionRows` | Consecutive ids per region (default 100,000). A region stands for a row group: a 4 MiB one holds about 98,000 rows of this schema, a 1 MiB one 10,521, and the initial load's row groups vary by a few percent, so a region need not line up with one. |
+| `regionRows` | Consecutive ids per region (default 100,000). A region stands for a row group: a 16 MiB one holds 513,700 rows of this schema (the sweeps' regions), a 4 MiB one about 98,000, a 1 MiB one 10,521, and the initial load's row groups vary by a few percent, so a region need not line up with one. |
 | `regionSkew` | `REGIONS`' Zipf exponent (default 1). On 1M rows and 60 batches of 10,000 operations in regions of 10,521 rows (135 by the end), the hottest tenth of the regions took 12% of the updates at 0, 54% at 1 and 89% at 2. |
 | `updateShare` | The share p of a region's live rows one statement changes. 0 (the default) makes each update and delete a row of its own. Above 0, a statement takes the region of a row the key distribution picks, under any `keyDist`, and changes p of its live rows (at least one), picked uniformly among those the batch has not touched. The batch's deletes are drawn uniformly from the rows its statements changed, and the rest are updated, as a MERGE updates some of the rows it matches and deletes others, so a batch's deletes fall in the regions its updates do. The batch's last statement takes what is left of its updates and deletes, so p counts only up to those per batch over `regionRows`. |
+| `tsStepMicros` | Event time (`ts`) between consecutive inserts, in microseconds (default 1,000). |
 | `lateMedianBatches`, `lateP99Batches` | Insert lateness in event time (`ts`), lognormal, in batches. |
 | `initialJitterRows` | How far, in rows of event time, an initial-load row's `ts` may run ahead of its id's (default 100). At 0 the initial load is in event-time order, which a sorted read needs. The rows that change are the same at any value. |
 
@@ -453,13 +472,13 @@ were before regions existed (`OpLogGeneratorTest` pins three runs' hashes).
 | Package | Contents |
 |---|---|
 | `rmow` | The append layer: `OffsetOutputFile` (the stock writer, with positions starting at the object's length), `RegionWriter`, `FooterCodec` (merging Thrift footers), `VersionedInputFile` (one version's view, with the optional footer prefetch), `LogicalFile` with its two layouts `RmowFile` (appendable) and `SplitFile` (an object per version), and `ParquetReads` (the one read path every arm uses). |
-| `arms` | `MorArm` (with the subclasses `MorV2Arm`, `MorV3Arm`, `CowArm` and `TailCowArm`), `RmowArm`, `TailPolicy`, `DataFileWriter` and `InitialLoad`. |
+| `arms` | `MorArm` (with the subclasses `MorV2Arm`, `MorV3Arm`, `CowArm` and `TailCowArm`), `RmowArm`, `TailPolicy`, `DataFileWriter`, `MadeRows` (a writer's rows, made as the encoder takes them) and `InitialLoad`; `Reader` (the reader models), `Scans` (the one file-scan path every arm uses, and the sorted read), `LengthAwareDeleteFilter`, `DeleteCache`, `ChunksHeld` (a scan's column chunks, by row group) and `WriterFooters`. |
 | `workload`, `oracle` | The seeded op log and the reference model. |
-| `io` | `MemFileIO` and `PreadFileIO` (with the fork's atomic operations), `TracingFileIO`, `IoTrace`, `RelocatedFileIO` (a run's logical paths on its own prefix), the SDK recorders (`SdkRecorder`: `S3Recorder`, `AzureRecorder`), and for Azure `AdlsClients`. |
+| `io` | `MemFileIO` and `PreadFileIO` (with the fork's atomic operations, `LocalCas`), `TracingFileIO`, `IoTrace`, `RelocatedFileIO` (a run's logical paths on its own prefix), `Spans` (where the time went), `Held` (what is held), `StoreLatency` (injected latency), the SDK recorders (`SdkRecorder`: `S3Recorder`, `AzureRecorder`), and for Azure `AdlsClients`. |
 | `append` | `RegionAppender`, `AtomicAppender` (every store's, through the fork's `SupportsAtomicOperations`) and `EmulatorAppenders` (the emulators' stand-ins). |
-| `bench` | `Runner`, `Phases`, `Store` (mem, local, S3 or Azure) and `Main`; `arms.VersionDump` and `rmow.VersionDigest` dump every version for the interop check. |
+| `bench` | `Runner`, `Phases`, `BenchConfig`, `ThreadCounters` (instructions and cycles), `Store` (mem, local, S3 or Azure) and `Main`; `arms.VersionDump` and `rmow.VersionDigest` dump every version for the interop check. |
 | `micro` | JMH micro-benchmarks (`FooterBench`), and the cloud spikes (`S3ExpressSpike`, `AzureSpike`). |
-| `analysis/` | `interop_check.py` (pyarrow and DuckDB), `summary.py`, `plots.py` (figures and a table twin of each), `sweep.py` (runs that differ in row-group size), `layouts.py` (appendable against split files), `compaction.py` (runs that differ in compaction policy: each arm's cheapest policy per read rate and price model), and `compare_runs.py` (exact repeatability). |
+| `analysis/` | `interop_check.py` (pyarrow and DuckDB), `summary.py`, `consolidate.py` (every finished run's records in one Parquet file), `plots.py` (figures and a table twin of each), `sweep.py` (runs that differ in row-group size), `layouts.py` (appendable against split files), `compaction.py` (runs that differ in compaction policy: each arm's cheapest policy per read rate and price model), and `compare_runs.py` (exact repeatability). |
 
 ## Compatibility
 
@@ -531,5 +550,15 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
   and bytes (C1). The stores' latencies are not the profiles': Azure is several times faster than
   its profile, and on S3 Express the region arms' batches beat MoR-v3's, against the twins'
   prediction.
-- **Next:** a profile from the spikes priced by request size, to test the latency model on these
-  runs. Split files can also run on standard S3.
+- **Done (2026-10-29):** under an update share, a batch's deletes fall among the rows its
+  statements change; writers stream a row group at a time, and each phase records what it holds
+  ([What is held](#what-is-held)); a sorted read (`read_sorted`).
+- **Running (2026-10-29):** the sweeps from a base point of 16 MiB row groups, one axis at a time
+  (update share, skew, row-group size, arrival window, and the ingest window as a reference),
+  eleven configurations (`configs/sweep-*.json`) on havoc (`docker/campaigns/sweep.json`), against
+  the hypotheses registered 2026-10-29 in [docs/HYPOTHESES.md](docs/HYPOTHESES.md). No results
+  yet. A twin of the base point runs on this laptop, with counters, for the cloud runs.
+- **Next:** the base point in the cloud, on S3 Express and then Azure, through the deploy's `bench`
+  step, once its hypotheses are registered. Its runs are the first test of a profile that prices
+  each logged request at its size from the spikes (lab/views/65_sized.sql, built 2026-10-29 from
+  the calibration's runs). Split files can also run on standard S3.
