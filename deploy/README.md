@@ -130,6 +130,11 @@ The twins' predictions price CPU at the laptop's pace, so a VM of another family
 predicted times, but not the requests and bytes C1 checks. Any size works for C2, which uses the
 run's own CPU.
 
+**Instruction counts.** `cloud-init.sh` sets `kernel.perf_event_paranoid` to 2 (Ubuntu's default,
+4, refused the calibration's runs their counts), so a run counts its instructions where the
+hypervisor exposes the counters. Each run's manifest says whether it had them
+(`host.thread_counters`).
+
 ## Cost
 
 The instance-hours dominate: about $0.41/h for `c7a.2xlarge` ($0.82/h for `c7a.4xlarge`) and $0.43/h for `D8as_v6` (westus), on demand
