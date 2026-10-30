@@ -3,7 +3,7 @@
 # tree can be edited and rebuilt while they run:
 #
 #   bin/matrix.sh [--build] [--out <dir>] [--store-root <dir>] [--keep-store] [--dump-versions]
-#                 [--log-requests] <config.json>...
+#                 [--log-requests] [--log-held] <config.json>...
 #
 #   --build          run `mvn package -DskipTests` first; without it the jar must be newer than
 #                    the sources
@@ -12,6 +12,7 @@
 #                    its own objects when it ends, unless --keep-store
 #   --dump-versions  dump every version of the appendable objects (see analysis/interop_check.py)
 #   --log-requests   log every request each phase issued (requests.jsonl), for latency models
+#   --log-held       log every change in what the phases hold in memory (held.jsonl)
 #
 # The snapshot, results/builds/<UTC>-<git sha>[-dirty]/, holds a copy of the project jar, hard
 # links to its released dependencies (a released jar's name changes with its version, so a link
@@ -32,14 +33,14 @@ while [[ $# -gt 0 ]]; do
     --build) build=1 ;;
     --out) out="$(realpath -m "$2")"; shift ;;
     --store-root) store="$(realpath -m "$2")"; shift ;;
-    --keep-store | --dump-versions | --log-requests) pass+=("$1") ;;
+    --keep-store | --dump-versions | --log-requests | --log-held) pass+=("$1") ;;
     -*) echo "unknown option: $1" >&2; exit 2 ;;
     *) configs+=("$(realpath "$1")") ;;
   esac
   shift
 done
 if [[ ${#configs[@]} -eq 0 ]]; then
-  sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
   exit 2
 fi
 names="$(for c in "${configs[@]}"; do basename "$c"; done | sort | uniq -d)"
@@ -56,7 +57,7 @@ if [[ -z "$jar" ]]; then
   echo "no jar in target/: build with --build" >&2
   exit 2
 fi
-stale="$(cd "$here" && find src pom.xml -newer "$jar" -type f | head -3)"
+stale="$(cd "$here" && find src/main pom.xml -newer "$jar" -type f | head -3)"
 if [[ -n "$stale" ]]; then
   echo "the jar is older than the sources ($(echo $stale)): rebuild with --build" >&2
   exit 2
