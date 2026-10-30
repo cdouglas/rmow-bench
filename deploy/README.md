@@ -1,9 +1,10 @@
 # Cloud deployment (S3 Express and Azure, Terraform)
 
-The calibration runs ([docs/S3X_RUNBOOK.md](../docs/S3X_RUNBOOK.md),
-[docs/AZURE_RUNBOOK.md](../docs/AZURE_RUNBOOK.md)) on one VM beside its store. Terraform makes the
-store, the VM's credentials and the VM, and `remote.sh` runs the runbook's steps on the VM: the
-builds, the contract suites, the spike and the calibration run. `deploy.sh` drives both from here
+Runs on a cloud store, from one VM beside it: the calibration ([docs/S3X_RUNBOOK.md](../docs/S3X_RUNBOOK.md),
+[docs/AZURE_RUNBOOK.md](../docs/AZURE_RUNBOOK.md)), or the cloud twins of runs made on the laptop or
+havoc (since 2026-10-29). Terraform makes the store, the VM's credentials and the VM, and
+`remote.sh` runs the runbook's steps on the VM: the builds, the contract suites, the spike and the
+runs. `deploy.sh` drives both from here
 and brings the results back into `results/`. The layout follows shield-rs's `deploy/`.
 
 > **Status: written and checked offline, not yet applied.** `./deploy/validate.sh` passes
@@ -21,7 +22,7 @@ and brings the results back into `results/`. The layout follows shield-rs's `dep
 ```
 deploy/
   deploy.sh              # the driver (infra-up, up, ship, run, status, wait, fetch, down, ...)
-  remote.sh              # the steps on the VM: build, test, spike, calibrate (detached)
+  remote.sh              # the steps on the VM: build, test, spike, bench (detached)
   cloud-init.sh          # the VM's first boot: OpenJDK 17, Maven, git and tools (both clouds)
   deploy.env.example     # copy to deploy.env: the cloud, the SSH key, the builds, the sizes
   validate.sh            # the offline checks
@@ -77,7 +78,7 @@ $EDITOR deploy/deploy.env            # CLOUD, the SSH key; the builds' commits a
 ./deploy/deploy.sh up                # the VM
 ./deploy/deploy.sh ship              # bundle main, ship it; the VM builds the fork and rmow-bench
 ./deploy/deploy.sh wait              # until the builds end (about 15 minutes)
-./deploy/deploy.sh run               # test, spike, calibrate, in order, stopping at a failure
+./deploy/deploy.sh run               # test, spike, bench, in order, stopping at a failure
 ./deploy/deploy.sh wait
 ./deploy/deploy.sh fetch             # results/ and deploy/logs/; prints thread_cpu_per_wall
 ./deploy/deploy.sh down              # the VM; the store stays, so the next `up` is fast
@@ -97,16 +98,32 @@ skipped every test fails: a suite without credentials skips rather than fails.
   jars' build properties are the twins'. Its version comes from the release tag
   `apache-iceberg-1.12.0`, which the fork on GitHub does not carry, so the VM fetches it from
   Apache's repository. Gradle skips the engines (Spark, Flink, Kafka Connect). Then rmow-bench at
-  `CALIBRATION_COMMIT` (9a69028, where C1–C4 were registered) and, in a worktree,
+  `BENCH_COMMIT` (the calibration's: 9a69028, where C1–C4 were registered) and, in a worktree,
   `SPIKE_COMMIT` (`main`).
-- **test, spike, calibrate:** the runbook's steps 1–3. The calibration runs `CALIBRATION_REPS`
-  times (3), for the spread of measured latency; every run must send the twin's requests and
-  bytes (C1). Its configuration gets the store's root (and on AWS its region) in a copy outside
-  the checkout, so the manifest records a clean tree.
+- **test, spike:** the runbook's steps 1–2.
+- **bench:** step 3, each configuration of `AWS_CONFIGS` or `AZURE_CONFIGS` (`configs/<name>.json`
+  at `BENCH_COMMIT`), `BENCH_REPS` times, for the spread of measured latency, with `-Xmx` of
+  `BENCH_HEAP` and `bin/run.sh`'s `BENCH_FLAGS`; every run must send its twin's requests and bytes
+  (C1). Each configuration goes into a copy outside the checkout, so the manifest records a clean
+  tree:
+  - **with a local store** (a run made on the laptop or havoc, such as the sweeps'), it runs on the
+    cloud's store, under `<root>/<label>-s3x` or `-azure`, its label suffixed alike. Only the label
+    and the store differ, so the local run is its twin, as `s3x-calibration-local` is the
+    calibration's;
+  - **with a cloud store** (the calibration's), it keeps its label, and its placeholder root becomes
+    `<root>/calibration`, as before, so a rerun keeps its configuration's hash.
+
+  `fetch` brings back the runs of every configured label. The defaults are the calibration's
+  (`s3x-calibration`, `azure-calibration`, 3 reps, 8g, `--log-requests`), and a `deploy.env` from
+  before the bench step (`CALIBRATION_COMMIT`, `CALIBRATION_REPS`) runs as it did. **The sweeps'
+  twins:** `BENCH_COMMIT` the commit havoc ran, `AWS_CONFIGS="sweep-base ..."`, `BENCH_HEAP="16g"`,
+  `BENCH_FLAGS="--log-requests --log-held"`, and an instance with 32 GiB (`c7a.4xlarge` on AWS;
+  Azure's `D8as_v6` has 32).
 
 **The VM.** Ubuntu 24.04 and its OpenJDK 17 package, which the twins ran on (17.0.20.1 when this
 was written). The defaults are AMD, as the twins' laptop is (Zen 4):
-- `c7a.2xlarge` on AWS: Zen 4, 8 vCPUs, 16 GiB; offered in usw2-az3;
+- `c7a.2xlarge` on AWS: Zen 4, 8 vCPUs, 16 GiB; offered in usw2-az3 (`c7a.4xlarge`: 16 vCPUs,
+  32 GiB, for a 16 GB heap);
 - `Standard_D8as_v6` on Azure: Zen 4, 8 vCPUs, 32 GiB (the subscription has no quota for `D8as_v5`, Zen 3, in westus).
 
 The twins' predictions price CPU at the laptop's pace, so a VM of another family moves the
@@ -115,11 +132,12 @@ run's own CPU.
 
 ## Cost
 
-The instance-hours dominate: about $0.41/h for `c7a.2xlarge` and $0.43/h for `D8as_v6` (westus), on demand
+The instance-hours dominate: about $0.41/h for `c7a.2xlarge` ($0.82/h for `c7a.4xlarge`) and $0.43/h for `D8as_v6` (westus), on demand
 in us-east-1 and eastus (us-west-2 charges the same for `c7a.2xlarge`). A campaign takes about an hour: the builds, the suites, the spike
 (tens of minutes at 20 reps) and the calibration. The stores charge little: the runbooks' Cost
 paragraphs. The bucket and the account cost nothing while empty, and every step deletes what it
-wrote, but for the calibration run's objects under `<root>/calibration`. `teardown` deletes those
+wrote: each run deletes its objects when it ends (`Store.deleteRun`), so only a run that failed
+leaves any, under `<root>`. `teardown` deletes those
 with the store (in an existing bucket, with the `rmow-bench/` prefix).
 
 ## Caveats

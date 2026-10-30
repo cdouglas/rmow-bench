@@ -7,16 +7,17 @@
 #   remote.sh state             running, done, failed or none
 #   remote.sh status [lines]    the state and the log's tail
 # The steps:
-#   build      the fork at FORK_COMMIT into ~/.m2; rmow-bench at CALIBRATION_COMMIT (~/rmow-bench)
-#              and at SPIKE_COMMIT (~/rmow-spike, a worktree of it)
+#   build      the fork at FORK_COMMIT into ~/.m2; rmow-bench at BENCH_COMMIT (~/rmow-bench) and
+#              at SPIKE_COMMIT (~/rmow-spike, a worktree of it)
 #   test       the fork's atomic-operations contract on the store, then rmow-bench's (step 1)
 #   spike      the spike, SPIKE_REPS reps (step 2)
-#   calibrate  the calibration run, its requests logged, CALIBRATION_REPS times (step 3)
+#   bench      each of CONFIGS on the store, BENCH_REPS times (step 3: the calibration, or the
+#              cloud twins of runs made elsewhere)
 # Its log is ~/run.log; results land in ~/rmow-bench/results, as on the laptop.
 set -euo pipefail
 cd "$HOME"
 
-STEPS=(build test spike calibrate)
+STEPS=(build test spike bench)
 # Gradle without the engines (Spark, Flink, Kafka Connect), which rmow-bench does not use
 GRADLE=(./gradlew --no-daemon -q -DsparkVersions= -DflinkVersions= -DkafkaVersions=)
 
@@ -64,13 +65,13 @@ step_build() {
   [[ "$(fork_built)" == "$FORK_COMMIT" ]] \
     || die "the local Maven repository holds the fork at '$(fork_built)', not $FORK_COMMIT"
 
-  log "rmow-bench at $CALIBRATION_COMMIT (the calibration) and $SPIKE_COMMIT (the spike)"
+  log "rmow-bench at $BENCH_COMMIT (the runs) and $SPIKE_COMMIT (the spike)"
   if [[ -d rmow-bench/.git ]]; then
     git -C rmow-bench fetch -q "$HOME/rmow-bench.bundle" main
   else
     git clone -q --no-checkout rmow-bench.bundle rmow-bench
   fi
-  git -C rmow-bench checkout -q --detach "$CALIBRATION_COMMIT"
+  git -C rmow-bench checkout -q --detach "$BENCH_COMMIT"
   if [[ -e rmow-spike/.git ]]; then
     git -C rmow-spike checkout -q --detach "$SPIKE_COMMIT"
   else
@@ -145,30 +146,45 @@ step_spike() {
     "$ROOT/spike" --reps "$SPIKE_REPS")
 }
 
-step_calibrate() {
-  local label cfg
+step_bench() {
+  local suffix type name src label cfg i out
   case "$STORE" in
-    aws) label=s3x-calibration ;;
-    azure) label=azure-calibration ;;
+    aws) suffix=s3x type=s3 ;;
+    azure) suffix=azure type=azure ;;
   esac
-  # The configuration's root is a placeholder: the store's goes into a copy of it, outside the
-  # checkout so that the run's manifest records a clean tree. Its label stays the same
-  cfg="/tmp/$label.json"
-  jq --arg root "$ROOT/calibration" '.store.root = $root' "rmow-bench/configs/$label.json" > "$cfg"
-  if [[ "$STORE" == aws ]]; then
-    jq --arg region "$AWS_REGION" '.store.region = $region' "$cfg" > "$cfg.tmp" && mv "$cfg.tmp" "$cfg"
-  fi
-  ! grep -q REPLACE "$cfg" || die "a placeholder is left in $cfg"
-  # Repeated, for the spread of measured latency (the requests and bytes of every run are the
-  # same, C1); each run deletes its objects when it ends
-  local i out
-  for i in $(seq 1 "$CALIBRATION_REPS"); do
-    log "calibration run $i of $CALIBRATION_REPS ($label, the build at $CALIBRATION_COMMIT)," \
-      "under $ROOT/calibration"
-    out="$(cd rmow-bench && bin/run.sh "$cfg" --log-requests | tee /dev/stderr | tail -1)"
-    # The model's checks need the VM's two clocks to agree (the runbooks, Where the time went)
-    jq -r '"  host.thread_cpu_per_wall: \(.host.thread_cpu_per_wall) (should be about 1)"' \
-      "rmow-bench/$out/manifest.json" 2>/dev/null || echo "  (no manifest at rmow-bench/$out)"
+  for name in $CONFIGS; do
+    src="rmow-bench/configs/$name.json"
+    [[ -f "$src" ]] || die "no configs/$name.json at $BENCH_COMMIT"
+    # The store goes into a copy outside the checkout, so that the run's manifest records a clean
+    # tree. A configuration with a local store (a run made on the laptop or havoc) gets the cloud's
+    # store under its label, suffixed, so that run is its twin; one with a cloud store (the
+    # calibration's) keeps its label and the root it always had, which its hash names
+    if [[ "$(jq -r .store.type "$src")" == local ]]; then
+      label="$(jq -r .label "$src")-$suffix"
+      cfg="/tmp/$label.json"
+      jq --arg label "$label" --arg type "$type" --arg root "$ROOT/$label" \
+        '.label = $label | .store = {type: $type, root: $root}' "$src" > "$cfg"
+    else
+      label="$(jq -r .label "$src")"
+      cfg="/tmp/$label.json"
+      jq --arg root "$ROOT/calibration" '.store.root = $root' "$src" > "$cfg"
+    fi
+    if [[ "$STORE" == aws ]]; then
+      jq --arg region "$AWS_REGION" '.store.region = $region' "$cfg" > "$cfg.tmp" && mv "$cfg.tmp" "$cfg"
+    fi
+    ! grep -q REPLACE "$cfg" || die "a placeholder is left in $cfg"
+    # Repeated, for the spread of measured latency (the requests and bytes of every run are the
+    # same, C1); each run deletes its objects when it ends
+    for i in $(seq 1 "$BENCH_REPS"); do
+      log "run $i of $BENCH_REPS of $label (the build at $BENCH_COMMIT, heap $BENCH_HEAP," \
+        "flags $BENCH_FLAGS), under $ROOT"
+      # shellcheck disable=SC2086 # the flags are words
+      out="$(cd rmow-bench && JAVA_OPTS="-Xmx$BENCH_HEAP" bin/run.sh "$cfg" $BENCH_FLAGS \
+        | tee /dev/stderr | tail -1)"
+      # The model's checks need the VM's two clocks to agree (the runbooks, Where the time went)
+      jq -r '"  host.thread_cpu_per_wall: \(.host.thread_cpu_per_wall) (should be about 1)"' \
+        "rmow-bench/$out/manifest.json" 2>/dev/null || echo "  (no manifest at rmow-bench/$out)"
+    done
   done
 }
 

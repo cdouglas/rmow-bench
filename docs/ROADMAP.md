@@ -375,8 +375,15 @@ lower.
   creates aside), and the other arms match the earlier twins in every shared record. Across the
   runs the S3 Express ratios moved by up to 0.12, through the CPU's pace per run.
 
+  **The deploy runs any configuration** (generalized 2026-10-29): its `bench` step, which replaced
+  `calibrate`, runs `AWS_CONFIGS` or `AZURE_CONFIGS` at `BENCH_COMMIT`, with a heap and flags of
+  their own; a configuration with a local store (a sweep's) runs on the cloud's store with its label
+  suffixed `-s3x` or `-azure`, so its havoc run is its twin, and the calibration's run as before.
+  Checked against a stub `run.sh` on both clouds' branches; not yet run on a VM. The sweeps' base
+  point needs a 16 GB heap, so `c7a.4xlarge` on AWS.
+
   **Running it** is the user's: [deploy/](../deploy/README.md), each cloud step by step the first
-  time (`infra-up`, `up`, `ship`, `wait`, `run test`, `wait`, then `run spike calibrate`), then
+  time (`infra-up`, `up`, `ship`, `wait`, `run test`, `wait`, then `run spike bench`), then
   `fetch`, `down` and `teardown`. **When the results are in `results/`:**
   1. `lab ingest`.
   2. In [lab/pages/cloud.md](../lab/pages/cloud.md), swap the pinned stand-ins for the cloud

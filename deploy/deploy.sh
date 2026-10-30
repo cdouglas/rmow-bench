@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# The cloud calibration (docs/S3X_RUNBOOK.md, docs/AZURE_RUNBOOK.md) on one VM beside its store:
-# Terraform makes the store and the VM, and deploy/remote.sh runs the runbook's steps there.
+# Runs on a cloud store from one VM beside it (docs/S3X_RUNBOOK.md, docs/AZURE_RUNBOOK.md): the
+# calibration, or the cloud twins of runs made on the laptop or havoc. Terraform makes the store and
+# the VM, and deploy/remote.sh runs the runbook's steps there.
 #
 # Two Terraform layers per cloud, as in shield-rs:
 #   infra/  the store, the VM's credentials and the network: free while the store is empty, kept
@@ -10,7 +11,7 @@
 #   ./deploy/deploy.sh infra-up      # the store and the network, once
 #   ./deploy/deploy.sh up            # the VM
 #   ./deploy/deploy.sh ship          # rmow-bench to the VM, and the builds there (detached)
-#   ./deploy/deploy.sh run [step]... # test, spike, calibrate (by default all three, in order)
+#   ./deploy/deploy.sh run [step]... # test, spike, bench (by default all three, in order)
 #   ./deploy/deploy.sh status        # whether the VM's steps still run, and the log's tail
 #   ./deploy/deploy.sh wait          # until they end
 #   ./deploy/deploy.sh fetch         # the results into results/, the VM's log into deploy/logs/
@@ -35,9 +36,14 @@ CLOUD_OVERRIDE="${CLOUD:-}"
 # shellcheck disable=SC1090
 source "$ENV_FILE"
 CLOUD="${CLOUD_OVERRIDE:-${CLOUD:-aws}}"
+# The runs (the bench step); a deploy.env from before them names the calibration's
+BENCH_COMMIT="${BENCH_COMMIT:-${CALIBRATION_COMMIT:-}}"
+BENCH_REPS="${BENCH_REPS:-${CALIBRATION_REPS:-1}}"
+BENCH_HEAP="${BENCH_HEAP:-8g}"
+BENCH_FLAGS="${BENCH_FLAGS:---log-requests}"
 case "$CLOUD" in
-  aws) LABEL=s3x-calibration ;;
-  azure) LABEL=azure-calibration ;;
+  aws) CONFIGS="${AWS_CONFIGS:-s3x-calibration}" SUFFIX=s3x ;;
+  azure) CONFIGS="${AZURE_CONFIGS:-azure-calibration}" SUFFIX=azure ;;
   *) echo "error: CLOUD must be aws|azure (got '$CLOUD')" >&2; exit 1 ;;
 esac
 
@@ -106,17 +112,35 @@ wait_ssh() {
   die "no SSH to $h after 5 minutes"
 }
 
+# The labels the bench step's runs take: a configuration with a local store runs on the cloud's
+# as <label>-<suffix> (remote.sh, step_bench); one with a cloud store under its own label.
+bench_labels() {
+  local name src
+  for name in $CONFIGS; do
+    src="$(git -C "$REPO_DIR" show "$BENCH_COMMIT:configs/$name.json" 2>/dev/null)" \
+      || die "no configs/$name.json at $BENCH_COMMIT"
+    if [[ "$(jq -r .store.type <<<"$src")" == local ]]; then
+      echo "$(jq -r .label <<<"$src")-$SUFFIX"
+    else
+      jq -r .label <<<"$src"
+    fi
+  done
+}
+
 # ~/rmow.env on the VM: the store, the builds and the knobs remote.sh reads. No secrets: the
 # credentials are the VM's (its role or identity), but for the Azure suite's SAS (cmd_run).
 write_env() {
-  local calib spike
-  calib="$(git -C "$REPO_DIR" rev-parse --verify "$CALIBRATION_COMMIT^{commit}")"
+  local bench spike
+  [[ -n "$BENCH_COMMIT" ]] || die "no BENCH_COMMIT in $ENV_FILE"
+  bench="$(git -C "$REPO_DIR" rev-parse --verify "$BENCH_COMMIT^{commit}")"
   spike="$(git -C "$REPO_DIR" rev-parse --verify "$SPIKE_COMMIT^{commit}")"
+  bench_labels >/dev/null # every configuration exists at the build
   {
     printf '%s=%q\n' STORE "$CLOUD" ROOT "$(infra_out root)" \
       FORK_REPO "$FORK_REPO" FORK_COMMIT "$FORK_COMMIT" FORK_BASE_TAG "$FORK_BASE_TAG" \
-      CALIBRATION_COMMIT "$calib" SPIKE_COMMIT "$spike" SPIKE_REPS "$SPIKE_REPS" \
-      CALIBRATION_REPS "$CALIBRATION_REPS"
+      BENCH_COMMIT "$bench" SPIKE_COMMIT "$spike" SPIKE_REPS "$SPIKE_REPS" \
+      CONFIGS "$CONFIGS" BENCH_REPS "$BENCH_REPS" BENCH_HEAP "$BENCH_HEAP" \
+      BENCH_FLAGS "$BENCH_FLAGS"
     case "$CLOUD" in
       aws) printf '%s=%q\n' AWS_REGION "$(infra_out region)" S3_EXPRESS_BUCKET "$(infra_out bucket)" ;;
       azure) printf '%s=%q\n' AZURE_ACCOUNT "$(infra_out account)" \
@@ -172,7 +196,7 @@ cmd_teardown() {
 # it), then the builds on the VM.
 cmd_ship() {
   local c
-  for c in "$CALIBRATION_COMMIT" "$SPIKE_COMMIT"; do
+  for c in "$BENCH_COMMIT" "$SPIKE_COMMIT"; do
     git -C "$REPO_DIR" merge-base --is-ancestor "$c" main \
       || die "$c is not on main, which ship bundles"
   done
@@ -189,7 +213,7 @@ cmd_ship() {
 
 cmd_run() {
   local steps=("$@")
-  ((${#steps[@]})) || steps=(test spike calibrate)
+  ((${#steps[@]})) || steps=(test spike bench)
   write_env
   if [[ "$CLOUD" == azure && " ${steps[*]} " == *" test "* ]]; then
     # The fork's ADLS suite authenticates with a SAS only: an account SAS for the blob service,
@@ -219,23 +243,32 @@ cmd_wait() {
 }
 
 cmd_fetch() {
-  local h stamp
+  local h stamp label
   h="$(host)"
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   mkdir -p "$REPO_DIR/results" "$DEPLOY_DIR/logs"
-  say "fetching $LABEL-* and spike/ from $h into results/"
+  local labels=() includes=() listed
+  listed="$(bench_labels)" # fails here if a configuration is missing
+  mapfile -t labels <<<"$listed"
+  for label in "${labels[@]}"; do
+    includes+=(--include="/$label-*/***")
+  done
+  say "fetching ${labels[*]} and spike/ from $h into results/"
   # results are only ever added: rsync never deletes here, and each run has a directory of its own
   rsync -a --itemize-changes -e "ssh ${ssh_opts[*]}" \
-    --include="/$LABEL-*/***" --include='/spike/***' --exclude='*' \
+    "${includes[@]}" --include='/spike/***' --exclude='*' \
     "$h:rmow-bench/results/" "$REPO_DIR/results/"
   scp -q "${ssh_opts[@]}" "$h:run.log" "$DEPLOY_DIR/logs/$CLOUD-$stamp.log" || true
   # The model's checks need the VM's two clocks to agree: thread_cpu_per_wall about 1
   local m run
-  for m in "$REPO_DIR"/results/"$LABEL"-*/*/manifest.json; do
-    run="${m#"$REPO_DIR"/results/}"
-    run="${run%/manifest.json}"
-    [[ "${run%%/*}" =~ ^$LABEL-[0-9a-f]{12}$ ]] || continue # not the twins
-    echo "  $run: thread_cpu_per_wall $(jq -r '.host.thread_cpu_per_wall' "$m")"
+  for label in "${labels[@]}"; do
+    for m in "$REPO_DIR"/results/"$label"-*/*/manifest.json; do
+      [[ -f "$m" ]] || continue
+      run="${m#"$REPO_DIR"/results/}"
+      run="${run%/manifest.json}"
+      [[ "${run%%/*}" =~ ^$label-[0-9a-f]{12}$ ]] || continue # another label's
+      echo "  $run: thread_cpu_per_wall $(jq -r '.host.thread_cpu_per_wall' "$m")"
+    done
   done
   say "VM log in deploy/logs/$CLOUD-$stamp.log; next: lab ingest"
 }
