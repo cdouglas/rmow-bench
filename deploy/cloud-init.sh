@@ -4,8 +4,15 @@
 # the tools of the remote steps. The marker tells remote.sh the packages are in.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -y
-apt-get install -y openjdk-17-jdk-headless maven git jq rsync unzip curl python3
+# The region's mirror answers 503 now and then (six of nine VMs' first installs on 2026-10-31):
+# apt retries each fetch, and the install is tried again whole
+apt_get() { apt-get -o Acquire::Retries=5 "$@"; }
+for attempt in 1 2 3; do
+  apt_get update -y && apt_get install -y openjdk-17-jdk-headless maven git jq rsync unzip curl python3 \
+    && break
+  [[ $attempt -lt 3 ]] || exit 1
+  sleep 30
+done
 # The runs' instruction counts (ThreadCounters, perf_event_open), where the hypervisor exposes the
 # counters: Ubuntu's default of 4 refuses them. Each run's manifest says whether it had counts
 # (host.thread_counters)
