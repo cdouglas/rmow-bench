@@ -33,7 +33,8 @@ All four read each version's prefix and return exactly the rows written, seeing 
 groups, whether or not the footer lists them in offset order (`AppendableParquetTest`,
 `VersionDumpTest`, `analysis/interop_check.py`):
 
-- Iceberg 1.12.0, through `Parquet.read` with the generic reader, at the version's length;
+- Iceberg 1.12.0, through `Parquet.read` with its generic row reader and its vectorized reader
+  (iceberg-arrow, which the arms read with since 2026-10-31), at the version's length;
 - parquet-java 1.17.1, through `ParquetFileReader` and its example record reader;
 - pyarrow 26.0.0;
 - DuckDB 1.5.6.

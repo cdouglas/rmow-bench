@@ -171,16 +171,20 @@ public abstract class MorArm implements Arm {
           deletes,
           projection,
           range,
-          r -> {
-            long id = (Long) r.get(0);
-            if (Arrays.binarySearch(targets, id) >= 0) {
-              // locate runs before the batch moves anything, so the index is still exact
-              if (fileOfId[(int) id] != file || posOfId[(int) id] != (Long) r.get(1)) {
-                throw new IllegalStateException(
-                    "Located row " + id + " at file " + file + " pos " + r.get(1)
-                        + "; the index says file " + fileOfId[(int) id] + " pos " + posOfId[(int) id]);
+          rows -> {
+            for (int r = 0; r < rows.size(); r++) {
+              long id = rows.id(r);
+              if (Arrays.binarySearch(targets, id) >= 0) {
+                // locate runs before the batch moves anything, so the index is still exact
+                long pos = rows.position(r);
+                if (fileOfId[(int) id] != file || posOfId[(int) id] != pos) {
+                  throw new IllegalStateException(
+                      "Located row " + id + " at file " + file + " pos " + pos
+                          + "; the index says file " + fileOfId[(int) id] + " pos "
+                          + posOfId[(int) id]);
+                }
+                found[0]++;
               }
-              found[0]++;
             }
           });
     }
@@ -383,7 +387,7 @@ public abstract class MorArm implements Arm {
   protected List<long[]> readLive(int k) throws IOException {
     List<long[]> out = new ArrayList<>();
     DataFile df = files.get(k);
-    scan(df, fileSeqs.get(k), deletes, Expressions.alwaysTrue(), r -> out.add(idVersion(r)));
+    scan(df, fileSeqs.get(k), deletes, Expressions.alwaysTrue(), b -> b.idVersions(out));
     holdRead(out, df);
     return out;
   }
@@ -419,13 +423,9 @@ public abstract class MorArm implements Arm {
         start,
         length,
         null,
-        r -> out.add(idVersion(r)));
+        b -> b.idVersions(out));
     holdRead(out, df);
     return out;
-  }
-
-  private static long[] idVersion(Record r) {
-    return new long[] {(Long) r.get(Rows.ID), (Integer) r.get(Rows.VERSION)};
   }
 
   /** Whether compaction may rewrite data file {@code k} (TailCoW keeps its open tail files). */
@@ -551,11 +551,11 @@ public abstract class MorArm implements Arm {
   }
 
   /**
-   * Reads one data file as Iceberg's generic reader does, its deletes and the filter applied, with
+   * Reads one data file as Spark's Iceberg reader does, its deletes and the filter applied, with
    * the footer this transaction's writer holds of it, if any.
    */
   private void scan(
-      DataFile df, long seq, List<Delete> liveDeletes, Expression filter, Consumer<Record> rows)
+      DataFile df, long seq, List<Delete> liveDeletes, Expression filter, Consumer<RowBatch> rows)
       throws IOException {
     scan(df, seq, liveDeletes, Rows.SCHEMA, filter, rows);
   }
@@ -572,7 +572,7 @@ public abstract class MorArm implements Arm {
       List<Delete> liveDeletes,
       Schema projection,
       Expression filter,
-      Consumer<Record> rows)
+      Consumer<RowBatch> rows)
       throws IOException {
     Reader writer = Reader.writer(ctx.layout());
     DeleteFile[] ds = deletesFor(df, seq, liveDeletes);

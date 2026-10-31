@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 import org.apache.iceberg.MetadataColumns;
 import org.apache.iceberg.Schema;
+import org.apache.iceberg.data.GenericRecord;
 import org.apache.iceberg.data.Record;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.io.CloseableIterable;
@@ -103,13 +104,40 @@ class AppendableParquetTest {
     return new Versions(f, len0, len1, f.length(), rows2);
   }
 
+  /**
+   * What Iceberg's readers decode: its generic row reader, and its vectorized reader (the arms'),
+   * which must agree, every row's payload checked.
+   */
   private TableHash readIceberg(InputFile in) throws IOException {
     TableHash h = new TableHash();
     try (CloseableIterable<Record> rs =
         ParquetReads.open(in, Rows.SCHEMA, Expressions.alwaysTrue())) {
       rs.forEach(r -> h.add(r, true));
     }
+    assertThat(readBatches(in, -1, -1)).isEqualTo(h);
     return h;
+  }
+
+  /** The split {@code [start, start + length)} (or all, {@code start} -1), in batches. */
+  private static TableHash readBatches(InputFile in, long start, long length) throws IOException {
+    TableHash h = new TableHash();
+    try (CloseableIterable<ParquetBatches.Batch> bs =
+        ParquetBatches.open(in, Rows.SCHEMA, Expressions.alwaysTrue(), start, length)) {
+      for (ParquetBatches.Batch b : bs) {
+        for (int row = 0; row < b.rows(); row++) {
+          h.add(record(b, row), true);
+        }
+      }
+    }
+    return h;
+  }
+
+  private static Record record(ParquetBatches.Batch b, int row) {
+    Record r = GenericRecord.create(Rows.SCHEMA);
+    for (int c = 0; c < Rows.SCHEMA.columns().size(); c++) {
+      r.set(c, b.get(c, row));
+    }
+    return r;
   }
 
   private InputFile version(long length) {
@@ -213,6 +241,18 @@ class AppendableParquetTest {
       }
     }
     assertThat(ids).isSorted();
+    // and in the vectorized reader's batches, whose positions start at each row group's offset
+    List<Long> batchIds = new ArrayList<>();
+    try (CloseableIterable<ParquetBatches.Batch> bs =
+        ParquetBatches.open(in, Rows.SCHEMA.select("id"), Expressions.alwaysTrue())) {
+      for (ParquetBatches.Batch b : bs) {
+        for (int row = 0; row < b.rows(); row++) {
+          assertThat(b.position(row)).isEqualTo(batchIds.size());
+          batchIds.add(b.getLong(0, row));
+        }
+      }
+    }
+    assertThat(batchIds).isEqualTo(ids);
 
     // Iceberg's split offsets are sorted (its spec requires it); planned splits still read every
     // row once, each split taking the row group whose midpoint it holds
@@ -228,6 +268,13 @@ class AppendableParquetTest {
       }
     }
     assertThat(bySplit).isEqualTo(want);
+    TableHash byBatchSplit = new TableHash();
+    for (int i = 0; i < offsets.size(); i++) {
+      long start = offsets.get(i);
+      long end = i + 1 < offsets.size() ? offsets.get(i + 1) : v.len2();
+      byBatchSplit.addAll(readBatches(in, start, end - start));
+    }
+    assertThat(byBatchSplit).isEqualTo(want);
   }
 
   @Test
@@ -289,7 +336,10 @@ class AppendableParquetTest {
     assertThat(c.getRangeBytes()).isGreaterThan(v.len0() / 2);
   }
 
-  /** Stock reads take two stream GETs for the footer; a prefetch that holds it takes one. */
+  /**
+   * Stock reads take two stream GETs for the footer; a prefetch that holds it takes one. Iceberg's
+   * row reader sends exactly the requests its vectorized reader (the arms') sends.
+   */
   @Test
   void footerPrefetchTakesOneRequest() throws IOException {
     Versions v = build(60_000, 20_000);
@@ -298,11 +348,13 @@ class AppendableParquetTest {
     TracingFileIO a = new TracingFileIO(io, appender, stock);
     TracingFileIO b = new TracingFileIO(io, appender, prefetch);
     TableHash want = hash(rows(0, 60_000, 0));
-    assertThat(readIceberg(new VersionedInputFile(a.newInputFile(LOC, v.len0()), v.len0())))
+    assertThat(readBatches(new VersionedInputFile(a.newInputFile(LOC, v.len0()), v.len0()), -1, -1))
         .isEqualTo(want);
     assertThat(
-            readIceberg(
-                new VersionedInputFile(b.newInputFile(LOC, v.len0()), v.len0(), null, 64 << 10)))
+            readBatches(
+                new VersionedInputFile(b.newInputFile(LOC, v.len0()), v.len0(), null, 64 << 10),
+                -1,
+                -1))
         .isEqualTo(want);
 
     IoTrace.Counters s = stock.snapshot();
@@ -311,6 +363,25 @@ class AppendableParquetTest {
     assertThat(p.getStream()).isZero();
     assertThat(p.getRange()).isEqualTo(s.getRange() + 1);
     assertThat(p.gets()).isEqualTo(s.gets() - 1);
+
+    for (int prefetchBytes : new int[] {0, 64 << 10}) {
+      IoTrace byBatches = new IoTrace();
+      IoTrace byRows = new IoTrace();
+      TracingFileIO c = new TracingFileIO(io, appender, byBatches);
+      TracingFileIO d = new TracingFileIO(io, appender, byRows);
+      readBatches(
+          new VersionedInputFile(c.newInputFile(LOC, v.len0()), v.len0(), null, prefetchBytes),
+          -1,
+          -1);
+      try (CloseableIterable<Record> rs =
+          ParquetReads.open(
+              new VersionedInputFile(d.newInputFile(LOC, v.len0()), v.len0(), null, prefetchBytes),
+              Rows.SCHEMA,
+              Expressions.alwaysTrue())) {
+        rs.forEach(r -> {});
+      }
+      assertThat(byRows.snapshot()).isEqualTo(byBatches.snapshot());
+    }
   }
 
   /**

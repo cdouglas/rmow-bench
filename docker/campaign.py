@@ -357,7 +357,9 @@ def run(campaign_file):
         job_store.mkdir(parents=True)
         placement = (f"campaign={name} job={job.name} node={job.node} cpus={compress(job.cpus)} "
                      f"owned={compress(job.owned())}")
-        cmd = ["java", f"-Xmx{job.heap}", *os.environ.get("JAVA_EXTRA", "").split(),
+        # Arrow (the arms' vectorized Parquet reads) needs java.nio open on Java 17
+        cmd = ["java", f"-Xmx{job.heap}", "--add-opens=java.base/java.nio=ALL-UNNAMED",
+               *os.environ.get("JAVA_EXTRA", "").split(),
                f"-Drmow.build.git={os.environ.get('RMOW_GIT_SHA', '')}",
                f"-Drmow.build.dirty={os.environ.get('RMOW_GIT_DIRTY', '') == 'true'}",
                f"-Drmow.build.snapshot=image:{os.environ.get('RMOW_IMAGE', 'unknown')}",

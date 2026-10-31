@@ -2,6 +2,7 @@ package org.rmow.bench.workload;
 
 import static org.apache.iceberg.types.Types.NestedField.required;
 
+import org.apache.avro.util.Utf8;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.data.GenericRecord;
 import org.apache.iceberg.data.Record;
@@ -35,15 +36,17 @@ public final class Rows {
   public static final int TS = 1;
   public static final int VERSION = 2;
 
-  private static final String[] S1 = vocab("category-", 64);
-  private static final String[] S2 = vocab("region-", 1024);
+  // UTF-8 bytes, as Spark's rows hold strings (UTF8String): Iceberg's writer writes a Utf8's bytes
+  // as they are, where it would encode a String's again for every value
+  private static final Utf8[] S1 = vocab("category-", 64);
+  private static final Utf8[] S2 = vocab("region-", 1024);
 
   private Rows() {}
 
-  private static String[] vocab(String prefix, int n) {
-    String[] v = new String[n];
+  private static Utf8[] vocab(String prefix, int n) {
+    Utf8[] v = new Utf8[n];
     for (int i = 0; i < n; i++) {
-      v[i] = prefix + String.format("%04d", i);
+      v[i] = new Utf8(prefix + String.format("%04d", i));
     }
     return v;
   }
@@ -80,6 +83,11 @@ public final class Rows {
     return mix64(id * 0x9E3779B97F4A7C15L ^ (version + 0x632BE59BD9B4E019L));
   }
 
+  /** A string column's value as a {@code String} (a reader's, or the writer's {@code Utf8}). */
+  private static Object text(Object value) {
+    return value instanceof CharSequence ? value.toString() : value;
+  }
+
   /** Throws if a decoded row's payload is not the one its (id, ts, version) determines. */
   public static void verify(Record r) {
     long id = (Long) r.get(0);
@@ -89,7 +97,7 @@ public final class Rows {
     for (int i = 3; i < SCHEMA.columns().size(); i++) {
       Object got = r.get(i);
       Object want = expected.get(i);
-      if (!want.equals(got instanceof CharSequence ? got.toString() : got)) {
+      if (!text(want).equals(text(got))) {
         throw new IllegalStateException(
             "Row " + id + " v" + version + " column " + i + ": got " + got + ", want " + want);
       }

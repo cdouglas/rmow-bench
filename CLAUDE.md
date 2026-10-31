@@ -39,6 +39,9 @@ bin/run.sh configs/smoke.json                  # one configuration; prints the r
 bin/matrix.sh --build configs/local-compact-*.json   # several, from a build snapshot
 ```
 
+- **Arrow needs `--add-opens=java.base/java.nio=ALL-UNNAMED`** on Java 17: every arm reads
+  Parquet through Iceberg's vectorized reader (README, What is measured). `bin/run.sh`,
+  `bin/matrix.sh`, `docker/campaign.py` and surefire pass it; a JVM started any other way needs it.
 - **`bin/matrix.sh`** snapshots the build into `results/builds/<UTC>-<sha>[-dirty]/` (jar,
   configs, and the diff if the tree is dirty), so you can keep editing and rebuilding while runs
   go. Each run's manifest names its snapshot.

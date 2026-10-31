@@ -4,4 +4,6 @@
 set -euo pipefail
 here="$(cd "$(dirname "$0")/.." && pwd)"
 jar="$(ls "$here"/target/rmow-bench-*.jar | grep -v -- '-tests' | head -1)"
-exec java ${JAVA_OPTS:--Xmx8g} -cp "$jar:$here/target/lib/*" org.rmow.bench.bench.Main "$@"
+# Arrow (the arms' vectorized Parquet reads) needs java.nio open on Java 17
+exec java ${JAVA_OPTS:--Xmx8g} --add-opens=java.base/java.nio=ALL-UNNAMED \
+  -cp "$jar:$here/target/lib/*" org.rmow.bench.bench.Main "$@"

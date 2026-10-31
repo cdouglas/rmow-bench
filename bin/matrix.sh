@@ -89,7 +89,7 @@ failed=()
 for c in "${configs[@]}"; do
   name="$(basename "$c")"
   echo "== $name"
-  if ! java ${JAVA_OPTS:--Xmx8g} \
+  if ! java ${JAVA_OPTS:--Xmx8g} --add-opens=java.base/java.nio=ALL-UNNAMED \
       -Drmow.build.git="$sha" -Drmow.build.dirty="$dirty" -Drmow.build.snapshot="$snap" \
       -cp "$classpath" org.rmow.bench.bench.Main "$snap/configs/$name" \
       --out "$out" --store-root "$store" ${pass[@]+"${pass[@]}"} 2>&1 | tee "$snap/logs/${name%.json}.log"; then

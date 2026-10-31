@@ -11,9 +11,10 @@ import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.parquet.Parquet;
 
 /**
- * The one Parquet read path every arm uses: Iceberg's {@code Parquet.read} with the generic record
- * reader, as {@code GenericReader} opens data files. The filter only skips row groups (by stats,
- * dictionaries and bloom filters); callers evaluate it on rows, as a residual.
+ * Iceberg's {@code Parquet.read} with the generic record reader, as {@code GenericReader} opens
+ * data files: the arms' read path until 2026-10-31, when they moved to Iceberg's vectorized reader
+ * ({@link ParquetBatches}). The compatibility tests read with both. The filter only skips row
+ * groups (by stats, dictionaries and bloom filters); callers evaluate it on rows, as a residual.
  */
 public final class ParquetReads {
 

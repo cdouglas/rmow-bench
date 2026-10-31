@@ -22,6 +22,8 @@
          against parquet 1.17.1. -->
     <iceberg.version>1.12.0-atomicio-SNAPSHOT</iceberg.version>
     <parquet.version>1.17.1</parquet.version>
+    <!-- iceberg-arrow's Arrow (its vectorized reader, as Spark reads an Iceberg table) -->
+    <arrow.version>15.0.2</arrow.version>
     <hadoop.version>3.4.1</hadoop.version>
     <jackson.version>2.22.2</jackson.version>
     <junit.version>5.14.4</junit.version>
@@ -37,6 +39,14 @@
 
   <dependencyManagement>
     <dependencies>
+      <!-- one Jackson: Arrow (iceberg-arrow) asks for annotations 2.16, which databind 2.22 breaks on -->
+      <dependency>
+        <groupId>com.fasterxml.jackson</groupId>
+        <artifactId>jackson-bom</artifactId>
+        <version>${jackson.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
       <dependency>
         <groupId>software.amazon.awssdk</groupId>
         <artifactId>bom</artifactId>
@@ -74,6 +84,31 @@
       <groupId>org.apache.iceberg</groupId>
       <artifactId>iceberg-parquet</artifactId>
       <version>${iceberg.version}</version>
+    </dependency>
+    <!-- every arm reads Parquet through Iceberg's vectorized reader (ParquetBatches). Arrow
+         allocates with Unsafe, not Netty: Arrow 15's Netty allocator patches Netty's internals,
+         and the AWS and Azure SDKs bring a newer Netty -->
+    <dependency>
+      <groupId>org.apache.iceberg</groupId>
+      <artifactId>iceberg-arrow</artifactId>
+      <version>${iceberg.version}</version>
+      <exclusions>
+        <exclusion>
+          <groupId>org.apache.arrow</groupId>
+          <artifactId>arrow-memory-netty</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.arrow</groupId>
+      <artifactId>arrow-vector</artifactId>
+      <version>${arrow.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.arrow</groupId>
+      <artifactId>arrow-memory-unsafe</artifactId>
+      <version>${arrow.version}</version>
+      <scope>runtime</scope>
     </dependency>
     <dependency>
       <groupId>org.apache.iceberg</groupId>
@@ -216,6 +251,10 @@
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-surefire-plugin</artifactId>
         <version>3.2.2</version>
+        <configuration>
+          <!-- Arrow's memory needs java.nio open on Java 17 (bin/run.sh passes the same) -->
+          <argLine>--add-opens=java.base/java.nio=ALL-UNNAMED</argLine>
+        </configuration>
       </plugin>
       <!-- bin/run.sh runs from target/lib + the project jar (no shading: the AWS/Azure/Hadoop jars
            depend on unmerged META-INF/services entries). copy-dependencies never removes a jar,

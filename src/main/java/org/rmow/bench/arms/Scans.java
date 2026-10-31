@@ -8,6 +8,7 @@ import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.PriorityQueue;
 import java.util.Iterator;
@@ -28,10 +29,8 @@ import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.PartitionSpecParser;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.SchemaParser;
-import org.apache.iceberg.data.InternalRecordWrapper;
 import org.apache.iceberg.data.Record;
 import org.apache.iceberg.deletes.PositionDeleteIndex;
-import org.apache.iceberg.expressions.Evaluator;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.ResidualEvaluator;
@@ -48,16 +47,18 @@ import org.rmow.bench.io.IoTrace;
 import org.rmow.bench.io.Spans;
 import org.rmow.bench.oracle.TableHash;
 import org.rmow.bench.rmow.FooterCodec;
-import org.rmow.bench.rmow.ParquetReads;
+import org.rmow.bench.rmow.ParquetBatches;
 import org.rmow.bench.rmow.SplitFile;
 import org.rmow.bench.rmow.VersionedInputFile;
 import org.rmow.bench.workload.Rows;
 
 /**
- * The one file-scan path every arm uses, as Iceberg's generic reader opens a scan task: a {@code
+ * The one file-scan path every arm uses, as Spark's Iceberg reader opens a scan task: a {@code
  * FileScanTask} for the data file and its delete files, Iceberg's delete filter (opening delete
- * files with their lengths), the {@link VersionedInputFile} view (the file's length, the optional
- * cached tail and footer prefetch), the stock Parquet reader, and the filter as a residual.
+ * files with their lengths) for the file's position deletes, the {@link VersionedInputFile} view
+ * (the file's length, the optional cached tail and footer prefetch), Iceberg's vectorized Parquet
+ * reader ({@link ParquetBatches}), and, on each batch, the deletes by position and the filter as a
+ * residual ({@link RowBatch}).
  */
 final class Scans {
 
@@ -84,10 +85,9 @@ final class Scans {
   }
 
   /**
-   * Reads {@code df} with {@code deletes} applied and {@code filter} as a residual; rows have the
-   * delete filter's required schema ({@code projection}, plus {@code _pos} if there are deletes).
-   * The scan is a {@link Spans.Kind#DECODE} span: its requests and its deletes' loading are spans
-   * of their own.
+   * Reads {@code df} with {@code deletes} applied and {@code filter} as a residual, as batches of
+   * the live rows of {@code projection} (which may hold {@code _pos}). The scan is a {@link
+   * Spans.Kind#DECODE} span: its requests and its deletes' loading are spans of their own.
    *
    * @param tail the file's cached tail, or null to read its footer from storage
    * @param start the split's start, or -1 for the whole file
@@ -102,7 +102,7 @@ final class Scans {
       byte[] tail,
       long start,
       long length,
-      Consumer<Record> rows)
+      Consumer<RowBatch> rows)
       throws IOException {
     scan(ctx, reader, df, deletes, projection, filter, tail, start, length, null, rows);
   }
@@ -119,7 +119,7 @@ final class Scans {
       long start,
       long length,
       DeleteCache deleteCache,
-      Consumer<Record> rows)
+      Consumer<RowBatch> rows)
       throws IOException {
     // storage holds what is below a cached tail (for a split file's object, the tail is not in
     // storage at all, and the virtual file may be longer than the object)
@@ -144,7 +144,7 @@ final class Scans {
       long start,
       long length,
       DeleteCache deleteCache,
-      Consumer<Record> rows)
+      Consumer<RowBatch> rows)
       throws IOException {
     FileScanTask task =
         new BaseFileScanTask(
@@ -155,36 +155,52 @@ final class Scans {
           new LengthAwareDeleteFilter(
               ctx.io(), task, Rows.SCHEMA, projection, reader.footerPrefetchBytes(), deleteCache,
               scanDeletes);
-      Schema required = deleteFilter.requiredSchema();
-      Evaluator residual =
-          filter == Expressions.alwaysTrue() ? null : new Evaluator(required.asStruct(), filter);
-      InternalRecordWrapper wrapper = new InternalRecordWrapper(required.asStruct());
       VersionedInputFile in =
           new VersionedInputFile(
               stored, df.fileSizeInBytes(), tail, reader.footerPrefetchBytes(), chunks);
-      decode(deleteFilter, in, required, filter, start, length, residual, wrapper, rows);
+      decode(deleteFilter, in, projection, filter, start, length, rows);
     }
   }
 
   private static void decode(
       LengthAwareDeleteFilter deleteFilter,
       VersionedInputFile in,
-      Schema required,
+      Schema projection,
       Expression filter,
       long start,
       long length,
-      Evaluator residual,
-      InternalRecordWrapper wrapper,
-      Consumer<Record> rows)
+      Consumer<RowBatch> rows)
       throws IOException {
+    RowBatch.Columns columns = new RowBatch.Columns(projection);
+    RowBatch.Residual residual = RowBatch.Residual.of(filter, columns);
     try (Spans.Span decode = Spans.open(Spans.Kind.DECODE);
-        CloseableIterable<Record> rs =
-            deleteFilter.filter(ParquetReads.open(in, required, filter, start, length))) {
-      for (Record r : rs) {
-        if (residual == null || residual.eval(wrapper.wrap(r))) {
-          rows.accept(r);
+        CloseableIterable<ParquetBatches.Batch> batches =
+            ParquetBatches.open(in, columns.data, filter, start, length)) {
+      PositionDeleteIndex deleted = positionDeletes(deleteFilter);
+      for (ParquetBatches.Batch b : batches) {
+        RowBatch live = RowBatch.select(b, columns, deleted, residual);
+        if (live.size() > 0) {
+          rows.accept(live);
         }
       }
+    }
+  }
+
+  /** The file's position deletes, loaded once (a deletes span); null if it has none. */
+  private static PositionDeleteIndex positionDeletes(LengthAwareDeleteFilter deleteFilter) {
+    if (deleteFilter.hasEqDeletes()) {
+      throw new IllegalStateException("No arm writes equality deletes");
+    }
+    return deleteFilter.hasPosDeletes() ? deleteFilter.deletedRowPositions() : null;
+  }
+
+  /** Adds a batch's live rows to {@code h}, checking each one's payload when {@code verify}. */
+  static void hash(TableHash h, RowBatch b, boolean verify) {
+    for (int k = 0; k < b.size(); k++) {
+      if (verify) {
+        Rows.verify(b.record(k));
+      }
+      h.add(b.id(k), b.version(k));
     }
   }
 
@@ -274,7 +290,7 @@ final class Scans {
             () -> {
               TableHash h = new TableHash();
               scan(ctx, reader, f.file(), f.deletes(), Rows.SCHEMA, filter, footer, start, length,
-                  deletes, r -> h.add(r, ctx.verifyRows()));
+                  deletes, b -> hash(h, b, ctx.verifyRows()));
               return h;
             });
       }
@@ -479,7 +495,7 @@ final class Scans {
           }
           lastTs = o.ts;
           lastId = o.id;
-          h.add(o.row, ctx.verifyRows());
+          o.addTo(h, ctx.verifyRows());
           if (o.advance()) {
             open.add(o);
           } else {
@@ -494,39 +510,32 @@ final class Scans {
     }
   }
 
-  /** An open run of a merge: its rows, and the one it gives next. */
-  private static final class OpenRun implements AutoCloseable {
-    private final String what;
-    private final Iterator<Record> rows;
-    private final AutoCloseable resources;
-    private Record row;
-    private long ts;
-    private long id;
+  /** An open run of a merge: its rows, and the one it gives next ({@code id}, {@code ts}). */
+  private abstract static class OpenRun implements AutoCloseable {
+    final String what;
+    long ts;
+    long id;
 
-    private OpenRun(String what, Iterator<Record> rows, AutoCloseable resources) {
+    OpenRun(String what) {
       this.what = what;
-      this.rows = rows;
-      this.resources = resources;
     }
 
+    /** Moves to the run's next row; false at its end. */
+    abstract boolean advance();
+
+    /** Adds the current row to {@code h}, checking its payload when {@code verify}. */
+    abstract void addTo(TableHash h, boolean verify);
+
     /**
-     * A row group's scan, pulled a row at a time; or a small file, read whole and sorted in
-     * memory, its rows held until merged.
+     * A row group's scan, its batches decoded as the merge reaches them; or a small file, read
+     * whole and sorted in memory, its rows held until merged.
      */
     static OpenRun open(ArmContext ctx, Reader reader, Run run, DeleteCache deletes)
         throws IOException {
       DataFile df = run.file().file();
       String what = df.location() + (run.start() < 0 ? "" : " at " + run.start());
       if (run.start() < 0) {
-        List<Record> rows = new ArrayList<>();
-        scan(ctx, reader, df, run.file().deletes(), Rows.SCHEMA, Expressions.alwaysTrue(), null,
-            -1, -1, deletes, rows::add);
-        rows.sort(
-            Comparator.comparingLong((Record r) -> (Long) r.get(Rows.TS))
-                .thenComparingLong(r -> (Long) r.get(Rows.ID)));
-        Held.Scope held = Held.scope("merged " + what);
-        held.hold(Held.Kind.ROWS, rows.size(), "read " + what + " whole to sort");
-        return new OpenRun(what, rows.iterator(), held);
+        return SortedRows.read(ctx, reader, run, deletes, what);
       }
       FileScanTask task =
           new BaseFileScanTask(
@@ -542,16 +551,18 @@ final class Scans {
           new VersionedInputFile(
               ctx.io().newInputFile(df.location(), df.fileSizeInBytes() - run.tail().length),
               df.fileSizeInBytes(), run.tail(), reader.footerPrefetchBytes(), chunks);
-      CloseableIterable<Record> rs =
-          filter.filter(
-              ParquetReads.open(in, filter.requiredSchema(), Expressions.alwaysTrue(),
-                  run.start(), run.length()));
-      return new OpenRun(
+      RowBatch.Columns columns = new RowBatch.Columns(Rows.SCHEMA);
+      PositionDeleteIndex deleted = positionDeletes(filter);
+      CloseableIterable<ParquetBatches.Batch> batches =
+          ParquetBatches.open(in, columns.data, Expressions.alwaysTrue(), run.start(), run.length());
+      return new BatchRows(
           what,
-          rs.iterator(),
+          batches,
+          columns,
+          deleted,
           () -> {
             try {
-              rs.close();
+              batches.close();
             } finally {
               scanDeletes.close();
               chunks.close();
@@ -559,14 +570,54 @@ final class Scans {
           });
     }
 
+    @Override
+    public abstract void close() throws IOException;
+  }
+
+  /** A row group's run: its live rows, a batch at a time. */
+  private static final class BatchRows extends OpenRun {
+    private final Iterator<ParquetBatches.Batch> batches;
+    private final RowBatch.Columns columns;
+    private final PositionDeleteIndex deleted;
+    private final AutoCloseable resources;
+    private RowBatch rows = null;
+    private int next = 0; // the batch's next live row
+    private int at = -1; // the current one
+
+    BatchRows(
+        String what,
+        CloseableIterable<ParquetBatches.Batch> batches,
+        RowBatch.Columns columns,
+        PositionDeleteIndex deleted,
+        AutoCloseable resources) {
+      super(what);
+      this.batches = batches.iterator();
+      this.columns = columns;
+      this.deleted = deleted;
+      this.resources = resources;
+    }
+
+    @Override
     boolean advance() {
-      if (!rows.hasNext()) {
-        return false;
+      while (rows == null || next >= rows.size()) {
+        if (!batches.hasNext()) {
+          return false;
+        }
+        rows = RowBatch.select(batches.next(), columns, deleted, null);
+        next = 0;
       }
-      row = rows.next();
-      id = (Long) row.get(Rows.ID);
-      ts = (Long) row.get(Rows.TS);
+      at = next++;
+      id = rows.id(at);
+      ts = rows.ts(at);
       return true;
+    }
+
+    @Override
+    void addTo(TableHash h, boolean verify) {
+      if (verify) {
+        Rows.verify(rows.record(at));
+      }
+      h.add(id, rows.version(at));
     }
 
     @Override
@@ -578,6 +629,75 @@ final class Scans {
       } catch (Exception e) {
         throw new IOException(e);
       }
+    }
+  }
+
+  /** A small file's run: its live rows read whole, sorted by {@code ts} then {@code id}, held. */
+  private static final class SortedRows extends OpenRun {
+    private final long[][] rows; // {ts, id, version}, sorted
+    private final List<Record> records; // with verifyRows, in rows' order
+    private final Held.Scope held;
+    private int at = -1;
+
+    private SortedRows(
+        String what, long[][] rows, List<Record> records, Held.Scope held) {
+      super(what);
+      this.rows = rows;
+      this.records = records;
+      this.held = held;
+    }
+
+    static SortedRows read(ArmContext ctx, Reader reader, Run run, DeleteCache deletes, String what)
+        throws IOException {
+      DataFile df = run.file().file();
+      List<long[]> rows = new ArrayList<>();
+      Map<Long, Record> records = ctx.verifyRows() ? new HashMap<>() : null;
+      scan(ctx, reader, df, run.file().deletes(), Rows.SCHEMA, Expressions.alwaysTrue(), null,
+          -1, -1, deletes,
+          b -> {
+            for (int k = 0; k < b.size(); k++) {
+              rows.add(new long[] {b.ts(k), b.id(k), b.version(k)});
+              if (records != null) {
+                records.put(b.id(k), b.record(k));
+              }
+            }
+          });
+      long[][] sorted = rows.toArray(new long[0][]);
+      Arrays.sort(sorted, Comparator.comparingLong((long[] r) -> r[0]).thenComparingLong(r -> r[1]));
+      List<Record> inOrder = null;
+      if (records != null) {
+        inOrder = new ArrayList<>(sorted.length);
+        for (long[] r : sorted) {
+          inOrder.add(records.get(r[1]));
+        }
+      }
+      Held.Scope held = Held.scope("merged " + what);
+      held.hold(Held.Kind.ROWS, sorted.length, "read " + what + " whole to sort");
+      return new SortedRows(what, sorted, inOrder, held);
+    }
+
+    @Override
+    boolean advance() {
+      if (at + 1 >= rows.length) {
+        return false;
+      }
+      at++;
+      ts = rows[at][0];
+      id = rows[at][1];
+      return true;
+    }
+
+    @Override
+    void addTo(TableHash h, boolean verify) {
+      if (verify) {
+        Rows.verify(records.get(at));
+      }
+      h.add(id, (int) rows[at][2]);
+    }
+
+    @Override
+    public void close() {
+      held.close();
     }
   }
 
@@ -620,7 +740,7 @@ final class Scans {
                 }
                 TableHash h = new TableHash();
                 scan(ctx, reader, object, f.deletes(), Rows.SCHEMA, filter, v.tail(), start,
-                    splitLength, r -> h.add(r, ctx.verifyRows()));
+                    splitLength, b -> hash(h, b, ctx.verifyRows()));
                 return h;
               });
         }

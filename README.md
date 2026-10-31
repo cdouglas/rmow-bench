@@ -110,6 +110,19 @@ All arms replay the same seeded op log in lockstep, in an order shuffled at ever
 start from the **same initial-load bytes**: a stock Parquet file is already the first version of an
 appendable one.
 
+**Parquet is read and written as Spark reads and writes an Iceberg table**, the same way in every
+arm. Every read (the reads, writers' scans to locate rows, merge reads) goes through Iceberg's
+vectorized reader (iceberg-arrow, `ParquetBatches`): batches of 5,000 rows of Arrow vectors, the
+file's position deletes applied per batch by position, and the residual compiled to comparisons
+on the batch's columns (`RowBatch`), with Arrow's per-value bounds and null checks off, as
+Iceberg's Spark reader sets them. Writes go through Iceberg's generic writer over parquet-java, as
+Spark's and Flink's do, with strings as UTF-8 bytes (Avro's `Utf8`), as Spark's rows hold them.
+Before 2026-10-31 every arm read through Iceberg's generic row reader, which builds a Java object
+per row: a profile put about 85% of a read's CPU in its per-value and per-row work, and a full read
+takes about a quarter of the instructions on the vectorized reader, with the same requests and
+bytes. Arrow needs `--add-opens=java.base/java.nio=ALL-UNNAMED` on Java 17, which `bin/run.sh`,
+`bin/matrix.sh`, the container's runner and the tests pass.
+
 The phases recorded in `steps.jsonl` are:
 
 | Phase | What it covers |
@@ -150,7 +163,7 @@ kind of work, as wall and CPU time (`<kind>_ns`, `<kind>_cpu_ns`), each exclusiv
 |---|---|
 | `io` | Every call into the store, through the tracing FileIO: the client's work (checksums, HTTP, TLS) and the wait. A PUT through an output stream is its close, which uploads: its writes copy into the client's buffer, as part of the encoding. |
 | `encode` | Parquet encoding of rows: data files and RMoW's regions. |
-| `decode` | Parquet decoding in a scan: footers, pages and rows, with deletes applied, and the scan's consumer (a hash, or rows kept to merge). |
+| `decode` | Parquet decoding in a scan: footers, pages into column batches, the deletes and the residual applied to each batch, and the scan's consumer (a hash, or rows kept to merge). |
 | `footer` | RMoW's footers: Thrift decoding, encoding and merging. |
 | `deletes` | Delete files: DVs and position deletes built, encoded, loaded and decoded. |
 | `rows` | Rows the harness makes for a writer from their id, event time and version, a chunk at a time as the encoder takes them (since 2026-10-29; before, the same work ran ahead of the encoding, outside every span). The lab counts it in other CPU, as before. |
@@ -182,8 +195,9 @@ The levels are counted where the code holds data, so two runs record the same pe
 requests and bytes. They are not the JVM's heap, which holds the benchmark's own state too and
 moves with the collector. Every hold must be released by the end of the outermost phase that made
 it, or the run fails. Writers stream: RMoW reads, rewrites and encodes one row group at a time, as
-parts of `merge-read` and `write`, each recorded once; the MoR family keeps each row it reads back
-as its id and version, and makes the rows again as the encoder takes them, as it always did. A
+parts of `merge-read` and `write`, each recorded once. Every arm keeps each row it reads back as
+its id and version, and makes the rows again as the encoder takes them (`MadeRows`; RMoW since
+2026-10-31, when it moved from keeping the decoded rows; the MoR family always did). A
 read whose splits run on a pool holds as many row groups as its threads do at once, so its peaks
 depend on how they interleave.
 
@@ -471,8 +485,8 @@ were before regions existed (`OpLogGeneratorTest` pins three runs' hashes).
 
 | Package | Contents |
 |---|---|
-| `rmow` | The append layer: `OffsetOutputFile` (the stock writer, with positions starting at the object's length), `RegionWriter`, `FooterCodec` (merging Thrift footers), `VersionedInputFile` (one version's view, with the optional footer prefetch), `LogicalFile` with its two layouts `RmowFile` (appendable) and `SplitFile` (an object per version), and `ParquetReads` (the one read path every arm uses). |
-| `arms` | `MorArm` (with the subclasses `MorV2Arm`, `MorV3Arm`, `CowArm` and `TailCowArm`), `RmowArm`, `TailPolicy`, `DataFileWriter`, `MadeRows` (a writer's rows, made as the encoder takes them) and `InitialLoad`; `Reader` (the reader models), `Scans` (the one file-scan path every arm uses, and the sorted read), `LengthAwareDeleteFilter`, `DeleteCache`, `ChunksHeld` (a scan's column chunks, by row group) and `WriterFooters`. |
+| `rmow` | The append layer: `OffsetOutputFile` (the stock writer, with positions starting at the object's length), `RegionWriter`, `FooterCodec` (merging Thrift footers), `VersionedInputFile` (one version's view, with the optional footer prefetch), `LogicalFile` with its two layouts `RmowFile` (appendable) and `SplitFile` (an object per version), and `ParquetBatches` (the one read path every arm uses: Iceberg's vectorized reader). |
+| `arms` | `MorArm` (with the subclasses `MorV2Arm`, `MorV3Arm`, `CowArm` and `TailCowArm`), `RmowArm`, `TailPolicy`, `DataFileWriter`, `MadeRows` (a writer's rows, made as the encoder takes them) and `InitialLoad`; `Reader` (the reader models), `Scans` (the one file-scan path every arm uses, and the sorted read), `RowBatch` (a batch's live rows: its deletes and compiled residual applied), `LengthAwareDeleteFilter`, `DeleteCache`, `ChunksHeld` (a scan's column chunks, by row group) and `WriterFooters`. |
 | `workload`, `oracle` | The seeded op log and the reference model. |
 | `io` | `MemFileIO` and `PreadFileIO` (with the fork's atomic operations, `LocalCas`), `TracingFileIO`, `IoTrace`, `RelocatedFileIO` (a run's logical paths on its own prefix), `Spans` (where the time went), `Held` (what is held), `StoreLatency` (injected latency), the SDK recorders (`SdkRecorder`: `S3Recorder`, `AzureRecorder`), and for Azure `AdlsClients`. |
 | `append` | `RegionAppender`, `AtomicAppender` (every store's, through the fork's `SupportsAtomicOperations`) and `EmulatorAppenders` (the emulators' stand-ins). |

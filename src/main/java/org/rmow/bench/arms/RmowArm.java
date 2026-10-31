@@ -14,7 +14,6 @@ import java.util.Set;
 import java.util.TreeMap;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DeleteFile;
-import org.apache.iceberg.data.Record;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.expressions.InclusiveMetricsEvaluator;
@@ -164,21 +163,20 @@ public final class RmowArm implements Arm {
     return v;
   }
 
-  /** The changes a batch makes to one live row group, and its rows once read. */
+  /** The changes a batch makes to one live row group, and its rows once read, as {id, version}. */
   private static final class Touched {
     final Map<Long, Integer> updates = new HashMap<>();
     final Set<Long> deletes = new HashSet<>();
-    List<Record> rows;
+    List<long[]> rows;
 
     /** The row group's rows after this batch's updates and deletes. */
-    List<Record> merged() {
-      List<Record> out = new ArrayList<>(rows.size());
-      for (Record r : rows) {
-        long id = (Long) r.get(Rows.ID);
-        Integer v = updates.get(id);
+    List<long[]> merged() {
+      List<long[]> out = new ArrayList<>(rows.size());
+      for (long[] r : rows) {
+        Integer v = updates.get(r[0]);
         if (v != null) {
-          out.add(Rows.record(id, (Long) r.get(Rows.TS), v));
-        } else if (!deletes.contains(id)) {
+          out.add(new long[] {r[0], v});
+        } else if (!deletes.contains(r[0])) {
           out.add(r);
         }
       }
@@ -290,16 +288,19 @@ public final class RmowArm implements Arm {
   }
 
   /** A row group's rows, held until the writer has encoded them. */
-  private List<Record> readRowGroup(long rg) throws IOException {
-    List<Record> rows = readRowGroup(files.get(fileOfRg.get(rg)), rg);
+  private List<long[]> readRowGroup(long rg) throws IOException {
+    List<long[]> rows = readRowGroup(files.get(fileOfRg.get(rg)), rg);
     held.hold(Held.Kind.ROWS, rows.size(), "read back row group " + rg);
     return rows;
   }
 
-  /** The rows of one row group of {@code f}'s current version, read as a writer reads. */
-  private List<Record> readRowGroup(LogicalFile f, long rgId) throws IOException {
+  /**
+   * The rows of one row group of {@code f}'s current version, read as a writer reads, as {id,
+   * version} ({@link RowBatch#idVersions}).
+   */
+  private List<long[]> readRowGroup(LogicalFile f, long rgId) throws IOException {
     RowGroup rg = f.rowGroup(rgId);
-    List<Record> rows = new ArrayList<>((int) rg.getNum_rows());
+    List<long[]> rows = new ArrayList<>((int) rg.getNum_rows());
     LogicalFile.RowGroupSource src = f.source(rgId);
     Scans.scan(
         ctx,
@@ -311,7 +312,7 @@ public final class RmowArm implements Arm {
         footerFor(f, src),
         src.start(),
         src.size(),
-        rows::add);
+        b -> b.idVersions(rows));
     if (rows.size() != rg.getNum_rows()) {
       throw new IllegalStateException(
           "Read " + rows.size() + " rows of row group " + rgId + ", expected " + rg.getNum_rows());
@@ -382,9 +383,9 @@ public final class RmowArm implements Arm {
       throws IOException {
     // the inserts, merged with the open tail row groups the policy picked
     if (b.insertIds().length > 0) {
-      List<Record> rows = new ArrayList<>(b.insertIds().length);
+      List<long[]> rows = new ArrayList<>(b.insertIds().length);
       for (long id : b.insertIds()) {
-        rows.add(Rows.record(id, ctx.log().ts(id), 0));
+        rows.add(new long[] {id, 0});
       }
       held.hold(Held.Kind.ROWS, rows.size(), "the batch's inserts");
       Pending p = pending(pending, tail >= 0 ? tail : files.size());
@@ -455,22 +456,21 @@ public final class RmowArm implements Arm {
    * inPlaceOf} in the footer (null: listed last); null if there are no rows.
    */
   private Region addRegion(
-      Pending p, List<Record> rows, Map<Long, List<Long>> idsOfNewRg, Long inPlaceOf)
+      Pending p, List<long[]> rows, Map<Long, List<Long>> idsOfNewRg, Long inPlaceOf)
       throws IOException {
     if (rows.isEmpty()) {
       return null;
     }
+    OpLog log = ctx.log();
     if (ctx.layout().sortWrites) {
-      rows.sort(
-          Comparator.comparingLong((Record r) -> (Long) r.get(Rows.TS))
-              .thenComparingLong(r -> (Long) r.get(Rows.ID)));
+      rows.sort(Comparator.comparingLong((long[] r) -> log.ts(r[0])).thenComparingLong(r -> r[0]));
     }
     long rg = nextRgId++;
     List<Long> ids = new ArrayList<>(rows.size());
-    for (Record r : rows) {
-      ids.add((Long) r.get(Rows.ID));
+    for (long[] r : rows) {
+      ids.add(r[0]);
     }
-    Region region = regions.write(p.location, p.nextBase(), rows);
+    Region region = regions.write(p.location, p.nextBase(), new MadeRows(rows, log));
     held.hold(Held.Kind.PENDING, region.bytes().length, "a region of " + name(p.location));
     p.regions.add(region);
     p.newRgIds.add(rg);
@@ -761,7 +761,7 @@ public final class RmowArm implements Arm {
     Pending p = new Pending(f, f.regionLocation());
     Map<Long, List<Long>> idsOfNewRg = new HashMap<>();
     for (List<Long> g : groups) {
-      List<Record> rows = new ArrayList<>();
+      List<long[]> rows = new ArrayList<>();
       for (long rg : g) {
         rows.addAll(readRowGroup(f, rg));
       }
@@ -782,9 +782,15 @@ public final class RmowArm implements Arm {
   private void rewrite(int i) throws IOException {
     LogicalFile f = files.get(i);
     // the live rows, grouped by the row group that holds each one's live version
-    Map<Long, List<Record>> byRg = new LinkedHashMap<>();
-    java.util.function.Consumer<Record> group =
-        r -> byRg.computeIfAbsent(rgOfId[((Long) r.get(Rows.ID)).intValue()], k -> new ArrayList<>()).add(r);
+    Map<Long, List<long[]>> byRg = new LinkedHashMap<>();
+    java.util.function.Consumer<RowBatch> group =
+        b -> {
+          for (int k = 0; k < b.size(); k++) {
+            long id = b.id(k);
+            byRg.computeIfAbsent(rgOfId[(int) id], g -> new ArrayList<>())
+                .add(new long[] {id, b.version(k)});
+          }
+        };
     Reader writer = Reader.writer(ctx.layout());
     if (f.current().footerOnly()) {
       FileMetaData footer = footer(f);
@@ -809,7 +815,7 @@ public final class RmowArm implements Arm {
     }
 
     long read = 0;
-    for (List<Record> rs : byRg.values()) {
+    for (List<long[]> rs : byRg.values()) {
       read += rs.size();
     }
     held.hold(Held.Kind.ROWS, read, "read back " + name(f.location()) + " whole");
@@ -823,7 +829,7 @@ public final class RmowArm implements Arm {
         newLocation(String.format("%s/data/rmow-%05d-c%03d", ctx.root(), i, ++compactions));
     Pending p = new Pending(null, location);
     Map<Long, List<Long>> idsOfNewRg = new HashMap<>();
-    List<Record> packed = new ArrayList<>();
+    List<long[]> packed = new ArrayList<>();
     long bytes = 0;
     for (long rg : order) {
       long size = FooterCodec.compressedSize(f.rowGroup(rg));
@@ -863,10 +869,10 @@ public final class RmowArm implements Arm {
     }
   }
 
-  private static long minId(List<Record> rows) {
+  private static long minId(List<long[]> rows) {
     long min = Long.MAX_VALUE;
-    for (Record r : rows) {
-      min = Math.min(min, (Long) r.get(Rows.ID));
+    for (long[] r : rows) {
+      min = Math.min(min, r[0]);
     }
     return min;
   }

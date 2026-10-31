@@ -8,15 +8,13 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
-import org.apache.iceberg.MetadataColumns;
-import org.apache.iceberg.Schema;
+import org.apache.iceberg.data.GenericRecord;
 import org.apache.iceberg.data.Record;
 import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.IOUtil;
 import org.apache.iceberg.io.SeekableInputStream;
-import org.apache.iceberg.types.TypeUtil;
 import org.apache.parquet.format.FileMetaData;
 import org.apache.parquet.format.RowGroup;
 import org.rmow.bench.oracle.TableHash;
@@ -53,8 +51,6 @@ public record VersionDigest(
     boolean offsetOrder,
     int footerBytes) {
 
-  private static final Schema PROJECTION =
-      TypeUtil.join(Rows.SCHEMA, new Schema(MetadataColumns.ROW_POSITION));
 
   /** The header of {@code versions.csv}, which {@code analysis/interop_check.py} reads. */
   public static final String CSV_HEADER =
@@ -141,17 +137,24 @@ public record VersionDigest(
 
   /** Adds the rows of {@code in}, whose first row is at position {@code base}. */
   private static void add(VersionedInputFile in, long base, long[] acc) throws IOException {
-    try (CloseableIterable<Record> rs =
-        ParquetReads.open(in, PROJECTION, Expressions.alwaysTrue())) {
-      for (Record r : rs) {
-        Rows.verify(r);
-        long id = (Long) r.get(Rows.ID);
-        long ts = (Long) r.get(Rows.TS);
-        int version = (Integer) r.get(Rows.VERSION);
-        acc[0]++;
-        acc[1] += Rows.rowHash(id, version);
-        acc[2] += contentHash(id, ts, version);
-        acc[3] += posHash(id, base + (Long) r.get(Rows.SCHEMA.columns().size()));
+    int columns = Rows.SCHEMA.columns().size();
+    try (CloseableIterable<ParquetBatches.Batch> batches =
+        ParquetBatches.open(in, Rows.SCHEMA, Expressions.alwaysTrue())) {
+      for (ParquetBatches.Batch b : batches) {
+        for (int row = 0; row < b.rows(); row++) {
+          Record r = GenericRecord.create(Rows.SCHEMA);
+          for (int c = 0; c < columns; c++) {
+            r.set(c, b.get(c, row));
+          }
+          Rows.verify(r);
+          long id = (Long) r.get(Rows.ID);
+          long ts = (Long) r.get(Rows.TS);
+          int version = (Integer) r.get(Rows.VERSION);
+          acc[0]++;
+          acc[1] += Rows.rowHash(id, version);
+          acc[2] += contentHash(id, ts, version);
+          acc[3] += posHash(id, base + b.position(row));
+        }
       }
     }
   }
