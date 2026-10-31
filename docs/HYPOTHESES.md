@@ -358,3 +358,99 @@ written, where the model prices one request of its size after the CPU; RMoR-C's 
 which the spike's latencies include too, so it counts twice. CPU on the cloud VMs runs at its own
 pace, which moved the calibration's S3 Express ratios by up to 0.12 across runs; the full-read
 ratios C7 judges sit 13–15% from 1.
+
+## The base point on a vectorized reader (registered 2026-10-31)
+
+**What it decides:** whether the trade-off the base point measured depends on the Parquet code the
+harness reads and writes with. Until 2026-10-31 every arm read through Iceberg's generic row
+reader, which builds a Java object per row; a profile of a shortened base point put about 85% of
+reading's CPU in that reader's per-value and per-row work, and 8.5% in decompression. Every arm
+now reads through Iceberg's vectorized reader (iceberg-arrow), as Spark reads an Iceberg table:
+batches of 5,000 rows, deletes applied by position per batch, and the residual compiled to
+comparisons on the batch's columns, as Spark compiles a filter (Iceberg's evaluator, which boxes
+every value it reads, took about a fifth of a scan's time in a profile). The writer
+is still Iceberg's generic writer over parquet-java, as Spark's and Flink's are, but takes strings
+as UTF-8 bytes (Avro's `Utf8`), as Spark's rows hold them, where it encoded a Java `String` again
+for every value. RMoW keeps the rows it reads back as (id, version) and has them made again for the
+encoder, as every MoR-family arm already did (`MadeRows`).
+
+**Setup:** `configs/sweep-base.json` on the laptop, which counts instructions, from a build
+snapshot of the change, with requests and held memory logged, against the laptop's run on the old
+reader (`sweep-base-f970149711a9/20261030T054758Z`) and the S3 Express run
+(`sweep-base-s3x-89a55338cd9a/20261030T205713Z`). S3 Express times are simulated as the model the
+S3 Express run confirmed (within 1–11% of every judged mean, C6): the run's work at its arm's pace
+(`phase_work`) plus its requests priced with that VM's spike (`spike/s3x-spike-20261030T205211Z`).
+
+**A pilot** (the shortened base point the profile ran: 3 arms, 5 batches, the `cached` reader, on
+both builds): the same requests, bytes, table state and held peaks in all 95 records; a full read
+took 0.22–0.23 of the instructions, a merge read 0.24, MoR-v3's scan to locate rows 0.40, a batch
+0.46–0.76 (MoR-v3's 0.46, RMoW-C's 0.76), and encoding 0.72–0.78 of the CPU.
+
+**Predicted:**
+- **V1: the reader changes no request, byte or held peak** (a control). Every record's requests,
+  bytes and table state, and every one-thread phase's held peaks, equal the old reader's run.
+- **V2: reads cost a quarter of the work.** Each arm's mean full read under `cached` takes at most
+  a third of its instructions on the old reader.
+- **V3: the trade-off holds and the write side's share grows.** Simulated at S3 Express prices,
+  RMoW-C's mean batch over MoR-v3's is higher than the 3.05 S3 Express measured on the old reader,
+  and its mean full read over MoR-v3's is between 0.80 and 0.95. (From the old run's breakdown,
+  with Parquet's work 2 to 10 times faster: 3.3–3.8 and 0.86–0.89. MoR-v3's batch is mostly
+  decoding, so it gains more than RMoW-C's, whose rewritten regions' bytes stay.)
+
+**Measured, not judged:** the batch and its parts (locate, merge-read, write) on the new reader;
+the encode CPU the strings' change saves; the store's share of each phase, simulated; the other
+readers (`one-footer`, `stock`, `cached-p8`) and the sorted read.
+
+**Limits:** the laptop's core runs at its own pace, which the S3 Express run's cores matched within
+a few percent on the old reader. Engines with native readers (Trino, DuckDB, Photon) would decode
+faster still; V3's sensitivity is meant to say whether that matters.
+
+## The vectorized base point in the cloud (registered 2026-10-31)
+
+**What they decide:** whether S3 Express measures what the laptop simulated for the vectorized
+reader (The base point on a vectorized reader, V3, which held): RMoW-C's batch 4.5 times MoR-v3's
+where it was 3.0, and its full read still 0.87 of MoR-v3's. The model was confirmed on the old
+reader (C6), where a full read was about a third the store's; on the new reader it is about 70%,
+so the requests' prices carry most of a read's time, which C6 tested less.
+
+**Setup:** `configs/sweep-base.json` on S3 Express (usw2-az3, from a `c7a.4xlarge`), as the first
+cloud base point (The base point in the cloud): the deploy's `bench` step, one run, a 16 GB heap,
+requests and held memory logged, the VM's own spike from main just before. The build is the
+commit that brings in the vectorized reader, whose `src/main`, `pom.xml` and `bin/` are the laptop
+run's build snapshot's (`20261031T083323Z-ca1985a3d2c9-dirty`). The twin is that laptop run,
+`sweep-base-f970149711a9/20261031T083323Z`.
+
+**Predicted, from the twin** (each arm's mean batch and mean full read under `cached`, over
+MoR-v3's; the twin's work at its arm's pace plus its requests priced with the first S3 Express VM's
+spike, `spike/s3x-spike-20261030T205211Z`; in brackets the requests' share of the simulated phase):
+
+| Arm | A batch | A full read |
+|---|---|---|
+| MoR-v3 | 2.1 s (0.39) | 10.2 s (0.70) |
+| TailCoW-C | 1.00 (0.40) | 1.00 (0.71) |
+| RMoR-C | 9.43 (0.34) | 3.83 (0.70); `cached-skip` 1.05 (0.62) |
+| RMoR-C with footers | 8.75 (0.38) | 0.87 (0.73) |
+| RMoW-C | 4.48 (0.38) | 0.87 (0.73) |
+
+- **V4: the cloud run sends what the twin counts** (a control). Every record's requests, bytes
+  and table state, and every one-thread phase's held peaks, equal the twin's, as C5's did.
+- **V5: the model holds on the new reader.** Priced with its own VM's spike, each arm's mean
+  batch and mean full read under `cached` (RMoR-C's also under `cached-skip`), simulated as its
+  thread CPU plus its requests' prices, is within 25% of its mean wall time, as in C6.
+- **V6: the trade-off falls where the twin puts it.** Each ratio in the table lands on the same
+  side of 1 in the run's mean wall times, wherever the prediction is at least 10% from 1 (as C7);
+  and RMoW-C's batch over MoR-v3's is above the 3.05 the first cloud run measured on the old
+  reader, its full read between 0.80 and 0.95.
+- **V7: reads are mostly the store's, batches mostly CPU.** In `phase_breakdown`, the store
+  (store client CPU and waiting on the store) takes more than half the wall time of every arm's
+  mean full read under `cached` (RMoR-C's also under `cached-skip`), and less than half of every
+  arm's mean batch. On the old reader the store took 32–36% of the reads (C8).
+
+**Measured, not judged:** each request's time against its price; the new spike against the first
+VM's; the other readers (`cached-p8`, `one-footer`, `stock`) and the sorted read; the run's
+elapsed time (2 h 47 min on the old reader).
+
+**Limits:** one run. C6's limits stand: multipart PUTs past 48 MiB overlap the write, where the
+model prices them after it, and a phase's thread CPU counts the client's TLS and checksums that
+the spike's latencies include too. TailCoW-C's ratios and RMoR-C's under `cached-skip` are not
+judged.
