@@ -1,5 +1,5 @@
 # per-operator configuration, Terraform's state and providers (<cloud>/<layer>/), the VMs' host
-# keys and their logs
+# keys, the lock up and down take, and the VMs' logs
 deploy.env
 */*/.terraform/
 */*/.terraform.lock.hcl
@@ -7,4 +7,5 @@ deploy.env
 */*/*.tfstate.*
 */*/*.tfplan
 .known_hosts.*
+.lock.*
 logs/

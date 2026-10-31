@@ -1,5 +1,6 @@
-# AWS bench layer: the billable instance, in the bucket's zone, with the infra layer's role, key
-# and security group. `down`/`up` churn only this; the bucket and the network persist.
+# AWS bench layer: the billable instances, one per name in `vms`, in the bucket's zone, with the
+# infra layer's role, key and security group. `down`/`up` churn only these; the bucket and the
+# network persist.
 
 terraform {
   required_version = ">= 1.3"
@@ -25,6 +26,13 @@ variable "region" {
 variable "instance_type" {
   type    = string
   default = "c7a.2xlarge"
+}
+
+# The VMs, by name: one that runs every configuration in turn, or one per configuration (deploy.sh,
+# FLEET). Adding a name leaves the others running.
+variable "vms" {
+  type    = list(string)
+  default = []
 }
 
 variable "ssh_user" {
@@ -61,6 +69,7 @@ data "aws_ami" "ubuntu" {
 }
 
 resource "aws_instance" "bench" {
+  for_each                    = toset(var.vms)
   ami                         = data.aws_ami.ubuntu.id
   instance_type               = var.instance_type
   subnet_id                   = data.terraform_remote_state.infra.outputs.subnet_id
@@ -79,12 +88,18 @@ resource "aws_instance" "bench" {
     http_tokens = "required"
   }
 
-  tags = { Project = "rmow-bench", Name = "rmow-bench" }
+  tags = { Project = "rmow-bench", Name = "rmow-bench-${each.key}" }
+
+  # A VM, once up, changes only by going down: an apply that adds another must not replace or
+  # restart it mid-run for a newer image, an edited cloud-init.sh or another instance type
+  lifecycle {
+    ignore_changes = all
+  }
 }
 
 # Normalized outputs, the same on both clouds (deploy.sh depends only on these).
-output "public_ip" {
-  value = aws_instance.bench.public_ip
+output "public_ips" {
+  value = { for name, vm in aws_instance.bench : name => vm.public_ip }
 }
 
 output "ssh_user" {

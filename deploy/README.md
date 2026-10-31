@@ -1,9 +1,10 @@
 # Cloud deployment (S3 Express and Azure, Terraform)
 
-Runs on a cloud store, from one VM beside it: the calibration ([docs/S3X_RUNBOOK.md](../docs/S3X_RUNBOOK.md),
+Runs on a cloud store, from VMs beside it: the calibration ([docs/S3X_RUNBOOK.md](../docs/S3X_RUNBOOK.md),
 [docs/AZURE_RUNBOOK.md](../docs/AZURE_RUNBOOK.md)), or the cloud twins of runs made on the laptop or
-havoc (since 2026-10-29). Terraform makes the store, the VM's credentials and the VM, and
-`remote.sh` runs the runbook's steps on the VM: the builds, the contract suites, the spike and the
+havoc (since 2026-10-29). One VM runs the configurations in turn, or a fleet runs one each, all at
+once (`FLEET`, since 2026-10-30). Terraform makes the store, the VMs' credentials and the VMs, and
+`remote.sh` runs the runbook's steps on each VM: the builds, the contract suites, the spike and the
 runs. `deploy.sh` drives both from here
 and brings the results back into `results/`. The layout follows shield-rs's `deploy/`.
 
@@ -16,6 +17,9 @@ and brings the results back into `results/`. The layout follows shield-rs's `dep
 > down when done. The first `infra-up`, in us-east-1 (2026-10-28), failed on `casuser`'s IAM and
 > was torn down. AWS now runs in us-west-2 on catalog-bench's bucket and instance profile, as
 > catalog-bench's runs did, and its infra layer plans only the key pair and the security group.
+> The calibration ran on both clouds from one VM each (2026-10-28). The fleet is checked offline
+> (2026-10-30): a read-only `terraform plan` of two VMs resolves on both clouds, and `up`, `down`,
+> `run`, `status` and `wait` did what they should against a stub of `terraform` and `ssh`.
 
 ## Layout
 
@@ -26,17 +30,18 @@ deploy/
   cloud-init.sh          # the VM's first boot: OpenJDK 17, Maven, git and tools (both clouds)
   deploy.env.example     # copy to deploy.env: the cloud, the SSH key, the builds, the sizes
   validate.sh            # the offline checks
-  <cloud>/infra/main.tf  # the store, the VM's credentials, the network: free while empty
-  <cloud>/bench/main.tf  # the VM: billable, made and destroyed per campaign
+  <cloud>/infra/main.tf  # the store, the VMs' credentials, the network: free while empty
+  <cloud>/bench/main.tf  # the VMs: billable, made and destroyed per campaign
 ```
 
 for `<cloud>` ∈ `aws | azure`. Each `bench` layer reads its `infra` layer's outputs (a local-backend
-`terraform_remote_state`), and both expose the same two outputs (`public_ip`, `ssh_user`).
+`terraform_remote_state`), and both expose the same two outputs (`public_ips`, a map of the VMs'
+names to their addresses, and `ssh_user`).
 
 | layer | AWS (S3 Express) | Azure (ADLS Gen2) |
 |---|---|---|
 | `infra` (kept) | a directory bucket in one zone, a role with `s3express:CreateSession` on it and its instance profile (or an existing bucket and profile: `AWS_BUCKET`, `AWS_INSTANCE_PROFILE`), the operator's key pair, a security group, the S3 Express gateway endpoint (unless the VPC has one) | a resource group, a StorageV2 account with a hierarchical namespace and a container, a user-assigned identity with Storage Blob Data Contributor on the account, a vnet and subnet (with the storage service endpoint), an NSG |
-| `bench` (churned) | an EC2 instance in the bucket's zone (64 GiB gp3) | a VM with the identity, its public IP, NIC and disk |
+| `bench` (churned) | an EC2 instance per VM, in the bucket's zone (64 GiB gp3) | a VM per VM name, with the identity, its public IP, NIC and disk |
 
 **No secrets in configuration.** The VM's credentials are its role or identity, which the SDKs'
 default chains find. The two exceptions are the fork's contract suites, which take keys:
@@ -75,13 +80,13 @@ cp deploy/deploy.env.example deploy/deploy.env
 $EDITOR deploy/deploy.env            # CLOUD, the SSH key; the builds' commits are the runbooks'
 
 ./deploy/deploy.sh infra-up          # the store and the network, once (free while empty)
-./deploy/deploy.sh up                # the VM
+./deploy/deploy.sh up                # the VM (in a fleet, every VM)
 ./deploy/deploy.sh ship              # bundle main, ship it; the VM builds the fork and rmow-bench
 ./deploy/deploy.sh wait              # until the builds end (about 15 minutes)
 ./deploy/deploy.sh run               # test, spike, bench, in order, stopping at a failure
 ./deploy/deploy.sh wait
-./deploy/deploy.sh fetch             # results/ and deploy/logs/; prints thread_cpu_per_wall
-./deploy/deploy.sh down              # the VM; the store stays, so the next `up` is fast
+./deploy/deploy.sh fetch             # results/ and deploy/logs/; prints thread_cpu_per_wall and thread_counters
+./deploy/deploy.sh down              # the VMs; the store stays, so the next `up` is fast
 ./deploy/deploy.sh teardown          # the store and every object in it, once `down`
 
 ./deploy/deploy.sh all               # infra-up through fetch
@@ -92,6 +97,32 @@ CLOUD=azure ./deploy/deploy.sh all   # the same on Azure, without editing deploy
 whether the steps still run and the log's tail, and `ssh` opens a shell on the VM. The steps run
 detached on the VM (`setsid nohup`), so a dropped connection does not stop them. A step whose suite
 skipped every test fails: a suite without credentials skips rather than fails.
+
+**A fleet** (`FLEET=true`): one VM per configuration of `AWS_CONFIGS` or `AZURE_CONFIGS`, named
+after it, which runs only that one; every command acts on all of them, each VM in turn, or on those
+`VM` names:
+
+```sh
+./deploy/deploy.sh up                          # every VM, at once
+./deploy/deploy.sh ship && ./deploy/deploy.sh wait
+VM=sweep-base ./deploy/deploy.sh run test      # the contract suites, on one VM
+./deploy/deploy.sh run spike bench             # each VM's spike, then its run
+./deploy/deploy.sh status                      # each VM's state and the log's last lines
+VM=sweep-p10 ./deploy/deploy.sh status 40      # one VM's, longer
+VM=sweep-p10 ./deploy/deploy.sh fetch          # a VM that finished, while the others run
+VM=sweep-p10 ./deploy/deploy.sh down           # and it goes; the others keep running
+./deploy/deploy.sh wait && ./deploy/deploy.sh fetch && ./deploy/deploy.sh down
+```
+
+`up` adds the VMs it names to those up and never changes a VM that is up: each is made from the
+image, `cloud-init.sh` and size of its own `up` (`ignore_changes`), so an apply that adds another
+cannot restart it mid-run. `down` with `VM` destroys those VMs only, and fails if it cannot read
+which are up; without `VM`, every VM goes. One `up` or `down` runs at a time per cloud (a lock
+file). Each VM's spike writes its objects under `<root>/spike/<name>` and its results as
+`results/spike/<store>-spike-<name>-<UTC start>`, so spikes that start in the same second stay
+apart (the spikes' `--label`; `SPIKE_COMMIT` must have it), and its test step under
+`<root>/test/<name>`. Run the contract suites on one VM: they check the store and the code, which
+every VM shares.
 
 **What the VM runs** is the runbook's steps:
 - **build:** the fork at `FORK_COMMIT` (the twins' build, af875ccfd1) on branch `atomicio`, so its
@@ -139,7 +170,9 @@ hypervisor exposes the counters. Each run's manifest says whether it had them
 
 The instance-hours dominate: about $0.41/h for `c7a.2xlarge` ($0.82/h for `c7a.4xlarge`) and $0.43/h for `D8as_v6` (westus), on demand
 in us-east-1 and eastus (us-west-2 charges the same for `c7a.2xlarge`). A campaign takes about an hour: the builds, the suites, the spike
-(tens of minutes at 20 reps) and the calibration. The stores charge little: the runbooks' Cost
+(tens of minutes at 20 reps) and the calibration. A sweep configuration takes hours (the base
+point: 2.1 h on the laptop, more with the store's latency), and in a fleet each VM costs its own
+hours; `fetch` and `down` each VM as it finishes. The stores charge little: the runbooks' Cost
 paragraphs. The bucket and the account cost nothing while empty, and every step deletes what it
 wrote: each run deletes its objects when it ends (`Store.deleteRun`), so only a run that failed
 leaves any, under `<root>`. `teardown` deletes those
@@ -156,6 +189,12 @@ with the store (in an existing bucket, with the `rmow-bench/` prefix).
   one, since both would load the same bucket while measuring its latency.
 - **Your public IP:** SSH is open to this machine's address at `infra-up`. If it changes, rerun
   `infra-up`.
-- **One VM, one store at a time per cloud.** The two clouds' states are apart, so both can be up
-  at once.
+- **One store per cloud, shared by its VMs.** A fleet's runs load the same bucket or account at
+  once, so each measures the store under the others' load, as their spikes do. The two clouds'
+  states are apart, so both can be up at once.
+- **Quotas.** A fleet needs vCPUs for all its VMs: 16 per `c7a.4xlarge`, 8 per `D8as_v6`. Azure's
+  westus allowed 10 regional vCPUs on 2026-10-30, one `D8as_v6` (`az vm list-usage -l westus`);
+  raise it in the portal's Quotas before a fleet. `casuser` cannot read AWS's quotas, so an `up`
+  past them fails at the instances it could not make (`terraform apply` names them); the others
+  are up.
 - **Not provisioned:** spot instances, image baking, auto-teardown.

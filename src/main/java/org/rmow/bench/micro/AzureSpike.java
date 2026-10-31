@@ -40,7 +40,7 @@ import org.rmow.bench.io.AdlsClients;
  *
  * <pre>
  *   java -cp ... org.rmow.bench.micro.AzureSpike abfss://&lt;container&gt;@&lt;account&gt;.dfs.core.windows.net/&lt;prefix&gt;
- *       [--reps n] [--out dir] [--endpoint url]
+ *       [--reps n] [--out dir] [--label l] [--endpoint url]
  * </pre>
  *
  * <ul>
@@ -67,7 +67,8 @@ import org.rmow.bench.io.AdlsClients;
  * </ul>
  *
  * Writes {@code manifest.json} and {@code spike.jsonl} (one record per request: op, bytes, parts,
- * rep, ns) to {@code <out>/azure-spike-<UTC start>/} (default out: {@code results/spike}), and
+ * rep, ns) to {@code <out>/<label>-<UTC start>/} (default out: {@code results/spike}, label:
+ * {@code azure-spike}; a label of its own keeps apart spikes that start in the same second), and
  * deletes its objects. A GET's body is drained into a buffer and dropped, so its time is the
  * request's, not a copy's. Run it from a VM in the account's region; elsewhere it measures the
  * network. {@code --endpoint} runs it against an emulator (with {@code AZURE_STORAGE_KEY}), which
@@ -113,7 +114,7 @@ public final class AzureSpike {
     if (args.length < 1 || !args[0].startsWith("abfs")) {
       System.err.println(
           "usage: AzureSpike abfss://<container>@<account>.dfs.core.windows.net/<prefix>"
-              + " [--reps n] [--out dir] [--endpoint url]");
+              + " [--reps n] [--out dir] [--label l] [--endpoint url]");
       System.exit(2);
     }
     String started =
@@ -121,20 +122,22 @@ public final class AzureSpike {
     String prefix = args[0] + "/spike-" + started;
     int reps = 10;
     Path outRoot = Path.of("results", "spike");
+    String label = "azure-spike";
     String endpoint = "";
     for (int i = 1; i < args.length; i++) {
       switch (args[i]) {
         case "--reps" -> reps = Integer.parseInt(args[++i]);
         case "--out" -> outRoot = Path.of(args[++i]);
+        case "--label" -> label = args[++i];
         case "--endpoint" -> endpoint = args[++i];
         default -> throw new IllegalArgumentException("Unknown argument: " + args[i]);
       }
     }
 
-    Path dir = outRoot.resolve("azure-spike-" + started);
+    Path dir = outRoot.resolve(label + "-" + started);
     Files.createDirectories(dir);
     Map<String, Object> manifest = new LinkedHashMap<>();
-    manifest.put("label", "azure-spike");
+    manifest.put("label", label);
     manifest.put("started", started);
     manifest.put("root", args[0]);
     manifest.put("endpoint", endpoint);

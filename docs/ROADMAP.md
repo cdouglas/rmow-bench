@@ -423,6 +423,13 @@ lower.
   ([lab/pages/base-point-model.md](../lab/pages/base-point-model.md); the results in
   [lab/pages/base-point.md](../lab/pages/base-point.md)).
 
+  **A fleet** (2026-10-30): `FLEET=true` brings up one VM per configuration, each running its own
+  spike and run, all at once, and `VM=<name>` narrows any command to some of them (a VM fetched and
+  taken down as it finishes). The VMs also count instructions where the hypervisor allows
+  (`perf_event_paranoid` 2). Checked offline (a plan of two VMs on each cloud, and a stub of
+  `terraform` and `ssh`). Open: Azure's westus quota is 10 vCPUs, one `D8as_v6`, so a fleet there
+  needs an increase; AWS's quota is unreadable to `casuser`.
+
   **Running it** is the user's: [deploy/](../deploy/README.md), each cloud step by step the first
   time (`infra-up`, `up`, `ship`, `wait`, `run test`, `wait`, then `run spike bench`), then
   `fetch`, `down` and `teardown`. **When the results are in `results/`:**

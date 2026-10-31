@@ -37,7 +37,7 @@ import software.amazon.awssdk.services.s3.model.S3Object;
  *
  * <pre>
  *   java -cp ... org.rmow.bench.micro.S3ExpressSpike s3://&lt;bucket&gt;--&lt;az id&gt;--x-s3/&lt;prefix&gt;
- *       [--region r] [--reps n] [--out dir] [--endpoint url --path-style]
+ *       [--region r] [--reps n] [--out dir] [--label l] [--endpoint url --path-style]
  * </pre>
  *
  * <ul>
@@ -57,7 +57,8 @@ import software.amazon.awssdk.services.s3.model.S3Object;
  * </ul>
  *
  * Writes {@code manifest.json} and {@code spike.jsonl} (one record per request: op, bytes, parts,
- * rep, ns) to {@code <out>/s3x-spike-<UTC start>/} (default out: {@code results/spike}), and
+ * rep, ns) to {@code <out>/<label>-<UTC start>/} (default out: {@code results/spike}, label: {@code
+ * s3x-spike}; a label of its own keeps apart spikes that start in the same second), and
  * deletes its objects. Bodies go up as streams over the payload, as the fork sends them, and a
  * GET's body is drained into a buffer and dropped, so a request's time holds no copy of it. Run it
  * from an instance in the bucket's zone; elsewhere it measures the
@@ -90,7 +91,7 @@ public final class S3ExpressSpike {
     if (args.length < 1 || !args[0].startsWith("s3://")) {
       System.err.println(
           "usage: S3ExpressSpike s3://<bucket>/<prefix> [--region r] [--reps n] [--out dir]"
-              + " [--endpoint url --path-style]");
+              + " [--label l] [--endpoint url --path-style]");
       System.exit(2);
     }
     String path = args[0].substring("s3://".length());
@@ -101,6 +102,7 @@ public final class S3ExpressSpike {
     String region = System.getenv().getOrDefault("AWS_REGION", "us-east-1");
     int reps = 10;
     Path outRoot = Path.of("results", "spike");
+    String label = "s3x-spike";
     String endpoint = "";
     boolean pathStyle = false;
     for (int i = 1; i < args.length; i++) {
@@ -108,16 +110,17 @@ public final class S3ExpressSpike {
         case "--region" -> region = args[++i];
         case "--reps" -> reps = Integer.parseInt(args[++i]);
         case "--out" -> outRoot = Path.of(args[++i]);
+        case "--label" -> label = args[++i];
         case "--endpoint" -> endpoint = args[++i];
         case "--path-style" -> pathStyle = true;
         default -> throw new IllegalArgumentException("Unknown argument: " + args[i]);
       }
     }
 
-    Path dir = outRoot.resolve("s3x-spike-" + started);
+    Path dir = outRoot.resolve(label + "-" + started);
     Files.createDirectories(dir);
     Map<String, Object> manifest = new LinkedHashMap<>();
-    manifest.put("label", "s3x-spike");
+    manifest.put("label", label);
     manifest.put("started", started);
     manifest.put("root", args[0]);
     manifest.put("region", region);

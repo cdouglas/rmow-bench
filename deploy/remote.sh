@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # The runbooks' steps on the VM (docs/S3X_RUNBOOK.md, docs/AZURE_RUNBOOK.md). deploy.sh ships this
-# with ~/rmow.env, which names the store and the builds, and starts the steps detached, so a dropped
-# SSH session does not stop them:
+# with ~/rmow.env, which names the store, the builds and, in a fleet, the VM (NAME), and starts the
+# steps detached, so a dropped SSH session does not stop them:
 #   remote.sh start <step>...   run the steps in order in the background, stopping at a failure
 #   remote.sh state             running, done, failed or none
 #   remote.sh status [lines]    the state and the log's tail
@@ -13,6 +13,8 @@
 #   spike      the spike, SPIKE_REPS reps (step 2)
 #   bench      each of CONFIGS on the store, BENCH_REPS times (step 3: the calibration, or the
 #              cloud twins of runs made elsewhere)
+# In a fleet, a VM's test and spike objects go under a prefix of its NAME, and its spike's results
+# take a label of it, so VMs whose steps start in the same second stay apart.
 # Its log is ~/run.log; results land in ~/rmow-bench/results, as on the laptop.
 set -euo pipefail
 cd "$HOME"
@@ -104,8 +106,8 @@ step_test() {
       )
       ran iceberg/aws/build/test-results/test/TEST-org.apache.iceberg.aws.s3.S3ExpressFileIOAtomicTest.xml
 
-      log "rmow-bench's store contract under $ROOT/test"
-      (cd rmow-bench && RMOW_S3X_ROOT="$ROOT/test" mvn -q -B test -Dtest=S3ExpressTest)
+      log "rmow-bench's store contract under $ROOT/test${NAME:+/$NAME}"
+      (cd rmow-bench && RMOW_S3X_ROOT="$ROOT/test${NAME:+/$NAME}" mvn -q -B test -Dtest=S3ExpressTest)
       ran rmow-bench/target/surefire-reports/TEST-org.rmow.bench.bench.S3ExpressTest.xml
       ;;
     azure)
@@ -124,26 +126,29 @@ step_test() {
       )
       ran iceberg/azure/build/test-results/test/TEST-org.apache.iceberg.azure.adlsv2.AdlsFileIOAtomicTest.xml
 
-      log "rmow-bench's store contract under $ROOT/test"
-      (cd rmow-bench && RMOW_AZURE_ROOT="$ROOT/test" mvn -q -B test -Dtest=AzureTest)
+      log "rmow-bench's store contract under $ROOT/test${NAME:+/$NAME}"
+      (cd rmow-bench && RMOW_AZURE_ROOT="$ROOT/test${NAME:+/$NAME}" mvn -q -B test -Dtest=AzureTest)
       ran rmow-bench/target/surefire-reports/TEST-org.rmow.bench.bench.AzureTest.xml
       ;;
   esac
 }
 
 step_spike() {
-  local cls jar
+  local cls label jar
   case "$STORE" in
-    aws) cls=S3ExpressSpike ;;
-    azure) cls=AzureSpike ;;
+    aws) cls=S3ExpressSpike label=s3x-spike ;;
+    azure) cls=AzureSpike label=azure-spike ;;
   esac
+  # in a fleet, the VM's own prefix and label (a spike since --label, 2026-10-30)
+  local args=("$ROOT/spike${NAME:+/$NAME}" --reps "$SPIKE_REPS")
+  [[ -z "${NAME:-}" ]] || args+=(--label "$label-$NAME")
   for jar in "$HOME"/rmow-spike/target/rmow-bench-*.jar; do
     [[ "$jar" == *-tests.jar ]] || break
   done
-  log "the spike ($cls, the build at $SPIKE_COMMIT), $SPIKE_REPS reps, under $ROOT/spike"
+  log "the spike ($cls, the build at $SPIKE_COMMIT): ${args[*]}"
   # from rmow-bench, so its results land beside the calibration's (results/spike)
   (cd rmow-bench && java -cp "$jar:$HOME/rmow-spike/target/lib/*" "org.rmow.bench.micro.$cls" \
-    "$ROOT/spike" --reps "$SPIKE_REPS")
+    "${args[@]}")
 }
 
 step_bench() {
