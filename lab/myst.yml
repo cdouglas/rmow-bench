@@ -13,6 +13,9 @@ project:
     - file: pages/time-travel.md
     - file: pages/compaction.md
     - file: pages/cloud.md
+    - file: pages/base-point.md
+    - file: pages/base-point-model.md
+    - file: pages/vectorized-reader.md
     - file: pages/store-latency.md
     - file: pages/scale.md
     - file: pages/cpu-measure.md

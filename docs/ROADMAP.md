@@ -88,6 +88,21 @@ reads.
 
 ## Harness (rmow-bench)
 
+- [x] **Parquet as applications read and write it** (decided and built 2026-10-31, 6f24575). The
+  S3 Express base point ran at a third of its time on the store; a profile put about 85% of a
+  read's CPU in Iceberg's generic row reader, which builds a Java object per row, and the user
+  asked that the arms use the APIs applications use, so that costs are attributed as they would
+  be in one. Every arm now reads through Iceberg's vectorized reader (iceberg-arrow, as Spark
+  reads an Iceberg table): batches of 5,000 rows, deletes by position, and the residual compiled
+  to comparisons on the batch's columns, as Spark compiles a filter. The writer stays Iceberg's
+  generic writer over parquet-java, which Spark's and Flink's are too, with strings as UTF-8
+  bytes as Spark's rows hold them. On the base
+  point (laptop, V1–V3): no request, byte or held peak changed; a full read takes 0.26–0.28 of
+  its instructions, and the run 40 minutes instead of 2 h 6 min. At S3 Express prices RMoW-C's
+  batch went from 3.0 to 4.5 times MoR-v3's, whose batch was mostly decoding, and its full read
+  stayed 0.87 of MoR-v3's, now about 70% the store's time. Engines with Parquet code of their own
+  (Trino, DuckDB, Photon) may decode and encode faster still
+  ([lab/pages/vectorized-reader.md](../lab/pages/vectorized-reader.md)).
 - [x] **Writers stream** (found and built 2026-10-29). Writers held every row a batch rewrote or
   merged as an Iceberg record (hundreds of bytes each) until the write, and built every file's rows
   as records before encoding: harmless at 1–4 MiB row groups, but 14 GB of live heap by batch 2 of
@@ -344,6 +359,17 @@ lower.
   reads the table sorted under the cached reader, and logs what every phase held (decided
   2026-10-29). A first start on havoc was stopped the same day, before the writers streamed and
   memory was measured; it needs the image rebuilt from the commit that has them.
+
+  **Havoc's campaign finished** (a5e2ee2, 2026-10-30, campaign `sweep`), every job under foreign
+  load: 27 of 1,650 batches and 1 of 330 full reads were clean, so its CPU decides nothing. Its
+  requests, bytes and held peaks are exact (its `sweep-base` equals the laptop's in all 1,325
+  records, but for the 8-thread reader's held peaks, which move with how its tasks interleave).
+  **The sweep moves to the cloud** (decided 2026-10-30): the SKUs it will run on are where the
+  experiments' claims hold, a VM's cores are its own, and wall time there is measured, not
+  simulated. Havoc's runs stay its twins, for the counts, which the vectorized reader leaves
+  unchanged (V1). The base point runs first, on one VM (Cloud campaign, below); the others follow
+  as a fleet, one VM each, on the vectorized reader (held for its S3 Express rerun, decided
+  2026-10-31: a sweep on the old reader would have to run again).
 - [ ] **Hot-region isolation** (a micro-benchmark question, not a Parquet benchmark). Can RMoW
   isolate frequently updated regions as row groups of their own, and so cut its amplification?
   - RMoW sets row-group boundaries on every rewrite, so it can cut a hot range out as its own row
@@ -357,7 +383,10 @@ lower.
   on 2026-10-27 on the write and read trade-off; the earlier ones are the file at commit 1145f89.
   - [x] the calibration's C1–C4 (registered 2026-10-27);
   - [x] the sweeps' U1–U3, K1 and G1 (registered 2026-10-29);
-  - [x] the sweeps' memory and sorted read, M1–M4 (registered 2026-10-29, after a pilot).
+  - [x] the sweeps' memory and sorted read, M1–M4 (registered 2026-10-29, after a pilot);
+  - [x] the base point in the cloud, C5–C8 (registered 2026-10-30);
+  - [x] the vectorized reader, V1–V3 on the laptop and V4–V7 in the cloud (registered 2026-10-31);
+  - [ ] the sweeps in the cloud: U1, U2 and G1's times restated for measured wall time.
 - [ ] **A JFR run to check the held levels** against the heap: a sorted read of MoR-v3 at the base
   point, whose counted level climbs by a row group per batch file, should move the heap after
   collection by about as much. A check of the measure, not a result.
@@ -381,6 +410,18 @@ lower.
   suffixed `-s3x` or `-azure`, so its havoc run is its twin, and the calibration's run as before.
   Checked against a stub `run.sh` on both clouds' branches; not yet run on a VM. The sweeps' base
   point needs a 16 GB heap, so `c7a.4xlarge` on AWS.
+
+  **The base point ran on S3 Express** (f51796a, 2026-10-30, 2 h 47 min; run by a session, at the
+  user's request): C5–C8 held. The requests, bytes and held peaks equal the laptop twin's in all
+  1,325 records; priced by request size with the VM's own spike, every judged mean came within
+  1–11% of its wall time; every judged ratio fell on the side of 1 the twin put it (RMoW-C's
+  batch 3.05 times MoR-v3's, its full read 0.85); the store took 13–28% of the batches and 32–36%
+  of the full reads. Azure has not run it. **Rerun on the vectorized reader** (6f24575,
+  2026-10-31, 1 h 36 min): V4–V7 held. The counts equal the laptop twin's; every judged mean came
+  within 2–14% of the model; RMoW-C's batch took 4.18 times MoR-v3's (predicted 4.48) and its
+  full read 0.87 (0.87); the store took 58–70% of the full reads and 18–36% of the batches
+  ([lab/pages/base-point-model.md](../lab/pages/base-point-model.md); the results in
+  [lab/pages/base-point.md](../lab/pages/base-point.md)).
 
   **Running it** is the user's: [deploy/](../deploy/README.md), each cloud step by step the first
   time (`infra-up`, `up`, `ship`, `wait`, `run test`, `wait`, then `run spike bench`), then

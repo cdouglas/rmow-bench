@@ -567,12 +567,18 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
 - **Done (2026-10-29):** under an update share, a batch's deletes fall among the rows its
   statements change; writers stream a row group at a time, and each phase records what it holds
   ([What is held](#what-is-held)); a sorted read (`read_sorted`).
-- **Running (2026-10-29):** the sweeps from a base point of 16 MiB row groups, one axis at a time
-  (update share, skew, row-group size, arrival window, and the ingest window as a reference),
-  eleven configurations (`configs/sweep-*.json`) on havoc (`docker/campaigns/sweep.json`), against
-  the hypotheses registered 2026-10-29 in [docs/HYPOTHESES.md](docs/HYPOTHESES.md). No results
-  yet. A twin of the base point runs on this laptop, with counters, for the cloud runs.
-- **Next:** the base point in the cloud, on S3 Express and then Azure, through the deploy's `bench`
-  step, once its hypotheses are registered. Its runs are the first test of a profile that prices
-  each logged request at its size from the spikes (lab/views/65_sized.sql, built 2026-10-29 from
-  the calibration's runs). Split files can also run on standard S3.
+- **Done on havoc (2026-10-30):** the sweeps from a base point of 16 MiB row groups, one axis at a
+  time (update share, skew, row-group size, arrival window, and the ingest window as a reference),
+  eleven configurations (`configs/sweep-*.json`, `docker/campaigns/sweep.json`), against the
+  hypotheses registered 2026-10-29 in [docs/HYPOTHESES.md](docs/HYPOTHESES.md). Every job ran
+  under foreign load, so their requests, bytes and held peaks stand and their CPU decides nothing.
+- **Done in the cloud (2026-10-30):** the base point on S3 Express, where a profile that prices
+  each logged request at its size from the spikes (lab/views/65_sized.sql) put every judged mean
+  within 1–11% of its wall time (C5–C8 held).
+- **Done (2026-10-31):** every arm reads Parquet through Iceberg's vectorized reader, as Spark
+  does ([What is measured](#what-is-measured)). On the base point a full read takes about a
+  quarter of its instructions, and RMoW-C's batch goes from 3.0 to 4.5 times MoR-v3's at S3
+  Express prices (V1–V3 held); S3 Express measured 4.2 times, with the full read still 0.87 of
+  MoR-v3's (V4–V7 held, [lab/pages/base-point.md](lab/pages/base-point.md)).
+- **Next:** the sweeps on cloud VMs, one per configuration, on the vectorized reader. Split files
+  can also run on standard S3.

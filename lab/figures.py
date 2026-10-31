@@ -795,3 +795,123 @@ def model_check(groups, profiles):
     d["model_ms"] = d.cpu_ms + d.request_ms + d.transfer_ms
     d["what"] = d.phase.map({"batch": "write (batch)", **READS})
     return d.merge(q("SELECT arm, arm_label, ord FROM arm_meta"), on="arm")
+
+
+# The sweeps' base point (configs/sweep-base.json) on S3 Express, for the pages base-point
+# (results), base-point-model (calibration) and vectorized-reader (decisions). Two builds: Iceberg's
+# row reader, which builds a Java object per row (until 2026-10-31, f51796a), and its vectorized
+# reader, as Spark reads an Iceberg table (6f24575). Each build has a laptop twin (instruction
+# counts) and an S3 Express run from a c7a.4xlarge, with the spike its VM ran just before; havoc's
+# run of the row reader's build counts requests and bytes only (foreign load).
+
+BP_OLD, BP_NEW = "row reader", "vectorized reader"
+BP_BUILDS = [BP_OLD, BP_NEW]
+BP_LAPTOP = {BP_OLD: "sweep-base-f970149711a9/20261030T054758Z",
+             BP_NEW: "sweep-base-f970149711a9/20261031T083323Z"}
+BP_CLOUD = {BP_OLD: "sweep-base-s3x-89a55338cd9a/20261030T205713Z",
+            BP_NEW: "sweep-base-s3x-89a55338cd9a/20261031T164030Z"}
+BP_SPIKE = {BP_OLD: "spike/s3x-spike-20261030T205211Z",
+            BP_NEW: "spike/s3x-spike-20261031T163533Z"}
+BP_HAVOC = "sweep-base-f970149711a9/20261030T055938Z"
+# The phases compared: the 30 batches, and the full reads after the initial load under cached (one
+# thread, each file's footer and deletes loaded once), RMoR-C's also under cached-skip
+BP_JUDGED = """(phase = 'batch' OR (phase = 'read_full' AND step > 0
+               AND (reader = 'cached' OR (arm = 'rmor-c' AND reader = 'cached-skip'))))"""
+BP_WHAT = """CASE WHEN phase = 'batch' THEN 'a batch'
+                 WHEN reader = 'cached-skip' THEN 'a full read, skipping dead row groups'
+                 ELSE 'a full read' END"""
+BP_WHATS = ["a batch", "a full read", "a full read, skipping dead row groups"]  # their sort order
+# what a phase's own thread did, from phase_breakdown: decoding and encoding Parquet, the store
+# (its client's CPU and waiting on it), and the rest (footers, deletes, other CPU and waiting)
+BP_PARTS = ["decoding", "encoding", "other", "the store"]
+_BP_PART = """CASE component WHEN 'decode CPU' THEN 'decoding' WHEN 'encode CPU' THEN 'encoding'
+                             WHEN 'store client CPU' THEN 'the store'
+                             WHEN 'waiting on the store' THEN 'the store' ELSE 'other' END"""
+
+
+def _bp(sql, runs, **params):
+    """sql once per build, with $run bound to runs[build] (and $spike to its VM's spike where the
+    sql takes one), tagged with the build and the arms' labels."""
+    frames = []
+    for b in BP_BUILDS:
+        p = {"run": runs[b], "spike": BP_SPIKE[b], **params}
+        frames.append(q(sql, **{k: v for k, v in p.items() if f"${k}" in sql}).assign(build=b))
+    labels = q("SELECT arm, arm_label, ord FROM arm_meta")
+    return pd.concat(frames, ignore_index=True).merge(labels, on="arm")
+
+
+def bp_times(runs=BP_CLOUD):
+    """Per build, arm and compared phase: the mean wall time (s) and what it sent and moved."""
+    return _bp(f"""
+        SELECT arm, {BP_WHAT} AS what, count(*) AS n, avg(wall_ns) / 1e9 AS s,
+               avg(requests) AS requests, avg(gets) AS gets, avg(puts + appends) AS writes,
+               avg(bytes_read) / 1e6 AS mb_read, avg(bytes_written) / 1e6 AS mb_written,
+               avg(instructions) / 1e9 AS g_instructions
+        FROM steps WHERE run_id = $run AND {BP_JUDGED} GROUP BY ALL""", runs)
+
+
+def bp_parts(runs=BP_CLOUD):
+    """Per build, arm, compared phase and part (BP_PARTS): the mean seconds its own thread spent."""
+    return _bp(f"""
+        WITH s AS (SELECT arm, step, phase, reader, {_BP_PART} AS part, sum(ms) AS ms
+                   FROM phase_breakdown WHERE run_id = $run AND thread = 'phase' AND {BP_JUDGED}
+                   GROUP BY ALL)
+        SELECT arm, {BP_WHAT} AS what, part, avg(ms) / 1e3 AS s FROM s GROUP BY ALL""", runs)
+
+
+def bp_model(runs=BP_CLOUD):
+    """Per build, arm and compared phase: measured wall time against the model (the thread's CPU
+    plus its requests priced at their sizes with the VM's spike, lab/views/65_sized.sql), in s."""
+    d = _bp(f"""
+        SELECT arm, {BP_WHAT} AS what, count(*) AS n, avg(measured_ms) / 1e3 AS measured_s,
+               avg(cpu_ms) / 1e3 AS cpu_s, avg(request_ms) / 1e3 AS request_s
+        FROM sized_latency($run, $spike) WHERE {BP_JUDGED} GROUP BY ALL""", runs)
+    d["simulated_s"] = d.cpu_s + d.request_s
+    d["sim_over_measured"] = d.simulated_s / d.measured_s
+    return d
+
+
+def bp_over_mor(times):
+    """bp_times' mean wall time of each arm but MoR-v3 over MoR-v3's in the same build and kind of
+    phase (a skipping read over MoR-v3's full read)."""
+    mor = times[times.arm == "mor-v3"].set_index(["build", "what"]).s
+    d = times[times.arm != "mor-v3"].copy()
+    d["mor_v3_s"] = [mor[(b, "a batch" if w == "a batch" else "a full read")]
+                     for b, w in zip(d.build, d.what)]
+    d["over_mor_v3"] = d.s / d.mor_v3_s
+    return d
+
+
+def bp_storage(runs=BP_CLOUD):
+    """Per build and arm: the bytes stored and live after the last batch (GB)."""
+    return _bp("""
+        SELECT arm, arg_max(stored_bytes, step) / 1e9 AS stored_gb,
+               arg_max(live_bytes, step) / 1e9 AS live_gb
+        FROM steps WHERE run_id = $run AND phase = 'state' GROUP BY ALL""", runs)
+
+
+def bp_parts_chart(parts, rows="build"):
+    """Stacked bars of bp_parts: seconds per arm by part, a panel for batches and one for full
+    reads (RMoR-C's read skipping dead row groups a bar of its own there, "RMoR-C (skipping)"),
+    each with a row per `rows` value (None: one row) on one time axis, so the rows compare."""
+    parts = parts.copy()
+    skip = parts.what == BP_WHATS[2]
+    parts.loc[skip, "arm_label"] = parts.loc[skip, "arm_label"] + " (skipping)"
+    parts.loc[skip, "what"] = BP_WHATS[1]
+    arms = list(parts.sort_values(["ord", "arm_label"]).arm_label.unique())
+
+    def panel(what):
+        d = parts[parts.what == what]
+        chart = alt.Chart(d).mark_bar().encode(
+            x=alt.X("s:Q", title="seconds, mean phase", stack="zero"),
+            y=alt.Y("arm_label:N", title=None, sort=[a for a in arms if a in set(d.arm_label)]),
+            color=alt.Color("part:N", title=None, sort=BP_PARTS),
+            order=alt.Order("part:N", sort="ascending"),
+            tooltip=["build", "arm_label", "what", "part", alt.Tooltip("s:Q", format=".2f")],
+        ).properties(width=230)
+        if rows:
+            chart = chart.facet(row=alt.Row(f"{rows}:N", title=None))
+        return chart.properties(title=what)
+
+    return alt.hconcat(*[panel(w) for w in BP_WHATS[:2]]).resolve_scale(x="independent",
+                                                                        y="independent")

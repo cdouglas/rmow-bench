@@ -116,7 +116,9 @@ a new hash under the same label.
 | **scale** (`configs/scale-recency-*`, on havoc) | Do the 4 MiB recency setting's requests, bytes, CPU and simulated latency hold at Iceberg's defaults (P1–P6)? | row group R = tail seal = 4, 16, 64, 128 MiB, with rows, operations per batch and files scaled by R; recency, no compaction, payload checks off, requests logged | MoR-v3, TailCoW-C, RMoW-B and -C in both layouts | 4, 4 in the rerun, 4 on the laptop | [lab/pages/scale.md](../lab/pages/scale.md). CPU decided on the laptop, in instructions: on havoc, foreign load and then noise beyond it left it undecided. |
 | **cpu measure** (`configs/cal-cpu-recency-4m.json`) | How to measure CPU so that one phase can decide a 10% question (M1–M4)? | the measure: thread CPU time against each thread's user-mode instructions and cycles (`perf_event_open`); the 4 MiB scale setting, all six arms, `cached` and `cached-p8`, run twice | all six of the scale campaign | 2 | [lab/pages/cpu-measure.md](../lab/pages/cpu-measure.md) |
 | **dv ablation** (`configs/local-dv-*`) | H3's attribution: how much of RMoW against TailCoW is the layout, and how much the update handling (region rewrites against DVs)? | key distribution (recency, uniform); 4 MiB, no compaction | MoR-v3, CoW, TailCoW-B and -C, RMoW-A, -B and -C, RMoW-A-dv, -B-dv and -C-dv | 3, deleted | Conclusions in [DESIGN.md](DESIGN.md#deletion-vectors-on-an-appendable-file-an-ablation-removed); numbers under Retired runs. |
-| **sweeps** (`configs/sweep-*`, on havoc) | U1–U3, K1, G1: where the region arms' extra write cost is repaid against MoR-v3 while a batch changes a minority of the regions; M1–M4 of 2026-10-29: what the arms hold in memory, and a sorted read. | from a base point of 16 MiB row groups (`sweep-base`), one axis at a time: update share p = 0.03, 0.1, 0.3; region skew 0, 1, 2; row groups 16, 32, 64 MiB; insert lateness with a p99 of 1, 5 and 20 batches; the ingest window, by statement and a row a change. No compaction, payload checks off, requests and held memory logged | MoR-v3, TailCoW-C, RMoR-C, RMoR-C with footers, RMoW-C | 11 on havoc, running (2026-10-29), and a laptop twin of the base point, with counters, for the cloud runs | None yet. |
+| **sweeps** (`configs/sweep-*`, on havoc) | U1–U3, K1, G1: where the region arms' extra write cost is repaid against MoR-v3 while a batch changes a minority of the regions; M1–M4 of 2026-10-29: what the arms hold in memory, and a sorted read. | from a base point of 16 MiB row groups (`sweep-base`), one axis at a time: update share p = 0.03, 0.1, 0.3; region skew 0, 1, 2; row groups 16, 32, 64 MiB; insert lateness with a p99 of 1, 5 and 20 batches; the ingest window, by statement and a row a change. No compaction, payload checks off, requests and held memory logged | MoR-v3, TailCoW-C, RMoR-C, RMoR-C with footers, RMoW-C | 11 on havoc (2026-10-30, campaign `sweep`), every job under foreign load, so their CPU decides nothing; to run again on cloud VMs, on the vectorized reader | None yet. Their requests, bytes and held peaks stand; their times wait for the cloud. |
+| **base point in the cloud** (`configs/sweep-base.json`) | C5–C8: does the model priced by request size hold at the sweeps' scale on the real stores, and where does the trade-off fall there? | S3 Express in usw2-az3 from a `c7a.4xlarge`, on f51796a, requests and held memory logged, the VM's spike just before; its twins on the laptop (with counters) and havoc | the sweeps' five | 1 and a spike, 2026-10-30; Azure not run yet | The model and the controls: [lab/pages/base-point-model.md](../lab/pages/base-point-model.md), with the vectorized reader's rerun (campaign `base-point`). 2 h 47 min. |
+| **vectorized reader** (`configs/sweep-base.json`) | V1–V7: does the trade-off depend on the Parquet code the arms read and write with? Since 2026-10-31 every arm reads through Iceberg's vectorized reader, and the writer takes strings as UTF-8 bytes. | the reader: the laptop's base point on the new reader against its run on the old one; then S3 Express on the new reader (6f24575) | the sweeps' five | 1 on the laptop, 2026-10-31 (40 min, against 2 h 6 min on the old reader), and 1 on S3 Express with its spike the same day (1 h 36 min, against 2 h 47 min) | The results: [lab/pages/base-point.md](../lab/pages/base-point.md); the decision: [lab/pages/vectorized-reader.md](../lab/pages/vectorized-reader.md); the model: [lab/pages/base-point-model.md](../lab/pages/base-point-model.md). V1–V7 held. |
 
 The compaction sweep's threshold levels:
 
@@ -159,6 +161,9 @@ The compaction sweep's threshold levels:
 | cpu measure | cal-cpu-recency-4m (twice) | recency | 4 MiB | never | — | 6 |
 | scale, laptop | scale-recency-rg{4,16,64,128}m, from 9f868af | recency | 4–128 MiB | never | — | 6 |
 | cloud calibration | s3x-calibration, azure-calibration (three runs each, on the stores) | recency | 1 MiB | never | — | 5 |
+| sweeps | sweep-{base,p10,p30,s0,s2,rg32m,rg64m,late99-1,late99-20} and sweep-ingest{,-rows} (havoc, a5e2ee2) | regions (ingest: recency) | 16–64 MiB | never | — | 5 |
+| base point | sweep-base on the laptop (f51796a) and S3 Express (f51796a) | regions | 16 MiB | never | — | 5 |
+| vectorized reader | sweep-base on the laptop (ca1985a with the change, committed as 6f24575) and S3 Express (6f24575) | regions | 16 MiB | never | — | 5 |
 
 "Thresholds" are only used when compaction runs, so "—" marks runs that never compact (their
 configurations carry the default values). The lab's Experiments page builds the same table from
@@ -574,8 +579,9 @@ Against the runs they replaced (controls K1–K3):
 ## The hypotheses
 
 H1–H6 are HYPOTHESES.md as of commit 1145f89; the refocused file (2026-10-27) carries
-what they settled, the calibration's C1–C4, decided by the cloud runs of 2026-10-28, and the
-sweeps' (2026-10-29). The sweeps' M1–M4, on memory, are not the cpu measure's M1–M4.
+what they settled, the calibration's C1–C4, decided by the cloud runs of 2026-10-28, the
+sweeps' (2026-10-29), the base point's in the cloud, C5–C8 (2026-10-30), and the vectorized
+reader's, V1–V7 (2026-10-31). The sweeps' M1–M4, on memory, are not the cpu measure's M1–M4.
 
 | | Claim, in short | Status |
 |---|---|---|
@@ -588,16 +594,23 @@ sweeps' (2026-10-29). The sweeps' M1–M4, on memory, are not the cpu measure's 
 | C2 | A phase's time is its CPU plus its requests' latencies, within 25%, priced with the measured latencies | **Contradicted** as registered: the spikes' profiles misprice small GETs. The structure holds (0.6% unexplained). |
 | C3 | The trade-off falls where the twins put it | **Contradicted** for S3 Express's batches (the region arms beat MoR-v3) and RMoR-C with footers' batch on Azure; held for every judged full read. |
 | C4 | CPU is the bottleneck only of the region arms' batches on S3 Express | **Held** on S3 Express (56–67%), **contradicted** on Azure (RMoW-C's batches 39%, more than a third). |
-| U1 | A region rewrite pays more as the update share p rises: the region arms' batch time over MoR-v3's is lower at p = 0.3 than at 0.03 | **Open:** the sweeps, on havoc. |
-| U2 | RMoW-C's batch takes fewer requests and less time than both RMoR-C arms' at every p | **Open:** the sweeps. |
-| U3 | No region arm writes fewer bytes than MoR-v3, at any p | **Open:** the sweeps. |
-| K1 | Skew moves the region arms' writes, not MoR-v3's, nor the full reads | **Open:** the sweeps. |
-| G1 | Bigger row groups cost the region arms' writes | **Open:** the sweeps. |
-| M1–M4 (memory) | A sorted read holds MoR-v3's batch files at once; RMoW-C's holds less, but grows too; RMoW-C's batch holds more bytes than MoR-v3's; RMoR-C sorts its whole batch file | **Open:** the sweeps. |
-| C5 | The base point's cloud runs send what the twins count (a control) | **Open:** the base point in the cloud, S3 Express first. |
-| C6 | Priced by request size, each arm's mean batch and full read is within 25% of its wall time | **Open:** the base point in the cloud. |
-| C7 | At the base point the trade-off falls where the laptop twin puts it: the region arms' batches slower than MoR-v3's on both stores | **Open:** the base point in the cloud. |
-| C8 | At the base point a phase is mostly CPU: the store takes under half of every mean batch and full read | **Open:** the base point in the cloud. |
+| U1 | A region rewrite pays more as the update share p rises: the region arms' batch time over MoR-v3's is lower at p = 0.3 than at 0.03 | **Open:** the cloud sweep. Havoc's sweeps ran under foreign load, so their CPU decides nothing. |
+| U2 | RMoW-C's batch takes fewer requests and less time than both RMoR-C arms' at every p | **Open:** the cloud sweep (the requests are havoc's to decide, not yet judged). |
+| U3 | No region arm writes fewer bytes than MoR-v3, at any p | **Open:** havoc's sweeps decide it (bytes are exact); not yet judged. |
+| K1 | Skew moves the region arms' writes, not MoR-v3's, nor the full reads | **Open:** the cloud sweep (bytes from havoc's, not yet judged). |
+| G1 | Bigger row groups cost the region arms' writes | **Open:** the cloud sweep (bytes from havoc's, not yet judged). |
+| M1–M4 (memory) | A sorted read holds MoR-v3's batch files at once; RMoW-C's holds less, but grows too; RMoW-C's batch holds more bytes than MoR-v3's; RMoR-C sorts its whole batch file | **Open:** havoc's sweeps decide it (held peaks are exact on one thread); not yet judged. |
+| C5 | The base point's cloud runs send what the twins count (a control) | **Held** on S3 Express (2026-10-30): all 1,325 records' requests and bytes, and all 1,230 one-thread held peaks, equal the laptop twin's. Azure not run yet. |
+| C6 | Priced by request size, each arm's mean batch and full read is within 25% of its wall time | **Held** on S3 Express: every judged mean within 1–11%. Azure not run yet. |
+| C7 | At the base point the trade-off falls where the laptop twin puts it: the region arms' batches slower than MoR-v3's on both stores | **Held** on S3 Express: over MoR-v3's, RMoR-C's batch 6.33 (predicted 6.59), with footers 6.33 (6.23), RMoW-C's 3.05 (2.98); full reads 3.78 (3.85), 0.85 (0.87) and 0.85 (0.85). Azure not run yet. |
+| C8 | At the base point a phase is mostly CPU: the store takes under half of every mean batch and full read | **Held** on S3 Express: the store took 13–28% of the batches and 32–36% of the full reads. Azure not run yet. |
+| V1 | The vectorized reader changes no request, byte or held peak (a control) | **Held** (the laptop, 2026-10-31): all 1,325 records and all 1,230 one-thread held peaks equal the old reader's run. |
+| V2 | On the vectorized reader a full read takes at most a third of its old instructions | **Held:** 0.26–0.28 under `cached`. |
+| V3 | At S3 Express prices RMoW-C's batch over MoR-v3's grows past the 3.05 measured on the old reader, its full read stays between 0.80 and 0.95 of MoR-v3's | **Held:** 4.48 and 0.87, simulated from the laptop. MoR-v3's batch was mostly decoding, which the new reader cut most; 61% of RMoW-C's batch CPU is now parquet-java's encoding. |
+| V4 | On S3 Express the vectorized reader sends what its laptop twin counts (a control) | **Held** (2026-10-31): all 1,325 records and all 1,230 one-thread held peaks. |
+| V5 | On the vectorized reader the model priced by request size puts each judged mean within 25% of its wall time | **Held:** within 2–14%, the most for RMoR-C's batch (1.14), whose multipart PUT overlaps its writing. |
+| V6 | On S3 Express the trade-off falls where the twin puts it; RMoW-C's batch over MoR-v3's above 3.05, its full read between 0.80 and 0.95 | **Held:** RMoW-C's batch 4.18 times MoR-v3's (predicted 4.48), its full read 0.87 (0.87); RMoR-C's 8.01 (9.43) and 3.82 (3.83), with footers 8.19 (8.75) and 0.87 (0.87). |
+| V7 | On the vectorized reader full reads are mostly the store's time, batches mostly CPU | **Held:** the store took 58–70% of the full reads and 18–36% of the batches. |
 | H6 | When to compact | **Mixed** (unchanged on the reruns). The read half held for RMoW-B, not RMoW-C; the space and write-for-read halves held; the costs half held for split RMoW, not for MoR-v3 (its cheapest on S3 Express is every 10 batches, 4%). |
 
 ## What is next
@@ -622,9 +635,11 @@ would need its own arms and reader checks.
   [lab/pages/cloud.md](../lab/pages/cloud.md)). A profile that prices each logged request at its
   size from the spikes (lab/views/65_sized.sql, 2026-10-29) fits the calibration's requests better
   than the spikes' latency-plus-slope; the base point's cloud runs are its first test.
-- **Running: the sweeps** on havoc (2026-10-29), and a laptop twin of their base point. **Next:**
-  the base point on S3 Express, then Azure, through the deploy's `bench` step, once its hypotheses
-  are registered.
+- **Done: the sweeps on havoc** (2026-10-30), every job under foreign load, so their CPU decides
+  nothing; **the base point on S3 Express** (2026-10-30), where C5–C8 held; and **the vectorized
+  reader** (2026-10-31), where V1–V3 held on the laptop. **Done:** the base point on S3
+  Express on the new reader (2026-10-31), where V4–V7 held ([lab/pages/base-point.md](../lab/pages/base-point.md), the results;
+  [lab/pages/base-point-model.md](../lab/pages/base-point-model.md), the model). **Next:** the sweeps on cloud VMs, one VM per configuration.
 - **Both calibrations run the five arms new campaigns run** (MoR-v3, TailCoW-C, RMoR-C, RMoR-C
   with footers, RMoW-C) since 2026-10-27, RMoR-C with the writer that skips dead row groups and a `cached-skip` reader beside
   the others, and their spikes time GETs by size for the read rate per MiB.
