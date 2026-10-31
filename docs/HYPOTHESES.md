@@ -454,3 +454,70 @@ elapsed time (2 h 47 min on the old reader).
 model prices them after it, and a phase's thread CPU counts the client's TLS and checksums that
 the spike's latencies include too. TailCoW-C's ratios and RMoR-C's under `cached-skip` are not
 judged.
+
+## The vectorized base point on Azure (registered 2026-10-31)
+
+**What they decide:** whether Azure Blob measures what the S3 Express run measured on the
+vectorized reader (The vectorized base point in the cloud: V4–V7 held), with the trade-off where
+Azure's prices put it. The base point has not run on Azure; the predictions registered for it
+(C5–C8) were for the old reader and are not judged. Azure's requests cost more than S3 Express's,
+so the store is predicted to take more of every phase there, MoR-v3's write included, and the
+region arms' extra write cost to weigh less against it. It is also the latency model's first test
+on Azure past the calibration's 1 MiB row groups.
+
+**Setup:** `configs/sweep-base.json` on Azure Blob (ADLS Gen2, Standard, westus, from a
+`Standard_D8as_v6`: Zen 4, 8 vCPUs, 32 GiB), as the S3 Express run was made: the deploy's `bench`
+step on one VM, one run, a 16 GB heap, requests and held memory logged, at 6f24575 (the vectorized
+reader), the contract suites and the VM's own spike, from main, just before. The twins: for the
+counts, the laptop's `sweep-base-f970149711a9/20261031T083323Z`; for CPU, the S3 Express run
+`sweep-base-s3x-89a55338cd9a/20261031T164030Z`, whose cloud Zen 4 cores took 1.24–1.35 times the
+laptop's work in every judged phase.
+
+**Predicted** (each arm's mean write and mean full read after the initial load under `cached`,
+over MoR-v3's; RMoR-C's also under `cached-skip`): the S3 Express run's thread CPU plus its
+requests (the twin's, V4) priced with the 2026-10-28 Azure spike from a `D8as_v6` in westus
+(`spike/azure-spike-20261028T233151Z`). In brackets the requests' share of the simulated phase:
+
+| Arm | A write | A full read |
+|---|---|---|
+| MoR-v3 | 4.8 s (0.62) | 14.1 s (0.68) |
+| TailCoW-C | 1.00 (0.62) | 1.01 (0.67) |
+| RMoR-C | 5.65 (0.36) | 3.72 (0.67); `cached-skip` 1.02 (0.60) |
+| RMoR-C with footers | 5.39 (0.40) | 0.88 (0.69) |
+| RMoW-C | 2.62 (0.38) | 0.90 (0.70) |
+
+At the laptop's pace instead of the S3 Express VM's, the ratios are within 0.12 of these (RMoW-C:
+2.53 and 0.90). S3 Express measured RMoW-C's write at 4.18 times MoR-v3's and its full read at
+0.87.
+
+- **A1: the Azure run sends what the twin counts** (a control). Every record's requests, bytes and
+  table state, and every one-thread phase's held peaks, equal the laptop twin's, as V4's did.
+  Azure's own requests (`sdk_*`) differ only where the store does: an appendable create is a
+  staged Append Blob, an Append Block and a rename, and an append past 100 MiB is several Append
+  Blocks.
+- **A2: the model holds on Azure at this scale.** Priced with its own VM's spike, each arm's mean
+  write and mean full read under `cached` (RMoR-C's also under `cached-skip`), simulated as its
+  thread CPU plus its requests' prices, is within 25% of its mean wall time, as in V5.
+- **A3: the trade-off falls where the twin puts it, and the write gap is narrower than on S3
+  Express.** Each ratio in the table lands on the same side of 1 in the run's mean wall times,
+  wherever the prediction is at least 10% from 1 (as V6): every region arm's write is slower than
+  MoR-v3's, RMoR-C's full read under `cached` slower, and the full reads of RMoW-C and RMoR-C with
+  footers faster. And RMoW-C's write over MoR-v3's is below the 4.18 S3 Express measured.
+- **A4: the store takes most of every read, and of MoR-v3's write.** In `phase_breakdown`, the
+  store (store client CPU and waiting on the store) takes more than half the wall time of every
+  arm's mean full read under `cached` (RMoR-C's also under `cached-skip`) and of MoR-v3's and
+  TailCoW-C's mean write, and less than half of each region arm's mean write. On S3 Express it
+  took 58–70% of the full reads and 18–36% of the writes, MoR-v3's included.
+
+**Measured, not judged:** each request's time against its price, by op and size; the new spike
+against the 2026-10-28 one; the Azure VM's pace against the S3 Express VM's (the same
+instructions); the other readers (`cached-p8`, `one-footer`, `stock`) and the sorted read; the
+run's elapsed time (1 h 36 min on S3 Express).
+
+**Limits:** one run. The model's Azure prices were checked only at the calibration's sizes (ranged
+GETs to 1 MiB, within 0.70–1.23 of their time); here reads are 16 MiB ranges, and RMoW-C's appends
+reach 109 MiB, past the 100 MiB Append Block. TailCoW-C's ratios and RMoR-C's under `cached-skip`
+are not judged. The S3 Express run's thread CPU includes its client's TLS and checksums, while
+Azure's SDK does much of its I/O on event-loop threads outside the phase's thread, so the predicted
+CPU may run high. The VM has 8 vCPUs where the S3 Express VM had 16; only `cached-p8` (not judged)
+uses more than two.
