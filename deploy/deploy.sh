@@ -202,6 +202,17 @@ bench_labels() {
   done
 }
 
+# The labels of the twin step's runs (remote.sh, step_twin): each configuration with a local store,
+# under its own label
+twin_labels() {
+  local name src
+  for name in $1; do
+    src="$(git -C "$REPO_DIR" show "$BENCH_COMMIT:configs/$name.json" 2>/dev/null)" \
+      || die "no configs/$name.json at $BENCH_COMMIT"
+    [[ "$(jq -r .store.type <<<"$src")" != local ]] || jq -r .label <<<"$src"
+  done
+}
+
 # ~/rmow.env on the current VM: the store, the builds and the knobs remote.sh reads, and in a fleet
 # the VM's name, which keeps its test and spike objects and its spike's results apart from the
 # others'. No secrets: the credentials are the VM's (its role or identity), but for the Azure
@@ -392,6 +403,9 @@ fetch_vm() {
   local labels=() includes=() listed
   listed="$(bench_labels "$(vm_configs)")" # fails here if a configuration is missing
   mapfile -t labels <<<"$listed"
+  # and the local twins the twin step ran, under the configurations' own labels
+  listed="$(twin_labels "$(vm_configs)")"
+  [[ -z "$listed" ]] || mapfile -t -O "${#labels[@]}" labels <<<"$listed"
   for label in "${labels[@]}"; do
     includes+=(--include="/$label-*/***")
   done

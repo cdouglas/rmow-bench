@@ -150,6 +150,13 @@ every VM shares.
   twins:** `BENCH_COMMIT` the commit havoc ran, `AWS_CONFIGS="sweep-base ..."`, `BENCH_HEAP="16g"`,
   `BENCH_FLAGS="--log-requests --log-held"`, and an instance with 32 GiB (`c7a.4xlarge` on AWS;
   Azure's `D8as_v6` has 32).
+- **twin** (not in `run`'s default steps): each configuration with a local store, once, as it is,
+  on the VM's disk (`--store-root ~/store/<label>`): the run's local twin, under the
+  configuration's own label and hash, as the laptop's and havoc's are, on the build and the cores
+  the cloud run will use, with instruction counts. A sweep's predictions are priced from it before
+  its cloud run (`run twin`, `fetch`, register them, then `run spike bench`). Its store holds every
+  arm's objects until the run ends, up to 60 GB for the sweeps (`sweep-rg64m`), so set `DISK_GB`
+  to 128; the AWS disk is a gp3 at 500 MB/s and 6,000 IOPS, not its 125 MB/s baseline.
 
 **The VM.** Ubuntu 24.04 and its OpenJDK 17 package, which the twins ran on (17.0.20.1 when this
 was written). The defaults are AMD, as the twins' laptop is (Zen 4):

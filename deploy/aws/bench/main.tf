@@ -82,6 +82,9 @@ resource "aws_instance" "bench" {
   root_block_device {
     volume_size = var.disk_gb
     volume_type = "gp3"
+    # the twin step's local store reads and writes tens of GB: gp3's baseline is 125 MB/s
+    throughput = 500
+    iops       = 6000
   }
 
   metadata_options {

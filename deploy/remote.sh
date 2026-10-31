@@ -13,13 +13,15 @@
 #   spike      the spike, SPIKE_REPS reps (step 2)
 #   bench      each of CONFIGS on the store, BENCH_REPS times (step 3: the calibration, or the
 #              cloud twins of runs made elsewhere)
+#   twin       each of CONFIGS with a local store, once, as it is (its label and hash), on the VM's
+#              disk: its run's local twin on the same build and cores, with instruction counts
 # In a fleet, a VM's test and spike objects go under a prefix of its NAME, and its spike's results
 # take a label of it, so VMs whose steps start in the same second stay apart.
 # Its log is ~/run.log; results land in ~/rmow-bench/results, as on the laptop.
 set -euo pipefail
 cd "$HOME"
 
-STEPS=(build test spike bench)
+STEPS=(build test spike bench twin)
 # Gradle without the engines (Spark, Flink, Kafka Connect), which rmow-bench does not use
 GRADLE=(./gradlew --no-daemon -q -DsparkVersions= -DflinkVersions= -DkafkaVersions=)
 
@@ -191,6 +193,30 @@ step_bench() {
       jq -r '"  host.thread_cpu_per_wall: \(.host.thread_cpu_per_wall) (should be about 1)"' \
         "rmow-bench/$out/manifest.json" 2>/dev/null || echo "  (no manifest at rmow-bench/$out)"
     done
+  done
+}
+
+# A configuration's local twin on this VM: the configuration unchanged, so the run takes its label
+# and hash as the laptop's and havoc's do, its objects on the VM's disk (--store-root; a run deletes
+# its objects when it ends). It counts what the cloud run will send, and its instructions at these
+# cores' pace, from which that run's time is predicted before it runs (docs/HYPOTHESES.md)
+step_twin() {
+  local name src label store out
+  for name in $CONFIGS; do
+    src="rmow-bench/configs/$name.json"
+    [[ -f "$src" ]] || die "no configs/$name.json at $BENCH_COMMIT"
+    [[ "$(jq -r .store.type "$src")" == local ]] || die "configs/$name.json has no local store to twin"
+    label="$(jq -r .label "$src")"
+    store="$HOME/store/$label"
+    rm -rf "$store"
+    log "the twin of $label on the VM's disk (the build at $BENCH_COMMIT, heap $BENCH_HEAP," \
+      "flags $BENCH_FLAGS), under $store"
+    # shellcheck disable=SC2086 # the flags are words
+    out="$(cd rmow-bench && JAVA_OPTS="-Xmx$BENCH_HEAP" bin/run.sh "configs/$name.json" \
+      --store-root "$store" $BENCH_FLAGS | tee -a /dev/stderr | tail -1)"
+    rm -rf "$store"
+    jq -r '"  host.thread_counters: \(.host.thread_counters), thread_cpu_per_wall: \(.host.thread_cpu_per_wall)"' \
+      "rmow-bench/$out/manifest.json" 2>/dev/null || echo "  (no manifest at rmow-bench/$out)"
   done
 }
 
