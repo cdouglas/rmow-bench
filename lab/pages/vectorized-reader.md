@@ -90,7 +90,7 @@ alt.Chart(work).mark_bar().encode(
 ```{code-cell} ipython3
 :tags: [remove-input]
 
-table(work.sort_values(["what", "ord"])[["what", "arm_label", OLD, NEW, "new_over_old"]]
+table(fig.bp_sorted(work, "ord")[["what", "arm_label", OLD, NEW, "new_over_old"]]
       .rename(columns={"arm_label": "arm", OLD: "row reader (G instr.)",
                        NEW: "vectorized reader (G instr.)"}).round(2))
 ```
@@ -102,7 +102,7 @@ instead of {eval}`f"{elapsed[CLOUD[OLD]]:.0f}"`.
 
 ## What it changed on S3 Express
 
-Each design's mean batch and full read on S3 Express on each build, split by what its own thread
+Each design's mean write and full read on S3 Express on each build, split by what its own thread
 did.
 
 ```{code-cell} ipython3
@@ -118,7 +118,7 @@ fig.bp_parts_chart(parts, rows="build")
 o = over.pivot_table(index=["ord", "arm_label", "what"], columns="build", values="over_mor_v3").reset_index()
 t = cloud.pivot_table(index=["ord", "arm_label", "what"], columns="build", values="s").reset_index()
 t = t.merge(o, on=["ord", "arm_label", "what"], how="left", suffixes=(" (s)", " over MoR-v3's"))
-table(t.sort_values(["what", "ord"]).drop(columns="ord").rename(columns={"arm_label": "arm"}).round(2))
+table(fig.bp_sorted(t, "ord").drop(columns="ord").rename(columns={"arm_label": "arm"}).round(2))
 ```
 
 - **Reads got faster for every design alike:** MoR-v3's full read went from
@@ -128,16 +128,16 @@ table(t.sort_values(["what", "ord"]).drop(columns="ord").rename(columns={"arm_la
   {eval}`f"{OV[(NEW, 'rmow-c', 'a full read')]:.2f}"` of MoR-v3's
   ({eval}`f"{OV[(OLD, 'rmow-c', 'a full read')]:.2f}"` before). Decoding no longer dominates a
   read; the store does.
-- **MoR-v3's batch got faster than RMoW-C's:** its largest part is decoding the rows it scans for
-  those it deletes, which went from {eval}`f"{P[(OLD, 'mor-v3', 'a batch', 'decoding')]:.1f}"` s to
-  {eval}`f"{P[(NEW, 'mor-v3', 'a batch', 'decoding')]:.1f}"` s; RMoW-C's largest part is encoding the
-  regions it rewrites, {eval}`f"{P[(OLD, 'rmow-c', 'a batch', 'encoding')]:.1f}"` s then and
-  {eval}`f"{P[(NEW, 'rmow-c', 'a batch', 'encoding')]:.1f}"` s now. So RMoW-C's batch went from
-  {eval}`f"{OV[(OLD, 'rmow-c', 'a batch')]:.2f}"` to {eval}`f"{OV[(NEW, 'rmow-c', 'a batch')]:.2f}"`
+- **MoR-v3's write got faster than RMoW-C's:** its largest part is decoding the rows it scans for
+  those it deletes, which went from {eval}`f"{P[(OLD, 'mor-v3', 'a write', 'decoding')]:.1f}"` s to
+  {eval}`f"{P[(NEW, 'mor-v3', 'a write', 'decoding')]:.1f}"` s; RMoW-C's largest part is encoding the
+  regions it rewrites, {eval}`f"{P[(OLD, 'rmow-c', 'a write', 'encoding')]:.1f}"` s then and
+  {eval}`f"{P[(NEW, 'rmow-c', 'a write', 'encoding')]:.1f}"` s now. So RMoW-C's write went from
+  {eval}`f"{OV[(OLD, 'rmow-c', 'a write')]:.2f}"` to {eval}`f"{OV[(NEW, 'rmow-c', 'a write')]:.2f}"`
   times MoR-v3's.
 
 With the row reader the benchmark understated what RMoW-C pays to write, against MoR-v3, by
-{eval}`f"{100 * (1 - OV[(OLD, 'rmow-c', 'a batch')] / OV[(NEW, 'rmow-c', 'a batch')]):.0f}"`%.
+{eval}`f"{100 * (1 - OV[(OLD, 'rmow-c', 'a write')] / OV[(NEW, 'rmow-c', 'a write')]):.0f}"`%.
 
 ## Verdicts
 
@@ -146,15 +146,15 @@ laptop run):
 - **V1, the reader changes no request, byte or held peak:** {eval}`"held" if same.differing == 0 else "contradicted"`.
 - **V2, a full read takes at most a third of its instructions:**
   {eval}`"held" if full.max() <= 1 / 3 else "contradicted"` ({eval}`f"{full.min():.2f}"`–{eval}`f"{full.max():.2f}"`).
-- **V3, at S3 Express prices RMoW-C's batch grows past 3.05 times MoR-v3's and its full read stays
-  between 0.80 and 0.95 of it:** {eval}`"held" if SIM[(NEW, 'rmow-c', 'a batch')] > 3.05 and 0.80 <= SIM[(NEW, 'rmow-c', 'a full read')] <= 0.95 else "contradicted"`,
-  {eval}`f"{SIM[(NEW, 'rmow-c', 'a batch')]:.2f}"` and {eval}`f"{SIM[(NEW, 'rmow-c', 'a full read')]:.2f}"`
-  simulated from the laptop; S3 Express then measured {eval}`f"{OV[(NEW, 'rmow-c', 'a batch')]:.2f}"`
+- **V3, at S3 Express prices RMoW-C's write grows past 3.05 times MoR-v3's and its full read stays
+  between 0.80 and 0.95 of it:** {eval}`"held" if SIM[(NEW, 'rmow-c', 'a write')] > 3.05 and 0.80 <= SIM[(NEW, 'rmow-c', 'a full read')] <= 0.95 else "contradicted"`,
+  {eval}`f"{SIM[(NEW, 'rmow-c', 'a write')]:.2f}"` and {eval}`f"{SIM[(NEW, 'rmow-c', 'a full read')]:.2f}"`
+  simulated from the laptop; S3 Express then measured {eval}`f"{OV[(NEW, 'rmow-c', 'a write')]:.2f}"`
   and {eval}`f"{OV[(NEW, 'rmow-c', 'a full read')]:.2f}"` ([The model on the cloud base point](./base-point-model.md)).
 
 ## Limits
 
 - One setting, the base point; the sweeps run on the vectorized reader only.
 - The writer is unchanged but for its strings: parquet-java's encoding is now the largest part of a
-  region design's batch. A faster encoder (an engine's own) would narrow the gap this change
+  region design's write. A faster encoder (an engine's own) would narrow the gap this change
   widened.

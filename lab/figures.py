@@ -817,10 +817,10 @@ BP_HAVOC = "sweep-base-f970149711a9/20261030T055938Z"
 # thread, each file's footer and deletes loaded once), RMoR-C's also under cached-skip
 BP_JUDGED = """(phase = 'batch' OR (phase = 'read_full' AND step > 0
                AND (reader = 'cached' OR (arm = 'rmor-c' AND reader = 'cached-skip'))))"""
-BP_WHAT = """CASE WHEN phase = 'batch' THEN 'a batch'
+BP_WHAT = """CASE WHEN phase = 'batch' THEN 'a write'
                  WHEN reader = 'cached-skip' THEN 'a full read, skipping dead row groups'
                  ELSE 'a full read' END"""
-BP_WHATS = ["a batch", "a full read", "a full read, skipping dead row groups"]  # their sort order
+BP_WHATS = ["a write", "a full read", "a full read, skipping dead row groups"]  # pages' order
 # what a phase's own thread did, from phase_breakdown: decoding and encoding Parquet, the store
 # (its client's CPU and waiting on it), and the rest (footers, deletes, other CPU and waiting)
 BP_PARTS = ["decoding", "encoding", "other", "the store"]
@@ -838,6 +838,12 @@ def _bp(sql, runs, **params):
         frames.append(q(sql, **{k: v for k, v in p.items() if f"${k}" in sql}).assign(build=b))
     labels = q("SELECT arm, arm_label, ord FROM arm_meta")
     return pd.concat(frames, ignore_index=True).merge(labels, on="arm")
+
+
+def bp_sorted(df, *by):
+    """df in BP_WHATS' order of its kinds of phase (writes first; their names sort otherwise),
+    then by `by`."""
+    return df.assign(_w=df.what.map(BP_WHATS.index)).sort_values(["_w", *by]).drop(columns="_w")
 
 
 def bp_times(runs=BP_CLOUD):
@@ -876,7 +882,7 @@ def bp_over_mor(times):
     phase (a skipping read over MoR-v3's full read)."""
     mor = times[times.arm == "mor-v3"].set_index(["build", "what"]).s
     d = times[times.arm != "mor-v3"].copy()
-    d["mor_v3_s"] = [mor[(b, "a batch" if w == "a batch" else "a full read")]
+    d["mor_v3_s"] = [mor[(b, "a write" if w == "a write" else "a full read")]
                      for b, w in zip(d.build, d.what)]
     d["over_mor_v3"] = d.s / d.mor_v3_s
     return d
@@ -891,7 +897,7 @@ def bp_storage(runs=BP_CLOUD):
 
 
 def bp_parts_chart(parts, rows="build"):
-    """Stacked bars of bp_parts: seconds per arm by part, a panel for batches and one for full
+    """Stacked bars of bp_parts: seconds per arm by part, a panel for writes and one for full
     reads (RMoR-C's read skipping dead row groups a bar of its own there, "RMoR-C (skipping)"),
     each with a row per `rows` value (None: one row) on one time axis, so the rows compare."""
     parts = parts.copy()
