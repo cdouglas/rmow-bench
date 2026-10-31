@@ -179,8 +179,9 @@ step_bench() {
       log "run $i of $BENCH_REPS of $label (the build at $BENCH_COMMIT, heap $BENCH_HEAP," \
         "flags $BENCH_FLAGS), under $ROOT"
       # shellcheck disable=SC2086 # the flags are words
+      # (tee -a: plain tee opens /dev/stderr, which is run.log, anew and truncates it)
       out="$(cd rmow-bench && JAVA_OPTS="-Xmx$BENCH_HEAP" bin/run.sh "$cfg" $BENCH_FLAGS \
-        | tee /dev/stderr | tail -1)"
+        | tee -a /dev/stderr | tail -1)"
       # The model's checks need the VM's two clocks to agree (the runbooks, Where the time went)
       jq -r '"  host.thread_cpu_per_wall: \(.host.thread_cpu_per_wall) (should be about 1)"' \
         "rmow-bench/$out/manifest.json" 2>/dev/null || echo "  (no manifest at rmow-bench/$out)"
