@@ -8,7 +8,9 @@ once (`FLEET`, since 2026-10-30). Terraform makes the store, the VMs' credential
 runs. `deploy.sh` drives both from here
 and brings the results back into `results/`. The layout follows shield-rs's `deploy/`.
 
-> **Status: written and checked offline, not yet applied.** `./deploy/validate.sh` passes
+> **Status: in use** (the calibration, 2026-10-28; the base point on both clouds, 2026-10-30 to
+> 11-01; the sweeps, as a fleet of nine VMs on AWS and one VM in turn on Azure, 2026-11-01). It was
+> first written and checked offline: `./deploy/validate.sh` passes
 > (`terraform fmt` and `validate` on the four layers, `bash -n`, and shellcheck if installed), and
 > a read-only `terraform plan` of the AWS infra layer resolves its lookups (2026-10-28). The VM's
 > `build` step ran in an Ubuntu 24.04 container (9 minutes), and the local twin's configuration on
@@ -17,9 +19,11 @@ and brings the results back into `results/`. The layout follows shield-rs's `dep
 > down when done. The first `infra-up`, in us-east-1 (2026-10-28), failed on `casuser`'s IAM and
 > was torn down. AWS now runs in us-west-2 on catalog-bench's bucket and instance profile, as
 > catalog-bench's runs did, and its infra layer plans only the key pair and the security group.
-> The calibration ran on both clouds from one VM each (2026-10-28). The fleet is checked offline
-> (2026-10-30): a read-only `terraform plan` of two VMs resolves on both clouds, and `up`, `down`,
-> `run`, `status` and `wait` did what they should against a stub of `terraform` and `ssh`.
+> The calibration ran on both clouds from one VM each (2026-10-28). The fleet, checked offline on
+> 2026-10-30, ran the sweeps on 2026-11-01: nine VMs on AWS, each running its configuration's twin
+> (`run twin`), then its spike and run, each fetched and taken down as it finished; six of the nine
+> first boots failed on the Ubuntu mirror's 503s and were rerun by hand, and `cloud-init.sh` now
+> retries. On Azure the same deploy ran one VM (`FLEET=false`), one configuration at a time.
 
 ## Layout
 
@@ -203,5 +207,8 @@ with the store (in an existing bucket, with the `rmow-bench/` prefix).
   westus allowed 10 regional vCPUs on 2026-10-30, one `D8as_v6` (`az vm list-usage -l westus`);
   raise it in the portal's Quotas before a fleet. `casuser` cannot read AWS's quotas, so an `up`
   past them fails at the instances it could not make (`terraform apply` names them); the others
-  are up.
+  are up. On 2026-11-01 its limit was 64 vCPUs for standard instances (four `c7a.4xlarge`, by the
+  refusal's message): nine launched at once got in before the limit was enforced, and a tenth was
+  refused, so a fleet larger than four must not count on it. `sweep-rg64m` ran on `sweep-p30`'s VM
+  after that VM's own run.
 - **Not provisioned:** spot instances, image baking, auto-teardown.
