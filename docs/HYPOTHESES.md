@@ -521,3 +521,98 @@ are not judged. The S3 Express run's thread CPU includes its client's TLS and ch
 Azure's SDK does much of its I/O on event-loop threads outside the phase's thread, so the predicted
 CPU may run high. The VM has 8 vCPUs where the S3 Express VM had 16; only `cached-p8` (not judged)
 uses more than two.
+
+## The sweeps in the cloud (registered 2026-11-01)
+
+**What they decide:** the sweeps' claims about time (U1, U2 and G1, registered 2026-10-29),
+judged on measured wall time on S3 Express and Azure Blob, with the vectorized reader. They were
+registered on simulated profiles whose CPU came from havoc's runs, which decided nothing about CPU
+(every job under foreign load), on the old reader. The claims about requests, bytes and memory
+(U3, K1, the bytes halves of U1 and G1, M1–M4) are exact, were decided by havoc's runs, and are not
+restated: the vectorized reader changes no request or byte (V1).
+
+**Setup:** the ten sweep configurations besides the base point (`configs/sweep-*.json`), each run
+once at 6f24575, in a 16 GB heap, with requests and held memory logged. The base point's cloud runs
+are the S3 Express run `sweep-base-s3x-89a55338cd9a/20261031T164030Z` and the Azure run under way
+(The vectorized base point on Azure).
+- **S3 Express:** one `c7a.4xlarge` per configuration in usw2-az3, nine at once (the deploy's
+  fleet). AWS's limit of 64 vCPUs refused a tenth, so `sweep-rg64m` runs on `sweep-p30`'s VM after
+  it. Each VM runs its spike just before its run. The runs share the bucket, so each measures the
+  store under the others' load, as its spike does.
+- **Azure Blob:** the base point's `D8as_v6` in westus, the configurations in turn (`sweep-p10`,
+  `sweep-p30`, `sweep-rg32m`, `sweep-rg64m`, `sweep-s0`, `sweep-s2`, `sweep-late99-1`,
+  `sweep-late99-20`, `sweep-ingest`, `sweep-ingest-rows`), each after a spike of its own.
+- **The twins:** each configuration ran first on its S3 Express VM with a local store (the deploy's
+  `twin` step): the same build and cores, with instruction counts. Every twin's requests, bytes and
+  table state equal havoc's run of its configuration in every record (1,297–1,331 each).
+
+**Predicted,** from the twins: their work at its arm's pace plus their requests priced by size,
+with the base point's spikes (`spike/s3x-spike-20261031T163533Z` on S3 Express, from a VM alone on
+the bucket; `spike/azure-spike-20261031T234510Z` on Azure); the base point's from its S3 Express
+run's work. Each design's mean write over MoR-v3's (over the 30 writes), and RMoW-C's mean full
+read under `cached` over MoR-v3's (after the initial load):
+
+S3 Express:
+
+| Run | Varies | MoR-v3's write (s) | RMoW-C | RMoR-C | RMoR-C with footers | RMoW-C's full read |
+|---|---|---|---|---|---|---|
+| `sweep-base` | the base point | 2.5 | 4.43 | 9.39 | 8.70 | 0.87 |
+| `sweep-p10` | p = 0.1 | 1.7 | 3.07 | 7.34 | 6.63 | 0.88 |
+| `sweep-p30` | p = 0.3 | 1.1 | 2.30 | 3.60 | 3.37 | 0.89 |
+| `sweep-s0` | a skew of 0 | 2.6 | 4.78 | 11.41 | 10.65 | 0.86 |
+| `sweep-s2` | a skew of 2 | 2.0 | 3.86 | 5.19 | 4.42 | 0.88 |
+| `sweep-rg32m` | 32 MiB row groups | 2.3 | 5.73 | 11.17 | 10.37 | 0.86 |
+| `sweep-rg64m` | 64 MiB row groups | 2.3 | 8.97 | 13.97 | 13.19 | 0.86 |
+| `sweep-late99-1` | lateness, p99 of 1 batch | 2.4 | 4.48 | 6.89 | 6.09 | 0.86 |
+| `sweep-late99-20` | lateness, p99 of 20 batches | 2.4 | 4.52 | 11.02 | 10.30 | 0.86 |
+| `sweep-ingest` | the ingest window | 1.2 | 3.60 | 11.94 | 12.16 | 0.88 |
+| `sweep-ingest-rows` | the ingest window, a row a change | 1.8 | 6.72 | 11.01 | 11.23 | 0.88 |
+
+Azure Blob:
+
+| Run | Varies | MoR-v3's write (s) | RMoW-C | RMoR-C | RMoR-C with footers | RMoW-C's full read |
+|---|---|---|---|---|---|---|
+| `sweep-base` | the base point | 4.3 | 2.79 | 5.97 | 5.73 | 0.89 |
+| `sweep-p10` | p = 0.1 | 3.0 | 1.89 | 4.72 | 4.40 | 0.91 |
+| `sweep-p30` | p = 0.3 | 1.8 | 1.56 | 2.71 | 2.60 | 0.92 |
+| `sweep-s0` | a skew of 0 | 4.7 | 2.98 | 7.13 | 6.91 | 0.89 |
+| `sweep-s2` | a skew of 2 | 3.7 | 2.30 | 3.24 | 2.83 | 0.91 |
+| `sweep-rg32m` | 32 MiB row groups | 4.0 | 3.52 | 6.80 | 6.55 | 0.88 |
+| `sweep-rg64m` | 64 MiB row groups | 3.8 | 5.79 | 8.79 | 8.63 | 0.81 |
+| `sweep-late99-1` | lateness, p99 of 1 batch | 4.2 | 2.77 | 4.38 | 3.99 | 0.89 |
+| `sweep-late99-20` | lateness, p99 of 20 batches | 4.2 | 2.80 | 6.88 | 6.65 | 0.89 |
+| `sweep-ingest` | the ingest window | 1.6 | 2.92 | 9.44 | 9.96 | 0.91 |
+| `sweep-ingest-rows` | the ingest window, a row a change | 3.0 | 4.62 | 7.40 | 7.82 | 0.90 |
+
+TailCoW-C's write is within 0.01 of MoR-v3's in every run but `sweep-rg64m` (1.13 and 0.95),
+whose tail seal of 64 MiB keeps a write's file of about 15 MiB in the tail to be merged. No region design's write comes within 1.5 times MoR-v3's at any
+setting, so none crosses it along p by 0.3 (which the generator caps at 0.29 at this size).
+
+- **S1: each cloud run sends what its twin counts** (a control). Every record's requests, bytes and
+  table state, and every one-thread phase's held peaks, equal its twin's, as V4's did.
+- **U1 (time): a region rewrite pays more as p rises,** as registered. On both stores, each region
+  design's (RMoW-C, RMoR-C, RMoR-C with footers) mean write over MoR-v3's is lower at p = 0.3
+  (`sweep-p30`) than at p = 0.03 (the base point): about half, by the twins.
+- **U2 (time), revised: RMoW-C's write is the fastest region rewrite, but its lead narrows as p
+  rises.** On both stores, RMoW-C's mean write takes less time than RMoR-C's and than RMoR-C with
+  footers' at p = 0.03, 0.1 and 0.3, as registered. But RMoW-C's write over RMoR-C's is higher at
+  p = 0.3 than at 0.03 (by the twins 0.47 to 0.64 on S3 Express, 0.47 to 0.58 on Azure), where U2
+  as registered has it no higher. With 1.4 regions a write rewritten instead of 8.4, both designs'
+  writes are mostly the batch's inserts, which they encode alike, so the rewrite that sets them
+  apart weighs less. If the runs bear this out, U2's second half is contradicted.
+- **G1 (time): bigger row groups cost the region designs' writes,** as registered. On both stores,
+  each region design's mean write over MoR-v3's rises from 16 to 32 to 64 MiB row groups.
+
+On Azure, U1, U2 and G1 also take the base point's Azure run, which started before this section was
+written and had not finished.
+
+**Measured, not judged:** the full reads along every axis; the settings of skew, lateness and the
+ingest window; how well the model prices each run (each one-thread mean phase from its own CPU and
+its VM's spike); the fleet's spikes, under each other's load, against the base point's alone; the
+Azure VM's pace against the S3 Express VMs'.
+
+**Limits:** one run of each configuration, on one seed. The S3 Express runs load one bucket at once;
+the Azure runs come one after another over about a day, each priced by its own spike. Predicted CPU
+is at the S3 Express VMs' pace, which the Azure VM's may not share; the ratios move little with it
+(the base point's, by at most 0.12 between the laptop's pace and the VM's). Where a write's predicted
+ratio sits within 10% of another it is compared with, the comparison decides nothing.
