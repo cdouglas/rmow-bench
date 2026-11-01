@@ -966,8 +966,9 @@ CS_CONFIGS = ["sweep-base", "sweep-p10", "sweep-p30", "sweep-s0", "sweep-s2", "s
 
 
 def cs_runs():
-    """The cloud runs, per store and configuration: (run, its VM's spike). The newest run of each
-    configuration's cloud label, and the newest spike on its host that started before it."""
+    """The cloud runs as the lab finds them, per store and configuration: (run, its VM's spike). The
+    newest run of each configuration's cloud label, and the newest spike on its host that started
+    before it. The pages read CS_RUNS, these pinned."""
     d = q("""
         WITH r AS (SELECT run_id, label, host, started_at FROM runs
                    WHERE regexp_matches(label, '^sweep-.*-(s3x|azure)$') AND status = 'finished'
@@ -987,7 +988,7 @@ def cs_runs():
 def cs_frame(fn, runs=None, **kw):
     """fn (bp_times, bp_parts, bp_model, bp_storage) over every cloud run, tagged with the store
     and the configuration (column `config`)."""
-    runs = cs_runs() if runs is None else runs
+    runs = CS_RUNS if runs is None else runs
     frames = []
     for store, by in runs.items():
         if not by:
@@ -1013,3 +1014,114 @@ def cs_axes(df):
     with the axis and the setting (`value`)."""
     pts = pd.DataFrame(CS_POINTS, columns=["config", "axis", "value"])
     return df.merge(pts, on="config")
+
+# Each configuration's twin: its run with a local store on its S3 Express VM (the deploy's twin
+# step, 2026-11-01), but the base point's, which is the laptop's on the same build; and havoc's run
+# of each configuration (campaign sweep, 2026-10-30), whose requests and bytes the twins match
+CS_TWINS = {
+    "sweep-base": "sweep-base-f970149711a9/20261031T083323Z",
+    "sweep-p10": "sweep-p10-782c1a9d5c5b/20261031T235849Z",
+    "sweep-p30": "sweep-p30-5176e9860321/20261031T235835Z",
+    "sweep-s0": "sweep-s0-8c50119b643c/20261031T235816Z",
+    "sweep-s2": "sweep-s2-ffc470cde349/20261031T235819Z",
+    "sweep-rg32m": "sweep-rg32m-0f8daa28524c/20261031T235822Z",
+    "sweep-rg64m": "sweep-rg64m-8adf7c79c2bd/20261101T002125Z",
+    "sweep-late99-1": "sweep-late99-1-413431114ea5/20261031T235825Z",
+    "sweep-late99-20": "sweep-late99-20-3fbd6c1857d4/20261031T235828Z",
+    "sweep-ingest": "sweep-ingest-cf4263f112e8/20261031T235831Z",
+    "sweep-ingest-rows": "sweep-ingest-rows-7b5f4987c299/20261031T235834Z",
+}
+CS_HAVOC = {
+    "sweep-base": "sweep-base-f970149711a9/20261030T055938Z",
+    "sweep-p10": "sweep-p10-782c1a9d5c5b/20261030T123617Z",
+    "sweep-p30": "sweep-p30-5176e9860321/20261030T124134Z",
+    "sweep-s0": "sweep-s0-8c50119b643c/20261030T023853Z",
+    "sweep-s2": "sweep-s2-ffc470cde349/20261030T085227Z",
+    "sweep-rg32m": "sweep-rg32m-0f8daa28524c/20261030T023851Z",
+    "sweep-rg64m": "sweep-rg64m-8adf7c79c2bd/20261030T023850Z",
+    "sweep-late99-1": "sweep-late99-1-413431114ea5/20261030T080602Z",
+    "sweep-late99-20": "sweep-late99-20-3fbd6c1857d4/20261030T085025Z",
+    "sweep-ingest": "sweep-ingest-cf4263f112e8/20261030T112555Z",
+    "sweep-ingest-rows": "sweep-ingest-rows-7b5f4987c299/20261030T023852Z",
+}
+# The registered predictions (docs/HYPOTHESES.md, The sweeps in the cloud): each design's mean
+# write over MoR-v3's, per store and configuration, and RMoW-C's mean full read ("rmow-c read")
+CS_PRED = {
+    "S3 Express": {
+        "sweep-base": {"rmow-c": 4.43, "rmor-c": 9.39, "rmor-c-footer": 8.7, "rmow-c read": 0.87},
+        "sweep-ingest": {"rmow-c": 3.6, "rmor-c": 11.94, "rmor-c-footer": 12.16, "rmow-c read": 0.88},
+        "sweep-ingest-rows": {"rmow-c": 6.72, "rmor-c": 11.01, "rmor-c-footer": 11.23, "rmow-c read": 0.88},
+        "sweep-late99-1": {"rmow-c": 4.48, "rmor-c": 6.89, "rmor-c-footer": 6.09, "rmow-c read": 0.86},
+        "sweep-late99-20": {"rmow-c": 4.52, "rmor-c": 11.02, "rmor-c-footer": 10.3, "rmow-c read": 0.86},
+        "sweep-p10": {"rmow-c": 3.07, "rmor-c": 7.34, "rmor-c-footer": 6.63, "rmow-c read": 0.88},
+        "sweep-p30": {"rmow-c": 2.3, "rmor-c": 3.6, "rmor-c-footer": 3.37, "rmow-c read": 0.89},
+        "sweep-rg32m": {"rmow-c": 5.73, "rmor-c": 11.17, "rmor-c-footer": 10.37, "rmow-c read": 0.86},
+        "sweep-rg64m": {"rmow-c": 8.97, "rmor-c": 13.97, "rmor-c-footer": 13.19, "rmow-c read": 0.86},
+        "sweep-s0": {"rmow-c": 4.78, "rmor-c": 11.41, "rmor-c-footer": 10.65, "rmow-c read": 0.86},
+        "sweep-s2": {"rmow-c": 3.86, "rmor-c": 5.19, "rmor-c-footer": 4.42, "rmow-c read": 0.88},
+    },
+    "Azure Blob": {
+        "sweep-base": {"rmow-c": 2.79, "rmor-c": 5.97, "rmor-c-footer": 5.73, "rmow-c read": 0.89},
+        "sweep-ingest": {"rmow-c": 2.92, "rmor-c": 9.44, "rmor-c-footer": 9.96, "rmow-c read": 0.91},
+        "sweep-ingest-rows": {"rmow-c": 4.62, "rmor-c": 7.4, "rmor-c-footer": 7.82, "rmow-c read": 0.9},
+        "sweep-late99-1": {"rmow-c": 2.77, "rmor-c": 4.38, "rmor-c-footer": 3.99, "rmow-c read": 0.89},
+        "sweep-late99-20": {"rmow-c": 2.8, "rmor-c": 6.88, "rmor-c-footer": 6.65, "rmow-c read": 0.89},
+        "sweep-p10": {"rmow-c": 1.89, "rmor-c": 4.72, "rmor-c-footer": 4.4, "rmow-c read": 0.91},
+        "sweep-p30": {"rmow-c": 1.56, "rmor-c": 2.71, "rmor-c-footer": 2.6, "rmow-c read": 0.92},
+        "sweep-rg32m": {"rmow-c": 3.52, "rmor-c": 6.8, "rmor-c-footer": 6.55, "rmow-c read": 0.88},
+        "sweep-rg64m": {"rmow-c": 5.79, "rmor-c": 8.79, "rmor-c-footer": 8.63, "rmow-c read": 0.81},
+        "sweep-s0": {"rmow-c": 2.98, "rmor-c": 7.13, "rmor-c-footer": 6.91, "rmow-c read": 0.89},
+        "sweep-s2": {"rmow-c": 2.3, "rmor-c": 3.24, "rmor-c-footer": 2.83, "rmow-c read": 0.91},
+    },
+}
+# The cloud runs, per store and configuration: (run, the spike its VM ran just before it)
+CS_RUNS = {
+    "S3 Express": {
+        "sweep-base": ("sweep-base-s3x-89a55338cd9a/20261031T164030Z",
+                       "spike/s3x-spike-20261031T163533Z"),
+        "sweep-p10": ("sweep-p10-s3x-0eef50acb2c6/20261101T013642Z",
+                      "spike/s3x-spike-sweep-p10-20261101T013138Z"),
+        "sweep-p30": ("sweep-p30-s3x-77960a5f0c9d/20261101T013644Z",
+                      "spike/s3x-spike-sweep-p30-20261101T013142Z"),
+        "sweep-s0": ("sweep-s0-s3x-bd1294996d6b/20261101T013649Z",
+                     "spike/s3x-spike-sweep-s0-20261101T013146Z"),
+        "sweep-s2": ("sweep-s2-s3x-be6059984bfd/20261101T013648Z",
+                     "spike/s3x-spike-sweep-s2-20261101T013150Z"),
+        "sweep-rg32m": ("sweep-rg32m-s3x-3ffd1de9950a/20261101T013653Z",
+                        "spike/s3x-spike-sweep-rg32m-20261101T013154Z"),
+        "sweep-rg64m": ("sweep-rg64m-s3x-e73e2f618730/20261101T024227Z",
+                        "spike/s3x-spike-sweep-p30-20261101T023726Z"),
+        "sweep-late99-1": ("sweep-late99-1-s3x-0599ad56658b/20261101T013700Z",
+                           "spike/s3x-spike-sweep-late99-1-20261101T013158Z"),
+        "sweep-late99-20": ("sweep-late99-20-s3x-c11a9fc0ff5c/20261101T013705Z",
+                            "spike/s3x-spike-sweep-late99-20-20261101T013202Z"),
+        "sweep-ingest": ("sweep-ingest-s3x-53a9be2342ad/20261101T013709Z",
+                         "spike/s3x-spike-sweep-ingest-20261101T013206Z"),
+        "sweep-ingest-rows": ("sweep-ingest-rows-s3x-90a3943b27f0/20261101T013709Z",
+                              "spike/s3x-spike-sweep-ingest-rows-20261101T013210Z"),
+    },
+    "Azure Blob": {
+        "sweep-base": ("sweep-base-azure-0c88452d93b4/20261031T234956Z",
+                       "spike/azure-spike-20261031T234510Z"),
+        "sweep-p10": ("sweep-p10-azure-a9c861b22333/20261101T021353Z",
+                      "spike/azure-spike-20261101T020915Z"),
+        "sweep-p30": ("sweep-p30-azure-5a52192f31d2/20261101T040944Z",
+                      "spike/azure-spike-20261101T040443Z"),
+        "sweep-s0": ("sweep-s0-azure-3f3a336b1a15/20261101T101950Z",
+                     "spike/azure-spike-20261101T101445Z"),
+        "sweep-s2": ("sweep-s2-azure-e7992fbdbc41/20261101T125618Z",
+                     "spike/azure-spike-20261101T125133Z"),
+        "sweep-rg32m": ("sweep-rg32m-azure-dbed8dac77cc/20261101T053428Z",
+                        "spike/azure-spike-20261101T052959Z"),
+        "sweep-rg64m": ("sweep-rg64m-azure-9e1663679938/20261101T075257Z",
+                        "spike/azure-spike-20261101T074750Z"),
+        "sweep-late99-1": ("sweep-late99-1-azure-66f451713990/20261101T144745Z",
+                           "spike/azure-spike-20261101T144316Z"),
+        "sweep-late99-20": ("sweep-late99-20-azure-264672b41c7a/20261101T165543Z",
+                            "spike/azure-spike-20261101T165056Z"),
+        "sweep-ingest": ("sweep-ingest-azure-a1b07fde6a9c/20261101T191915Z",
+                         "spike/azure-spike-20261101T191431Z"),
+        "sweep-ingest-rows": ("sweep-ingest-rows-azure-05a13b56e3bb/20261101T205331Z",
+                              "spike/azure-spike-20261101T204829Z"),
+    },
+}

@@ -355,7 +355,7 @@ lower.
 
 ## Experiments
 
-- [ ] **Sweeps, one axis at a time,** from the base point (decided 2026-10-29, above: 16 MiB row
+- [x] **Sweeps, one axis at a time,** from the base point (decided 2026-10-29, above: 16 MiB row
   groups, 50 regions growing to 71, 30 batches, a region skew of 1, statements at p = 0.03):
   update share, skew, arrival window and row-group size, for the five arms, with the ingest
   window as a reference. Requests and bytes are exact, so the simulation finds each crossover.
@@ -375,6 +375,22 @@ lower.
   unchanged (V1). The base point runs first, on one VM (Cloud campaign, below); the others follow
   as a fleet, one VM each, on the vectorized reader (held for its S3 Express rerun, decided
   2026-10-31: a sweep on the old reader would have to run again).
+
+  **The sweeps ran in the cloud** (6f24575, 2026-11-01, campaign `cloud-sweep`; run by a session at
+  the user's request). Each configuration ran first as a twin with a local store on its S3 Express
+  VM (the deploy's `twin` step), from which the predictions were registered (HYPOTHESES.md, The
+  sweeps in the cloud), then on S3 Express (nine VMs at once) and on Azure (one VM, in turn over
+  20.5 h). Every twin sent what havoc's run counts, and every cloud run what its twin counts (S1).
+  U1 and G1 held; U2 held as revised, its second half as registered contradicted. No region design's
+  write catches MoR-v3's at any setting (RMoW-C's 2.1–8.2 times on S3 Express, 1.7–5.1 on Azure), so
+  none crosses along p by 0.3; but at p = 0.3 RMoW-C repays its write after 1.2 full reads per write
+  on S3 Express and 0.9 on Azure, against about six at the base point. RMoR-C's write crosses
+  TailCoW-C's nowhere either (3.2–11.2 times MoR-v3's on S3 Express, 2.7–7.5 on Azure), so the θ
+  stage (θ against p, below) has no crossover to start from: where it starts is open. On Azure,
+  bigger row groups make RMoW-C's full read faster (0.71 of MoR-v3's at 64 MiB: fewer, larger GETs),
+  and RMoR-C's block-uploaded write files read slowly
+  ([lab/pages/cloud-sweep.md](../lab/pages/cloud-sweep.md); the model and the verdicts in
+  [lab/pages/cloud-sweep-model.md](../lab/pages/cloud-sweep-model.md)).
 - [ ] **Hot-region isolation** (a micro-benchmark question, not a Parquet benchmark). Can RMoW
   isolate frequently updated regions as row groups of their own, and so cut its amplification?
   - RMoW sets row-group boundaries on every rewrite, so it can cut a hot range out as its own row
@@ -441,7 +457,11 @@ lower.
   taken down as it finishes). The VMs also count instructions where the hypervisor allows
   (`perf_event_paranoid` 2). Checked offline (a plan of two VMs on each cloud, and a stub of
   `terraform` and `ssh`). Open: Azure's westus quota is 10 vCPUs, one `D8as_v6`, so a fleet there
-  needs an increase; AWS's quota is unreadable to `casuser`.
+  needs an increase; AWS's quota is unreadable to `casuser`. **Used for the sweeps** (2026-11-01):
+  nine VMs on AWS, each running its twin, spike and run, fetched and taken down as it finished; on
+  Azure one VM (`FLEET=false`) ran the ten configurations in turn. AWS's limit turned out to be 64
+  vCPUs (four `c7a.4xlarge`); nine got in only because they launched at once. Six of the nine first
+  boots failed on the Ubuntu mirror's 503s; `cloud-init.sh` now retries (bb46e88).
 
   **Running it** is the user's: [deploy/](../deploy/README.md), each cloud step by step the first
   time (`infra-up`, `up`, `ship`, `wait`, `run test`, `wait`, then `run spike bench`), then

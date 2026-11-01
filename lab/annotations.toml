@@ -69,5 +69,9 @@ mark = "excluded"
 note = "pipeline check of the havoc container (docker/campaigns/pipeline.json): requests and bytes match the laptop's run in 769 of 779 records, the other 10 being the split arm's stock reads, changed by the split planning"
 
 [campaigns.base-point]
-title = "The sweeps' base point on S3 Express (c7a.4xlarge, usw2-az3) on the row reader (f51796a, 2026-10-30) and the vectorized reader (6f24575, 2026-10-31), each VM's spike, and the laptop twins"
-select = ["sweep-base-s3x-89a55338cd9a/*", "spike/s3x-spike-20261030T205211Z", "spike/s3x-spike-20261031T163533Z", "sweep-base-f970149711a9/20261030T054758Z", "sweep-base-f970149711a9/20261031T083323Z"]
+title = "The sweeps' base point on S3 Express (c7a.4xlarge, usw2-az3) on the row reader (f51796a, 2026-10-30) and the vectorized reader (6f24575, 2026-10-31), and on Azure Blob (D8as_v6, westus) on the vectorized reader (2026-11-01), each VM's spike, and the laptop twins"
+select = ["sweep-base-s3x-89a55338cd9a/*", "spike/s3x-spike-20261030T205211Z", "spike/s3x-spike-20261031T163533Z", "sweep-base-f970149711a9/20261030T054758Z", "sweep-base-f970149711a9/20261031T083323Z", "sweep-base-azure-0c88452d93b4/*", "spike/azure-spike-20261031T234510Z"]
+
+[campaigns.cloud-sweep]
+title = "The sweeps in the cloud on the vectorized reader (6f24575, 2026-11-01): ten configurations on S3 Express (a c7a.4xlarge each, at once) and on Azure Blob (one D8as_v6, in turn), each after its VM's spike, and each configuration's twin on its S3 Express VM"
+select = ["where:regexp_matches(label, '^sweep-.*-(s3x|azure)$') AND label NOT LIKE 'sweep-base-%' AND git_sha LIKE '6f24575%'", "where:label LIKE 'sweep-%' AND host LIKE 'ip-%' AND NOT regexp_matches(label, '-(s3x|azure)$')", "spike/s3x-spike-sweep-*", "where:run_id LIKE 'spike/azure-spike-20261101T%'"]

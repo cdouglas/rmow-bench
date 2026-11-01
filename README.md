@@ -580,5 +580,11 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
   quarter of its instructions, and RMoW-C's batch goes from 3.0 to 4.5 times MoR-v3's at S3
   Express prices (V1–V3 held); S3 Express measured 4.2 times, with the full read still 0.87 of
   MoR-v3's (V4–V7 held, [lab/pages/base-point.md](lab/pages/base-point.md)).
-- **Next:** the sweeps on cloud VMs, one per configuration, on the vectorized reader. Split files
-  can also run on standard S3.
+- **Done in the cloud (2026-11-01):** the base point on Azure, and the sweeps on S3 Express (nine
+  VMs at once, each also running its configuration's twin) and Azure (one VM, in turn), against the
+  hypotheses registered 2026-10-31 and 2026-11-01 in [docs/HYPOTHESES.md](docs/HYPOTHESES.md). No
+  region design's write catches MoR-v3's at any setting, but where an update changes 30% of a
+  region RMoW-C repays its write after about one full read per write
+  ([lab/pages/cloud-sweep.md](lab/pages/cloud-sweep.md), [lab/pages/base-point.md](lab/pages/base-point.md)).
+- **Next:** decide what follows the sweeps (θ against p; GCS needs APPEND in the fork first).
+  Split files can also run on standard S3.
