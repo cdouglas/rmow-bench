@@ -119,6 +119,7 @@ a new hash under the same label.
 | **sweeps** (`configs/sweep-*`, on havoc) | U1–U3, K1, G1: where the region arms' extra write cost is repaid against MoR-v3 while a batch changes a minority of the regions; M1–M4 of 2026-10-29: what the arms hold in memory, and a sorted read. | from a base point of 16 MiB row groups (`sweep-base`), one axis at a time: update share p = 0.03, 0.1, 0.3; region skew 0, 1, 2; row groups 16, 32, 64 MiB; insert lateness with a p99 of 1, 5 and 20 batches; the ingest window, by statement and a row a change. No compaction, payload checks off, requests and held memory logged | MoR-v3, TailCoW-C, RMoR-C, RMoR-C with footers, RMoW-C | 11 on havoc (2026-10-30, campaign `sweep`), every job under foreign load, so their CPU decides nothing; to run again on cloud VMs, on the vectorized reader | None yet. Their requests, bytes and held peaks stand; their times wait for the cloud. |
 | **base point in the cloud** (`configs/sweep-base.json`) | C5–C8: does the model priced by request size hold at the sweeps' scale on the real stores, and where does the trade-off fall there? | S3 Express in usw2-az3 from a `c7a.4xlarge`, on f51796a, requests and held memory logged, the VM's spike just before; its twins on the laptop (with counters) and havoc | the sweeps' five | 1 and a spike, 2026-10-30; Azure not run yet | The model and the controls: [lab/pages/base-point-model.md](../lab/pages/base-point-model.md), with the vectorized reader's rerun (campaign `base-point`). 2 h 47 min. |
 | **vectorized reader** (`configs/sweep-base.json`) | V1–V7: does the trade-off depend on the Parquet code the arms read and write with? Since 2026-10-31 every arm reads through Iceberg's vectorized reader, and the writer takes strings as UTF-8 bytes. | the reader: the laptop's base point on the new reader against its run on the old one; then S3 Express on the new reader (6f24575) | the sweeps' five | 1 on the laptop, 2026-10-31 (40 min, against 2 h 6 min on the old reader), and 1 on S3 Express with its spike the same day (1 h 36 min, against 2 h 47 min) | The results: [lab/pages/base-point.md](../lab/pages/base-point.md); the decision: [lab/pages/vectorized-reader.md](../lab/pages/vectorized-reader.md); the model: [lab/pages/base-point-model.md](../lab/pages/base-point-model.md). V1–V7 held. |
+| **base point on Azure** (`configs/sweep-base.json`) | A1–A4: does Azure Blob measure what S3 Express did on the vectorized reader, with the trade-off where Azure's prices put it? | Azure Blob (ADLS Gen2, Standard, westus) from a `D8as_v6`, on 6f24575, requests and held memory logged, the contract suites and the VM's spike just before; twins: the laptop's (counts) and the S3 Express run (CPU) | the sweeps' five | 1 and a spike, 2026-11-01 (2 h 18 min); the hypervisor gives no instruction counts | A1, A3, A4 held; A2 contradicted by RMoR-C's full reads alone (its write files past 256 MiB are block blobs that read 1.6 times slower). RMoW-C's write 3.14 times MoR-v3's (4.18 on S3 Express), its full read 0.89; it repays a write past about six full reads per write on both stores. [lab/pages/base-point.md](../lab/pages/base-point.md), [lab/pages/base-point-model.md](../lab/pages/base-point-model.md). |
 
 The compaction sweep's threshold levels:
 
@@ -164,6 +165,7 @@ The compaction sweep's threshold levels:
 | sweeps | sweep-{base,p10,p30,s0,s2,rg32m,rg64m,late99-1,late99-20} and sweep-ingest{,-rows} (havoc, a5e2ee2) | regions (ingest: recency) | 16–64 MiB | never | — | 5 |
 | base point | sweep-base on the laptop (f51796a) and S3 Express (f51796a) | regions | 16 MiB | never | — | 5 |
 | vectorized reader | sweep-base on the laptop (ca1985a with the change, committed as 6f24575) and S3 Express (6f24575) | regions | 16 MiB | never | — | 5 |
+| base point, Azure | sweep-base on Azure (6f24575) | regions | 16 MiB | never | — | 5 |
 
 "Thresholds" are only used when compaction runs, so "—" marks runs that never compact (their
 configurations carry the default values). The lab's Experiments page builds the same table from
@@ -581,7 +583,9 @@ Against the runs they replaced (controls K1–K3):
 H1–H6 are HYPOTHESES.md as of commit 1145f89; the refocused file (2026-10-27) carries
 what they settled, the calibration's C1–C4, decided by the cloud runs of 2026-10-28, the
 sweeps' (2026-10-29), the base point's in the cloud, C5–C8 (2026-10-30), and the vectorized
-reader's, V1–V7 (2026-10-31). The sweeps' M1–M4, on memory, are not the cpu measure's M1–M4.
+reader's, V1–V7 (2026-10-31), the vectorized base point on Azure's, A1–A4, and the sweeps in the
+cloud, S1 and U1, U2 (revised) and G1 restated for measured time (both 2026-11-01). The sweeps' M1–M4,
+on memory, are not the cpu measure's M1–M4.
 
 | | Claim, in short | Status |
 |---|---|---|
@@ -600,10 +604,10 @@ reader's, V1–V7 (2026-10-31). The sweeps' M1–M4, on memory, are not the cpu 
 | K1 | Skew moves the region arms' writes, not MoR-v3's, nor the full reads | **Open:** the cloud sweep (bytes from havoc's, not yet judged). |
 | G1 | Bigger row groups cost the region arms' writes | **Open:** the cloud sweep (bytes from havoc's, not yet judged). |
 | M1–M4 (memory) | A sorted read holds MoR-v3's batch files at once; RMoW-C's holds less, but grows too; RMoW-C's batch holds more bytes than MoR-v3's; RMoR-C sorts its whole batch file | **Open:** havoc's sweeps decide it (held peaks are exact on one thread); not yet judged. |
-| C5 | The base point's cloud runs send what the twins count (a control) | **Held** on S3 Express (2026-10-30): all 1,325 records' requests and bytes, and all 1,230 one-thread held peaks, equal the laptop twin's. Azure not run yet. |
-| C6 | Priced by request size, each arm's mean batch and full read is within 25% of its wall time | **Held** on S3 Express: every judged mean within 1–11%. Azure not run yet. |
-| C7 | At the base point the trade-off falls where the laptop twin puts it: the region arms' batches slower than MoR-v3's on both stores | **Held** on S3 Express: over MoR-v3's, RMoR-C's batch 6.33 (predicted 6.59), with footers 6.33 (6.23), RMoW-C's 3.05 (2.98); full reads 3.78 (3.85), 0.85 (0.87) and 0.85 (0.85). Azure not run yet. |
-| C8 | At the base point a phase is mostly CPU: the store takes under half of every mean batch and full read | **Held** on S3 Express: the store took 13–28% of the batches and 32–36% of the full reads. Azure not run yet. |
+| C5 | The base point's cloud runs send what the twins count (a control) | **Held** on S3 Express (2026-10-30): all 1,325 records' requests and bytes, and all 1,230 one-thread held peaks, equal the laptop twin's. On Azure, A1–A4 (the vectorized reader) took its place. |
+| C6 | Priced by request size, each arm's mean batch and full read is within 25% of its wall time | **Held** on S3 Express: every judged mean within 1–11%. On Azure, A1–A4 (the vectorized reader) took its place. |
+| C7 | At the base point the trade-off falls where the laptop twin puts it: the region arms' batches slower than MoR-v3's on both stores | **Held** on S3 Express: over MoR-v3's, RMoR-C's batch 6.33 (predicted 6.59), with footers 6.33 (6.23), RMoW-C's 3.05 (2.98); full reads 3.78 (3.85), 0.85 (0.87) and 0.85 (0.85). On Azure, A1–A4 (the vectorized reader) took its place. |
+| C8 | At the base point a phase is mostly CPU: the store takes under half of every mean batch and full read | **Held** on S3 Express: the store took 13–28% of the batches and 32–36% of the full reads. On Azure, A1–A4 (the vectorized reader) took its place. |
 | V1 | The vectorized reader changes no request, byte or held peak (a control) | **Held** (the laptop, 2026-10-31): all 1,325 records and all 1,230 one-thread held peaks equal the old reader's run. |
 | V2 | On the vectorized reader a full read takes at most a third of its old instructions | **Held:** 0.26–0.28 under `cached`. |
 | V3 | At S3 Express prices RMoW-C's batch over MoR-v3's grows past the 3.05 measured on the old reader, its full read stays between 0.80 and 0.95 of MoR-v3's | **Held:** 4.48 and 0.87, simulated from the laptop. MoR-v3's batch was mostly decoding, which the new reader cut most; 61% of RMoW-C's batch CPU is now parquet-java's encoding. |
@@ -611,6 +615,10 @@ reader's, V1–V7 (2026-10-31). The sweeps' M1–M4, on memory, are not the cpu 
 | V5 | On the vectorized reader the model priced by request size puts each judged mean within 25% of its wall time | **Held:** within 2–14%, the most for RMoR-C's batch (1.14), whose multipart PUT overlaps its writing. |
 | V6 | On S3 Express the trade-off falls where the twin puts it; RMoW-C's batch over MoR-v3's above 3.05, its full read between 0.80 and 0.95 | **Held:** RMoW-C's batch 4.18 times MoR-v3's (predicted 4.48), its full read 0.87 (0.87); RMoR-C's 8.01 (9.43) and 3.82 (3.83), with footers 8.19 (8.75) and 0.87 (0.87). |
 | V7 | On the vectorized reader full reads are mostly the store's time, batches mostly CPU | **Held:** the store took 58–70% of the full reads and 18–36% of the batches. |
+| A1 | On Azure the vectorized base point sends what the laptop twin counts (a control) | **Held** (2026-11-01): all 1,325 records and all 1,230 one-thread held peaks. |
+| A2 | On Azure the model priced by request size puts each judged mean within 25% of its wall time | **Contradicted** by RMoR-C's full reads alone (0.69 of measured under both readers): its write files past 256 MiB are block blobs of 4 MiB blocks, from which a 16 MiB range takes 228 ms at the median against about 140 ms from any other file; the spike reads only blobs written in one request. Every other mean within 2–12%. |
+| A3 | On Azure the trade-off falls where the twin puts it, RMoW-C's write gap below S3 Express's 4.18 | **Held:** RMoW-C's write 3.14 times MoR-v3's (predicted 2.62), its full read 0.89 (0.90); RMoR-C's 6.24 (5.65) and 5.20 (3.72), with footers 6.54 (5.39) and 0.89 (0.88). |
+| A4 | On Azure the store takes most of every full read and of MoR-v3's write, less than half of the region designs' writes | **Held:** 75–81% of the full reads, 60–63% of MoR-v3's and TailCoW-C's writes, 35–47% of the region designs'. |
 | H6 | When to compact | **Mixed** (unchanged on the reruns). The read half held for RMoW-B, not RMoW-C; the space and write-for-read halves held; the costs half held for split RMoW, not for MoR-v3 (its cheapest on S3 Express is every 10 batches, 4%). |
 
 ## What is next

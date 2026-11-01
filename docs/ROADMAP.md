@@ -198,7 +198,12 @@ reads.
   RMoW-C batch, 59 ms on a 13.7 s batch on Azure); no number on any page moved.
 - [ ] **Iceberg's own writes above 256 MiB on Azure:** an output stream is one Put Blob up to
   256 MiB (README, The Azure store). A larger one is presumably several requests, the SDK's
-  chunked upload, not yet counted; the model counts one PUT. No run so far writes one after its
+  chunked upload, not yet counted; the model counts one PUT. **Counted on the Azure base point**
+  (2026-11-01): RMoR-C's write files (418 MiB on average) went up as 85 Put Blocks a write on
+  average, 4 MiB each, and 0.6 Put Block Lists; the write's time was priced right (0.98), but a
+  16 MiB range from such a block blob takes 228 ms at the median against 140 ms from a blob written
+  in one request, Append Blobs included, so RMoR-C's full reads took 1.44 times their price. The
+  spikes should read a block blob too, and `adls.write.block-size-bytes` could be tried. No run so far writes one after its
   initial load, but compaction at 128 MiB row groups (512 MiB files) would. Count what the SDK
   sends for such a file on Azurite, then model it as the splits are.
 - [x] **The cloud runs deploy from here** (done 2026-10-28; [deploy/](../deploy/README.md), after
@@ -386,7 +391,10 @@ lower.
   - [x] the sweeps' memory and sorted read, M1–M4 (registered 2026-10-29, after a pilot);
   - [x] the base point in the cloud, C5–C8 (registered 2026-10-30);
   - [x] the vectorized reader, V1–V3 on the laptop and V4–V7 in the cloud (registered 2026-10-31);
-  - [ ] the sweeps in the cloud: U1, U2 and G1's times restated for measured wall time.
+  - [x] the vectorized base point on Azure, A1–A4 (registered 2026-10-31, 2e24c9b);
+  - [x] the sweeps in the cloud: S1, and U1, U2 (revised) and G1's times restated for measured
+    wall time (registered 2026-11-01, a10b3e7), predicted from each configuration's twin on its
+    S3 Express VM.
 - [ ] **A JFR run to check the held levels** against the heap: a sorted read of MoR-v3 at the base
   point, whose counted level climbs by a row group per batch file, should move the heap after
   collection by about as much. A check of the measure, not a result.
@@ -421,7 +429,12 @@ lower.
   within 2–14% of the model; RMoW-C's batch took 4.18 times MoR-v3's (predicted 4.48) and its
   full read 0.87 (0.87); the store took 58–70% of the full reads and 18–36% of the batches
   ([lab/pages/base-point-model.md](../lab/pages/base-point-model.md); the results in
-  [lab/pages/base-point.md](../lab/pages/base-point.md)).
+  [lab/pages/base-point.md](../lab/pages/base-point.md)). **On Azure** (6f24575, 2026-11-01,
+  2 h 18 min, from a `D8as_v6` in westus, run by a session at the user's request): A1, A3 and A4
+  held, A2 is contradicted by RMoR-C's full reads alone. RMoW-C's write took 3.14 times MoR-v3's and
+  its full read 0.89; on both stores it repays a write past about six full reads per write. RMoR-C's
+  write files past 256 MiB are block blobs (below, Iceberg's own writes above 256 MiB on Azure), from
+  which a 16 MiB range reads at 1.6 times the spike's price.
 
   **A fleet** (2026-10-30): `FLEET=true` brings up one VM per configuration, each running its own
   spike and run, all at once, and `VM=<name>` narrows any command to some of them (a VM fetched and
