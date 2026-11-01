@@ -82,10 +82,10 @@ store = {k: (lo, hi) for k, lo, hi in zip(SH.min().index, SH.min(), SH.max())}
 ```
 
 Whether the latency model, which prices each phase from its CPU and its requests, predicts what
-S3 Express measured at the base point (`configs/sweep-base.json`), and whether each cloud run did
-exactly the work its laptop twin counts (docs/HYPOTHESES.md: C5–C8 for the row reader, V4–V7 for
-the vectorized reader). The results these runs give are in
-[The base point on S3 Express](./base-point.md).
+S3 Express and Azure Blob measured at the base point (`configs/sweep-base.json`), and whether each
+cloud run did exactly the work its laptop twin counts (docs/HYPOTHESES.md: C5–C8 for the row reader,
+V4–V7 for the vectorized reader on S3 Express, A1–A4 on Azure, [below](#on-azure)). The results
+these runs give are in [The base point on S3 Express and Azure](./base-point.md).
 
 ## Setup
 
@@ -253,6 +253,148 @@ v7 = held(store[(NEW, "a write")][1] < 0.5 and store[(NEW, "a full read")][0] > 
   CPU:** {eval}`v7`; {eval}`f"{100 * store[(NEW, 'a full read')][0]:.0f}"`–{eval}`f"{100 * store[(NEW, 'a full read')][1]:.0f}"`%
   and {eval}`f"{100 * store[(NEW, 'a write')][0]:.0f}"`–{eval}`f"{100 * store[(NEW, 'a write')][1]:.0f}"`%.
 
+## On Azure
+
+```{code-cell} ipython3
+:tags: [remove-cell]
+
+AZ_RUN, AZ_SPIKE = fig.BP_AZURE, fig.BP_AZURE_SPIKE
+AZ = {"Azure Blob": AZ_RUN}
+# A1: the run against the vectorized reader's laptop twin
+az_d = q("""SELECT count(*) AS records, count(*) FILTER (WHERE len(differs) > 0) AS differing
+            FROM steps_diff($a, $b)""", a=LAPTOP[NEW], b=AZ_RUN).iloc[0]
+az_h = q("""SELECT count(*) AS held_records,
+                count(*) FILTER (WHERE (x.held_bytes, x.held_rows, x.held_chunks, x.held_writer,
+                                        x.held_pending, x.held_deletes)
+                                 IS DISTINCT FROM (y.held_bytes, y.held_rows, y.held_chunks,
+                                        y.held_writer, y.held_pending, y.held_deletes)) AS held_differing
+         FROM steps x JOIN steps y ON x.arm = y.arm AND x.step = y.step AND x.phase = y.phase
+                                  AND x.reader IS NOT DISTINCT FROM y.reader
+         WHERE x.run_id = $a AND y.run_id = $b AND coalesce(x.reader, '') <> 'cached-p8'""",
+         a=LAPTOP[NEW], b=AZ_RUN).iloc[0]
+# A2: the model, priced with the VM's own spike
+az_model = fig.bp_model(AZ, {"Azure Blob": AZ_SPIKE}, key="store")
+az_within = (az_model.sim_over_measured - 1).abs() <= 0.25
+# A3: the registered ratios (the S3 Express run's CPU, requests priced with the 2026-10-28 spike)
+AZ_PRED = {"tailcow-c": (1.00, 1.01), "rmor-c": (5.65, 3.72), "rmor-c-footer": (5.39, 0.88),
+           "rmow-c": (2.62, 0.90)}
+AZ_PRED_SKIP = 1.02
+az_ratios = fig.bp_over_mor(fig.bp_times(AZ, key="store"), key="store")
+az_ratios["predicted"] = [AZ_PRED_SKIP if w.endswith("dead row groups")
+                          else AZ_PRED[a][0 if w == "a write" else 1]
+                          for a, w in zip(az_ratios.arm, az_ratios.what)]
+az_ratios["judged"] = (az_ratios.predicted - 1).abs() >= 0.10
+az_ratios["held"] = ~az_ratios.judged | ((az_ratios.over_mor_v3 > 1) == (az_ratios.predicted > 1))
+AZR = az_ratios.set_index(["arm", "what"]).over_mor_v3
+# A4: the store's share, measured
+az_parts = fig.bp_parts(AZ, key="store").pivot_table(
+    index=["arm", "arm_label", "ord", "what"], columns="part", values="s").reset_index()
+az_parts["measured"] = az_parts["the store"] / az_parts[fig.BP_PARTS].sum(axis=1)
+az_parts = az_parts.merge(
+    az_model.assign(simulated=az_model.request_s / az_model.simulated_s)[["arm", "what", "simulated"]],
+    on=["arm", "what"])
+mor_writes = az_parts.arm.isin(["mor-v3", "tailcow-c"]) & (az_parts.what == "a write")
+region_writes = ~az_parts.arm.isin(["mor-v3", "tailcow-c"]) & (az_parts.what == "a write")
+reads = az_parts.what != "a write"
+a4_ok = ((az_parts[reads | mor_writes].measured > 0.5).all()
+         and (az_parts[region_writes].measured < 0.5).all())
+# RMoR-C's reads: 16 MiB ranges by the file they come from. Files past 256 MiB that Iceberg's Azure
+# writer uploaded (RMoR-C's write files, not appendable) are block blobs of 4 MiB blocks; the
+# appendable designs' large files are Append Blobs
+gets = q("""
+    WITH sizes AS (SELECT arm, object, max("offset" + length) AS bytes FROM requests
+                   WHERE run_id = $run GROUP BY ALL)
+    SELECT r.arm, CASE WHEN regexp_matches(r.object, '(^|/)initial-[0-9]+[.]parquet$') THEN 'initial load'
+                       ELSE 'a write''s file' END AS file,
+           CASE WHEN z.bytes >= 268435456 THEN 'from 256 MiB' ELSE 'under 256 MiB' END AS file_size,
+           count(*) AS gets, median(r.dur_ns) / 1e6 AS median_ms, avg(r.dur_ns) / 1e6 AS mean_ms
+    FROM requests r JOIN sizes z USING (arm, object)
+    WHERE r.run_id = $run AND r.phase = 'read_full' AND r.reader = 'cached' AND r.step > 0
+      AND r.kind = 'get_range' AND r.length >= 8388608
+    GROUP BY ALL""", run=AZ_RUN).merge(q("SELECT arm, arm_label, ord FROM arm_meta"), on="arm")
+G = gets.set_index(["arm", "file", "file_size"]).median_ms
+block_ms = G[("rmor-c", "a write's file", "from 256 MiB")]
+other_ms = G[("rmor-c", "initial load", "under 256 MiB")]
+blocks = q("""SELECT avg(sdk_blocks) AS blocks, avg(sdk_block_lists) AS lists FROM steps
+              WHERE run_id = $run AND arm = 'rmor-c' AND phase = 'batch'""", run=AZ_RUN).iloc[0]
+```
+
+The vectorized reader's build on Azure Blob (ADLS Gen2, Standard, westus), from a `D8as_v6`
+(`BP_AZURE`, {eval}`AZ_RUN`), priced with its VM's spike ({eval}`AZ_SPIKE`). The predictions
+(A1–A4) were registered before the run, from the S3 Express run's thread CPU and its requests
+priced with an earlier Azure spike. The Azure VM's hypervisor exposes no instruction counters, so
+the run has thread CPU only, which the model takes anyway.
+
+### The same work
+
+Every record's requests, bytes and table state equal the laptop twin's: {eval}`f"{az_d.differing}"`
+of {eval}`f"{az_d.records:,}"` differ, and {eval}`f"{az_h.held_differing}"` of
+{eval}`f"{az_h.held_records:,}"` one-thread held peaks.
+
+### The model
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(fig.bp_sorted(az_model, "ord")[
+    ["what", "arm_label", "n", "measured_s", "cpu_s", "request_s", "simulated_s",
+     "sim_over_measured"]].round(2))
+```
+
+Every mean but RMoR-C's full reads is within
+{eval}`f"{100 * (az_model[az_within].sim_over_measured - 1).abs().max():.0f}"`% of its wall time.
+RMoR-C's full reads take longer than priced (simulated over measured
+{eval}`f"{az_model.set_index(['arm', 'what']).sim_over_measured[('rmor-c', 'a full read')]:.2f}"`,
+and {eval}`f"{az_model.set_index(['arm', 'what']).sim_over_measured[('rmor-c', 'a full read, skipping dead row groups')]:.2f}"`
+skipping dead row groups), for a reason of the store's. A write's file past 256 MiB, which Iceberg's
+Azure writer uploads in 4 MiB blocks (RMoR-C's write sends
+{eval}`f"{blocks.blocks:.0f}"` blocks and {eval}`f"{blocks.lists:.1f}"` block lists on average),
+serves a 16 MiB range in {eval}`f"{block_ms:.0f}"` ms
+at the median, where every other file takes about
+{eval}`f"{other_ms:.0f}"` ms, the appendable designs' files past
+256 MiB (Append Blobs) included. The spike reads only blobs written in one request.
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(gets.sort_values(["ord", "file", "file_size"])[
+    ["arm_label", "file", "file_size", "gets", "median_ms", "mean_ms"]]
+      .rename(columns={"arm_label": "design", "file_size": "the file"}).round(0))
+```
+
+### The trade-off, predicted and measured
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(fig.bp_sorted(az_ratios, "ord")[
+    ["what", "arm_label", "s", "mor_v3_s", "over_mor_v3", "predicted", "judged", "held"]].round(2))
+```
+
+### The store's share
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(fig.bp_sorted(az_parts, "ord")[["what", "arm_label", "measured", "simulated"]].round(2))
+```
+
+### Verdicts
+
+- **A1, the Azure run sends what the twin counts:**
+  {eval}`held(az_d.differing == 0 and az_h.held_differing == 0)`.
+- **A2, the model within 25%:** {eval}`held(az_within.all())`, by RMoR-C's full reads alone (above):
+  every other mean is within 25%.
+- **A3, the trade-off where the twin puts it, the write gap narrower than on S3 Express:**
+  {eval}`held(az_ratios.held.all() and AZR[('rmow-c', 'a write')] < 4.18)`. RMoW-C's write took
+  {eval}`f"{AZR[('rmow-c', 'a write')]:.2f}"` times MoR-v3's (predicted 2.62; S3 Express 4.18),
+  its full read {eval}`f"{AZR[('rmow-c', 'a full read')]:.2f}"` (0.90).
+- **A4, the store takes most of every read and of MoR-v3's write:** {eval}`held(a4_ok)`; the store
+  took {eval}`f"{100 * az_parts[reads].measured.min():.0f}"`–{eval}`f"{100 * az_parts[reads].measured.max():.0f}"`%
+  of the full reads, {eval}`f"{100 * az_parts[mor_writes].measured.min():.0f}"`–{eval}`f"{100 * az_parts[mor_writes].measured.max():.0f}"`%
+  of MoR-v3's and TailCoW-C's writes, and {eval}`f"{100 * az_parts[region_writes].measured.min():.0f}"`–{eval}`f"{100 * az_parts[region_writes].measured.max():.0f}"`%
+  of the region designs'.
+
 ## Limits
 
 - One run per build. On the calibration's runs the S3 Express ratios moved by up to 0.12 from run
@@ -261,4 +403,6 @@ v7 = held(store[(NEW, "a write")][1] < 0.5 and store[(NEW, "a full read")][0] > 
   out while the file is still being written; and a phase's thread CPU includes the client's TLS
   and checksums, which the spike's latencies include too.
 - TailCoW-C's ratios and RMoR-C's while skipping lie within 10% of 1 and are not judged.
-- Azure has not run the base point.
+- One run on Azure, whose prices the spike measured only for blobs written in one request; files
+  that Iceberg's Azure writer uploads in blocks (past 256 MiB) read slower, and the model does not
+  know them.

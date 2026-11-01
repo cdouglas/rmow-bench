@@ -813,6 +813,14 @@ BP_CLOUD = {BP_OLD: "sweep-base-s3x-89a55338cd9a/20261030T205713Z",
 BP_SPIKE = {BP_OLD: "spike/s3x-spike-20261030T205211Z",
             BP_NEW: "spike/s3x-spike-20261031T163533Z"}
 BP_HAVOC = "sweep-base-f970149711a9/20261030T055938Z"
+# The vectorized reader's build on each store: the S3 Express run, and the Azure run from a
+# D8as_v6 in westus (2026-11-01; its hypervisor exposes no instruction counters), each with its VM's
+# spike
+BP_AZURE = "sweep-base-azure-0c88452d93b4/20261031T234956Z"
+BP_AZURE_SPIKE = "spike/azure-spike-20261031T234510Z"
+BP_STORES = ["S3 Express", "Azure Blob"]
+BP_STORE_RUNS = {"S3 Express": BP_CLOUD[BP_NEW], "Azure Blob": BP_AZURE}
+BP_STORE_SPIKES = {"S3 Express": BP_SPIKE[BP_NEW], "Azure Blob": BP_AZURE_SPIKE}
 # The phases compared: the 30 batches, and the full reads after the initial load under cached (one
 # thread, each file's footer and deletes loaded once), RMoR-C's also under cached-skip
 BP_JUDGED = """(phase = 'batch' OR (phase = 'read_full' AND step > 0
@@ -829,13 +837,15 @@ _BP_PART = """CASE component WHEN 'decode CPU' THEN 'decoding' WHEN 'encode CPU'
                              WHEN 'waiting on the store' THEN 'the store' ELSE 'other' END"""
 
 
-def _bp(sql, runs, **params):
-    """sql once per build, with $run bound to runs[build] (and $spike to its VM's spike where the
-    sql takes one), tagged with the build and the arms' labels."""
+def _bp(sql, runs, spikes=None, key="build", **params):
+    """sql once per case of runs (a build, or a store: BP_STORE_RUNS), with $run bound to its run
+    (and $spike to its VM's spike, from spikes, where the sql takes one), tagged with the case in
+    column `key` and with the arms' labels."""
+    spikes = BP_SPIKE if spikes is None else spikes
     frames = []
-    for b in BP_BUILDS:
-        p = {"run": runs[b], "spike": BP_SPIKE[b], **params}
-        frames.append(q(sql, **{k: v for k, v in p.items() if f"${k}" in sql}).assign(build=b))
+    for b, run in runs.items():
+        p = {"run": run, "spike": spikes.get(b), **params}
+        frames.append(q(sql, **{k: v for k, v in p.items() if f"${k}" in sql}).assign(**{key: b}))
     labels = q("SELECT arm, arm_label, ord FROM arm_meta")
     return pd.concat(frames, ignore_index=True).merge(labels, on="arm")
 
@@ -846,54 +856,55 @@ def bp_sorted(df, *by):
     return df.assign(_w=df.what.map(BP_WHATS.index)).sort_values(["_w", *by]).drop(columns="_w")
 
 
-def bp_times(runs=BP_CLOUD):
-    """Per build, arm and compared phase: the mean wall time (s) and what it sent and moved."""
+def bp_times(runs=BP_CLOUD, key="build"):
+    """Per case (build or store), arm and compared phase: the mean wall time (s) and what it sent
+    and moved."""
     return _bp(f"""
         SELECT arm, {BP_WHAT} AS what, count(*) AS n, avg(wall_ns) / 1e9 AS s,
                avg(requests) AS requests, avg(gets) AS gets, avg(puts + appends) AS writes,
                avg(bytes_read) / 1e6 AS mb_read, avg(bytes_written) / 1e6 AS mb_written,
                avg(instructions) / 1e9 AS g_instructions
-        FROM steps WHERE run_id = $run AND {BP_JUDGED} GROUP BY ALL""", runs)
+        FROM steps WHERE run_id = $run AND {BP_JUDGED} GROUP BY ALL""", runs, key=key)
 
 
-def bp_parts(runs=BP_CLOUD):
-    """Per build, arm, compared phase and part (BP_PARTS): the mean seconds its own thread spent."""
+def bp_parts(runs=BP_CLOUD, key="build"):
+    """Per case, arm, compared phase and part (BP_PARTS): the mean seconds its own thread spent."""
     return _bp(f"""
         WITH s AS (SELECT arm, step, phase, reader, {_BP_PART} AS part, sum(ms) AS ms
                    FROM phase_breakdown WHERE run_id = $run AND thread = 'phase' AND {BP_JUDGED}
                    GROUP BY ALL)
-        SELECT arm, {BP_WHAT} AS what, part, avg(ms) / 1e3 AS s FROM s GROUP BY ALL""", runs)
+        SELECT arm, {BP_WHAT} AS what, part, avg(ms) / 1e3 AS s FROM s GROUP BY ALL""", runs, key=key)
 
 
-def bp_model(runs=BP_CLOUD):
-    """Per build, arm and compared phase: measured wall time against the model (the thread's CPU
+def bp_model(runs=BP_CLOUD, spikes=None, key="build"):
+    """Per case, arm and compared phase: measured wall time against the model (the thread's CPU
     plus its requests priced at their sizes with the VM's spike, lab/views/65_sized.sql), in s."""
     d = _bp(f"""
         SELECT arm, {BP_WHAT} AS what, count(*) AS n, avg(measured_ms) / 1e3 AS measured_s,
                avg(cpu_ms) / 1e3 AS cpu_s, avg(request_ms) / 1e3 AS request_s
-        FROM sized_latency($run, $spike) WHERE {BP_JUDGED} GROUP BY ALL""", runs)
+        FROM sized_latency($run, $spike) WHERE {BP_JUDGED} GROUP BY ALL""", runs, spikes, key)
     d["simulated_s"] = d.cpu_s + d.request_s
     d["sim_over_measured"] = d.simulated_s / d.measured_s
     return d
 
 
-def bp_over_mor(times):
-    """bp_times' mean wall time of each arm but MoR-v3 over MoR-v3's in the same build and kind of
+def bp_over_mor(times, key="build"):
+    """bp_times' mean wall time of each arm but MoR-v3 over MoR-v3's in the same case and kind of
     phase (a skipping read over MoR-v3's full read)."""
-    mor = times[times.arm == "mor-v3"].set_index(["build", "what"]).s
+    mor = times[times.arm == "mor-v3"].set_index([key, "what"]).s
     d = times[times.arm != "mor-v3"].copy()
     d["mor_v3_s"] = [mor[(b, "a write" if w == "a write" else "a full read")]
-                     for b, w in zip(d.build, d.what)]
+                     for b, w in zip(d[key], d.what)]
     d["over_mor_v3"] = d.s / d.mor_v3_s
     return d
 
 
-def bp_storage(runs=BP_CLOUD):
-    """Per build and arm: the bytes stored and live after the last batch (GB)."""
+def bp_storage(runs=BP_CLOUD, key="build"):
+    """Per case and arm: the bytes stored and live after the last batch (GB)."""
     return _bp("""
         SELECT arm, arg_max(stored_bytes, step) / 1e9 AS stored_gb,
                arg_max(live_bytes, step) / 1e9 AS live_gb
-        FROM steps WHERE run_id = $run AND phase = 'state' GROUP BY ALL""", runs)
+        FROM steps WHERE run_id = $run AND phase = 'state' GROUP BY ALL""", runs, key=key)
 
 
 def bp_parts_chart(parts, rows="build"):
@@ -913,11 +924,92 @@ def bp_parts_chart(parts, rows="build"):
             y=alt.Y("arm_label:N", title=None, sort=[a for a in arms if a in set(d.arm_label)]),
             color=alt.Color("part:N", title=None, sort=BP_PARTS),
             order=alt.Order("part:N", sort="ascending"),
-            tooltip=["build", "arm_label", "what", "part", alt.Tooltip("s:Q", format=".2f")],
+            tooltip=[*([rows] if rows else []), "arm_label", "what", "part",
+                     alt.Tooltip("s:Q", format=".2f")],
         ).properties(width=230)
         if rows:
-            chart = chart.facet(row=alt.Row(f"{rows}:N", title=None))
+            order = {"build": BP_BUILDS, "store": BP_STORES}.get(rows, "ascending")
+            chart = chart.facet(row=alt.Row(f"{rows}:N", title=None, sort=order))
         return chart.properties(title=what)
 
     return alt.hconcat(*[panel(w) for w in BP_WHATS[:2]]).resolve_scale(x="independent",
                                                                         y="independent")
+
+
+# The sweeps in the cloud (docs/HYPOTHESES.md, The sweeps in the cloud; pages cloud-sweep, results,
+# and cloud-sweep-model, calibration): each sweep configuration on S3 Express (a VM each, nine at
+# once; sweep-rg64m on sweep-p30's VM after it) and on Azure Blob (one VM, in turn), each after its
+# VM's spike; each configuration's twin on its S3 Express VM (a local store, the same build and
+# cores, with instruction counts). The base point's are the base point's runs (BP_*).
+CS_STORES = ["S3 Express", "Azure Blob"]
+CS_SUFFIX = {"S3 Express": "s3x", "Azure Blob": "azure"}
+# Each configuration's setting on its axis; the base point lies on the first four axes
+CS_AXES = {"update share": "p", "region skew": "s", "row group (MiB)": "MiB",
+           "lateness, p99 (batches)": "batches"}
+CS_POINTS = [  # (configuration, axis, value)
+    ("sweep-base", "update share", 0.03), ("sweep-p10", "update share", 0.1),
+    ("sweep-p30", "update share", 0.3),
+    ("sweep-s0", "region skew", 0.0), ("sweep-base", "region skew", 1.0),
+    ("sweep-s2", "region skew", 2.0),
+    ("sweep-base", "row group (MiB)", 16), ("sweep-rg32m", "row group (MiB)", 32),
+    ("sweep-rg64m", "row group (MiB)", 64),
+    ("sweep-late99-1", "lateness, p99 (batches)", 1), ("sweep-base", "lateness, p99 (batches)", 5),
+    ("sweep-late99-20", "lateness, p99 (batches)", 20),
+]
+# The other workloads: the ingest window (recency keys), with region statements or a row a change
+CS_WORKLOADS = {"sweep-base": "region statements (the base point)",
+                "sweep-ingest": "the ingest window, statements",
+                "sweep-ingest-rows": "the ingest window, a row a change"}
+CS_CONFIGS = ["sweep-base", "sweep-p10", "sweep-p30", "sweep-s0", "sweep-s2", "sweep-rg32m",
+              "sweep-rg64m", "sweep-late99-1", "sweep-late99-20", "sweep-ingest",
+              "sweep-ingest-rows"]
+
+
+def cs_runs():
+    """The cloud runs, per store and configuration: (run, its VM's spike). The newest run of each
+    configuration's cloud label, and the newest spike on its host that started before it."""
+    d = q("""
+        WITH r AS (SELECT run_id, label, host, started_at FROM runs
+                   WHERE regexp_matches(label, '^sweep-.*-(s3x|azure)$') AND status = 'finished'
+                   QUALIFY row_number() OVER (PARTITION BY label ORDER BY started_at DESC) = 1)
+        SELECT r.run_id, r.label,
+               (SELECT s.run_id FROM runs s WHERE s.run_id LIKE 'spike/%' AND s.host = r.host
+                  AND s.started_at <= r.started_at ORDER BY s.started_at DESC LIMIT 1) AS spike
+        FROM r""")
+    out = {s: {} for s in CS_STORES}
+    for store in CS_STORES:
+        suffix = "-" + CS_SUFFIX[store]
+        for _, row in d[d.label.str.endswith(suffix)].iterrows():
+            out[store][row.label[: -len(suffix)]] = (row.run_id, row.spike)
+    return out
+
+
+def cs_frame(fn, runs=None, **kw):
+    """fn (bp_times, bp_parts, bp_model, bp_storage) over every cloud run, tagged with the store
+    and the configuration (column `config`)."""
+    runs = cs_runs() if runs is None else runs
+    frames = []
+    for store, by in runs.items():
+        if not by:
+            continue
+        r = {c: v[0] for c, v in by.items()}
+        if fn is bp_model:
+            frames.append(fn(r, {c: v[1] for c, v in by.items()}, key="config", **kw)
+                          .assign(store=store))
+        else:
+            frames.append(fn(r, key="config", **kw).assign(store=store))
+    return pd.concat(frames, ignore_index=True)
+
+
+def cs_over_mor(times):
+    """cs_frame(bp_times)'s mean wall time of each arm over MoR-v3's in the same store,
+    configuration and kind of phase."""
+    return pd.concat([bp_over_mor(t, key="config") for _, t in times.groupby("store")],
+                     ignore_index=True)
+
+
+def cs_axes(df):
+    """df's rows of each configuration on an axis, once per axis it lies on (the base point on four),
+    with the axis and the setting (`value`)."""
+    pts = pd.DataFrame(CS_POINTS, columns=["config", "axis", "value"])
+    return df.merge(pts, on="config")
