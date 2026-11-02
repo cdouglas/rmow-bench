@@ -361,9 +361,10 @@ final class Scans {
     if (deleted == null || deleted.isEmpty()) {
       return Set.of();
     }
+    DeletedRanges ranges = new DeletedRanges(deleted);
     Set<Long> dead = new HashSet<>();
     for (long[] g : rowGroups(tail)) {
-      if (coversAll(deleted, g[0], g[1])) {
+      if (ranges.coversAll(g[0], g[1])) {
         dead.add(g[2]);
       }
     }
@@ -396,15 +397,6 @@ final class Scans {
       }
     }
     return live;
-  }
-
-  private static boolean coversAll(PositionDeleteIndex deleted, long first, long rows) {
-    for (long p = first; p < first + rows; p++) {
-      if (!deleted.isDeleted(p)) {
-        return false;
-      }
-    }
-    return true;
   }
 
   /**

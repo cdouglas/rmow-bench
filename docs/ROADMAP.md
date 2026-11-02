@@ -277,6 +277,17 @@ reads.
   and none for a file whose DV covers every row. It needs `footerCache`. A file of at most 1 MiB,
   fetched whole, is skipped only whole. Iceberg's reader (`ReadConf`) fetches dead row groups
   and drops every row, so RMoR reports under both. Which engines skip them is not checked.
+  - [x] **The check by range** (done 2026-11-02). It looked up each position of a row group in
+    the deletion vector, about 514,000 lookups a 16 MiB row group, which cost RMoR about 1.8 s of
+    CPU per full read and 1.3 s per write (in its locate scan) in the cloud runs at 6f24575, the
+    point of RMoR being a check per row group. `DeletedRanges` now looks up a row group's two ends,
+    then asks the vector's Roaring bitmaps (read back through the index's `serialize()`, Iceberg's
+    index answering only per position) whether the whole range is deleted: 0.2 ms a file of 16
+    row groups, half of them dead, against 54 ms. It decides the same row groups
+    (`DeletedRangesTest`), so no request or byte changes.
+  - [ ] **RMoR re-measured with it:** every cloud run of RMoR (the base point and the sweeps, on
+    both stores) charged it the per-position check; the results pages call RMoR's latencies an
+    upper bound until it runs again.
 
 ## Workload generator
 
