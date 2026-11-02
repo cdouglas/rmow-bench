@@ -173,7 +173,10 @@ reads.
   - The store client's own threads (Azure's event loop) are in `process_cpu_ns`, not `io`.
 - [ ] **Stacked bars of where time goes:** a lab page with phase and sub-phase (locate,
   merge-read, write, delete-write; each read) split into CPU and waiting, with process CPU shown
-  beside, for the five arms. The view is done (`phase_breakdown`); the page is not.
+  beside, for the five arms. The view is done (`phase_breakdown`). Since 2026-11-02 the results
+  pages (base-point and cloud-sweep, sections 2 and 3) split each write and full read into
+  decoding, encoding, the store and the rest, at every setting on both stores, and a write's steps
+  likewise. Still to do: process CPU beside, and the reads other than the full read.
   - On the Azurite twin, process CPU exceeds thread CPU by 89–112 ms a phase: garbage
     collection, the JIT and the SDK's I/O threads. So "waiting" includes off-thread work.
   - Build it on the twins now, so the cloud results drop in.

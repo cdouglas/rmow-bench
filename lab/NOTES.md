@@ -44,5 +44,15 @@ What anyone (or Claude) reading these results must know. Keep it short and curre
   and a slope. `sized_requests(run, spike)` and `sized_latency(run, spike)` (views/65_sized.sql)
   price each logged request at its own size from a spike's medians instead, so they need a run
   that logged its requests; `request_ops` is the request log as ops and sizes.
+- Names: the results pages (base-point, cloud-sweep, reader-changes) name the designs for a reader,
+  not as the code does (`figures.DESIGNS`): MoR is `mor-v3`, RMoR is `rmor-c` read by the
+  `cached-skip` reader, RMoW-external is `rmor-c-footer`, RMoW-append is `rmow-c`. TailCoW
+  (`tailcow-c`) and RMoR without skipping (`rmor-c` under `cached`) are in their appendix only.
+  Other pages keep the arms' labels (`arm_meta`). They split a phase's time into
+  `figures.TIME_PARTS` (`bp_parts(..., fine=True)`): "rows and planning" is `phase_breakdown`'s
+  other CPU, which includes the harness making the rows a writer encodes (`rows_cpu_ns`) and RMoR's
+  check of row groups against its deletion vectors: in every run before 2026-11-02, the cloud
+  runs included, a lookup per row position (`Scans.coversAll`, since replaced by
+  `DeletedRanges`, a range check on the vector's bitmap).
 - Superseded runs (directories renamed `superseded-*`, tagged with the suffix) and the in-memory
   smoke run are excluded from `canonical_runs`.

@@ -832,9 +832,26 @@ BP_WHATS = ["a write", "a full read", "a full read, skipping dead row groups"]  
 # what a phase's own thread did, from phase_breakdown: decoding and encoding Parquet, the store
 # (its client's CPU and waiting on it), and the rest (footers, deletes, other CPU and waiting)
 BP_PARTS = ["decoding", "encoding", "other", "the store"]
+# a write's steps, nested in its batch phase (README, Phases), and the rest of the batch
+BP_STEPS = ["locate", "merge-read", "write", "delete-write", "rest"]
 _BP_PART = """CASE component WHEN 'decode CPU' THEN 'decoding' WHEN 'encode CPU' THEN 'encoding'
                              WHEN 'store client CPU' THEN 'the store'
                              WHEN 'waiting on the store' THEN 'the store' ELSE 'other' END"""
+# The results pages' parts (finer): Parquet's decoding and encoding; deletion vectors and footers
+# (building, loading and merging them); rows and planning (the rest of the thread's CPU: making the
+# rows a write encodes, merging the changes into the regions it rewrites and sorting them, and
+# planning scans, RMoR's check of each row group against its deletion vector among them); the store
+# (its client's CPU and waiting on it); and paused, off the CPU outside requests (garbage
+# collection, the JIT, scheduling)
+TIME_PARTS = ["decoding", "encoding", "deletion vectors and footers", "rows and planning", "the store",
+         "paused (GC, JIT)"]
+_PART = """CASE component WHEN 'decode CPU' THEN 'decoding' WHEN 'encode CPU' THEN 'encoding'
+                          WHEN 'footer CPU' THEN 'deletion vectors and footers'
+                          WHEN 'deletes CPU' THEN 'deletion vectors and footers'
+                          WHEN 'other CPU' THEN 'rows and planning'
+                          WHEN 'store client CPU' THEN 'the store'
+                          WHEN 'waiting on the store' THEN 'the store'
+                          ELSE 'paused (GC, JIT)' END"""
 
 
 def _bp(sql, runs, spikes=None, key="build", **params):
@@ -867,13 +884,58 @@ def bp_times(runs=BP_CLOUD, key="build"):
         FROM steps WHERE run_id = $run AND {BP_JUDGED} GROUP BY ALL""", runs, key=key)
 
 
-def bp_parts(runs=BP_CLOUD, key="build"):
-    """Per case, arm, compared phase and part (BP_PARTS): the mean seconds its own thread spent."""
+def bp_parts(runs=BP_CLOUD, key="build", fine=False):
+    """Per case, arm, compared phase and part (BP_PARTS, or TIME_PARTS with fine): the mean seconds its
+    own thread spent."""
     return _bp(f"""
-        WITH s AS (SELECT arm, step, phase, reader, {_BP_PART} AS part, sum(ms) AS ms
+        WITH s AS (SELECT arm, step, phase, reader, {_PART if fine else _BP_PART} AS part,
+                          sum(ms) AS ms
                    FROM phase_breakdown WHERE run_id = $run AND thread = 'phase' AND {BP_JUDGED}
                    GROUP BY ALL)
         SELECT arm, {BP_WHAT} AS what, part, avg(ms) / 1e3 AS s FROM s GROUP BY ALL""", runs, key=key)
+
+
+def bp_spread(runs=BP_CLOUD, key="build"):
+    """Per case, arm and compared phase: the mean wall time (s), the 10th and 90th percentiles over
+    its phases, and the first and the last of them (for a full read, the read after the fewest and
+    the most writes)."""
+    return _bp(f"""
+        SELECT arm, {BP_WHAT} AS what, count(*) AS n, avg(wall_ns) / 1e9 AS s,
+               quantile_cont(wall_ns, 0.1) / 1e9 AS p10, quantile_cont(wall_ns, 0.9) / 1e9 AS p90,
+               arg_min(wall_ns, step) / 1e9 AS first_s, arg_max(wall_ns, step) / 1e9 AS last_s,
+               min(step) AS first_step, max(step) AS last_step
+        FROM steps WHERE run_id = $run AND {BP_JUDGED} GROUP BY ALL""", runs, key=key)
+
+
+def bp_steps(runs=BP_CLOUD, key="build"):
+    """Per case, arm, write step (locate, merge-read, write, delete-write, and the rest of the
+    batch: committing it) and part (TIME_PARTS): the mean seconds the write's own thread spent."""
+    return _bp(f"""
+        WITH s AS (SELECT arm, step, phase, {_PART} AS part, sum(ms) AS ms
+                   FROM phase_breakdown
+                   WHERE run_id = $run AND thread = 'phase' AND reader IS NULL
+                     AND phase IN ('batch', 'locate', 'merge-read', 'write', 'delete-write')
+                   GROUP BY ALL),
+             rest AS (SELECT arm, step, 'rest' AS phase, part,
+                             sum(CASE WHEN phase = 'batch' THEN ms ELSE -ms END) AS ms
+                      FROM s GROUP BY ALL),
+             -- a mean over every batch: some batches have no merge-read or delete-write
+             n AS (SELECT arm, count(DISTINCT step) AS batches FROM s WHERE phase = 'batch'
+                   GROUP BY ALL)
+        SELECT arm, phase AS write_step, part, sum(ms) / any_value(batches) / 1e3 AS s
+        FROM (SELECT * FROM s WHERE phase <> 'batch' UNION ALL BY NAME SELECT * FROM rest)
+             JOIN n USING (arm)
+        GROUP BY ALL""", runs, key=key)
+
+
+def bp_series(runs=BP_CLOUD, key="build"):
+    """Per case, arm and compared phase, each one's wall time (s) by step: every write (steps 1 to
+    30) and every full read, from the one after the initial load (step 0)."""
+    return _bp(f"""
+        SELECT arm, {BP_WHAT} AS what, step, wall_ns / 1e9 AS s
+        FROM steps WHERE run_id = $run AND (phase = 'batch' OR (phase = 'read_full'
+              AND (reader = 'cached' OR (arm = 'rmor-c' AND reader = 'cached-skip'))))""",
+               runs, key=key)
 
 
 def bp_model(runs=BP_CLOUD, spikes=None, key="build"):
@@ -1014,6 +1076,289 @@ def cs_axes(df):
     with the axis and the setting (`value`)."""
     pts = pd.DataFrame(CS_POINTS, columns=["config", "axis", "value"])
     return df.merge(pts, on="config")
+
+
+# The settings as a grid: a row per axis and one for the workloads, each a panel per configuration
+# (the base point in every row), with the panel's title
+CS_GRID = [
+    ("update share", [("sweep-base", "p = 0.03 (base point)"), ("sweep-p10", "p = 0.1"),
+                      ("sweep-p30", "p = 0.3")]),
+    ("region skew", [("sweep-s0", "skew 0"), ("sweep-base", "skew 1 (base point)"),
+                     ("sweep-s2", "skew 2")]),
+    ("row group", [("sweep-base", "16 MiB (base point)"), ("sweep-rg32m", "32 MiB"),
+                   ("sweep-rg64m", "64 MiB")]),
+    ("lateness of inserts", [("sweep-late99-1", "p99 1 write"),
+                             ("sweep-base", "p99 5 writes (base point)"),
+                             ("sweep-late99-20", "p99 20 writes")]),
+    ("workload", [("sweep-base", "region statements (base point)"),
+                  ("sweep-ingest", "ingest window, statements"),
+                  ("sweep-ingest-rows", "ingest window, a row a change")]),
+]
+# Each configuration's setting, named on its own (CS_CONFIGS' order)
+CS_SETTING = {"sweep-base": "base point", "sweep-p10": "update share 0.1",
+              "sweep-p30": "update share 0.3", "sweep-s0": "region skew 0",
+              "sweep-s2": "region skew 2", "sweep-rg32m": "row groups 32 MiB",
+              "sweep-rg64m": "row groups 64 MiB", "sweep-late99-1": "lateness p99 1 write",
+              "sweep-late99-20": "lateness p99 20 writes",
+              "sweep-ingest": "ingest window, statements",
+              "sweep-ingest-rows": "ingest window, a row a change"}
+CS_SETTINGS = [CS_SETTING[c] for c in CS_CONFIGS]
+# The write's steps as the charts name them (BP_STEPS)
+CS_STEP = {"locate": "locate", "merge-read": "merge-read", "write": "write",
+           "delete-write": "delete-write", "rest": "the rest"}
+
+# The designs the results pages show (base-point, cloud-sweep), in their order: the name, the arm,
+# whether its full read skips the row groups its deletes cover whole (the cached-skip reader), its
+# color and shape, and whether it is one of the main four. The other two are the pages' appendix:
+# TailCoW, a control (MoR with RMoR's tail of inserts), and RMoR read by a reader that fetches the
+# row groups its deletion vectors cover whole. The main four's colors are slots of the lab's
+# palette (the dataviz reference's) that pass its validator on every pair; the two RMoW designs are
+# its two greens.
+DESIGNS = pd.DataFrame([
+    ("MoR", "mor-v3", False, "#2a78d6", "circle", True),
+    ("RMoR", "rmor-c", True, "#eda100", "triangle-up", True),
+    ("RMoW-external", "rmor-c-footer", False, "#008300", "square", True),
+    ("RMoW-append", "rmow-c", False, "#1baf7a", "diamond", True),
+    ("TailCoW", "tailcow-c", False, "#eb6834", "triangle-down", False),
+    ("RMoR without skipping", "rmor-c", False, "#eda100", "cross", False),
+], columns=["design", "arm", "skipping", "color", "shape", "main"])
+MAIN = list(DESIGNS[DESIGNS.main].design)
+REGION_DESIGNS = MAIN[1:]
+WRITE, READ = BP_WHATS[:2]
+# Where the time goes (TIME_PARTS): the work on Parquet's format in shades of one violet, rows and
+# planning in orange (TailCoW's, which no results chart draws), the store in gray and pauses in a
+# lighter gray, so that no part shares a color with a main design
+PART_COLORS = {"decoding": "#3b2ca6", "encoding": "#7d6fdc", "deletion vectors and footers": "#c4bdf0",
+               "rows and planning": "#eb6834", "the store": "#7f8a93",
+               "paused (GC, JIT)": "#c9ced3"}
+TIME_TITLE = {"a write": "write latency", "a full read": "read latency"}
+
+
+def designs(df, main=True):
+    """df (from a bp_* function or cs_frame: rows per arm, with `what` in BP_WHATS, or without it
+    for writes alone) per design: `design` (and `arm_label`) its name, `ord` its place, and `what`
+    a write or a full read. RMoR's full read is the one skipping dead row groups; its other is that
+    of "RMoR without skipping", which has RMoR's write. Only the main four with `main`."""
+    out = []
+    for i, d in enumerate(DESIGNS.itertuples()):
+        if main and not d.main:
+            continue
+        rows = df[df.arm == d.arm]
+        if "what" in rows:
+            read = BP_WHATS[2] if d.skipping else READ
+            rows = rows[rows.what.isin([WRITE, read])]
+            rows = rows.assign(what=rows.what.replace(BP_WHATS[2], READ))
+        out.append(rows.assign(design=d.design, arm_label=d.design, ord=i))
+    return pd.concat(out, ignore_index=True)
+
+
+def design_encoding(names=None, title="design"):
+    """Color and shape by design (field `design`), for `names` (default: the main four)."""
+    d = DESIGNS.set_index("design").loc[MAIN if names is None else names]
+    dom = list(d.index)
+    return (alt.Color("design:N", title=title, sort=dom,
+                      scale=alt.Scale(domain=dom, range=list(d.color))),
+            alt.Shape("design:N", title=title, sort=dom,
+                      scale=alt.Scale(domain=dom, range=list(d["shape"]))))
+
+
+def part_color(title=None):
+    return alt.Color("part:N", title=title, sort=TIME_PARTS,
+                     scale=alt.Scale(domain=TIME_PARTS, range=[PART_COLORS[p] for p in TIME_PARTS]))
+
+
+def _part_order(d):
+    """d with `part_ord`, its part's place in TIME_PARTS, to stack the parts in the legend's order."""
+    return d.assign(part_ord=d.part.map(TIME_PARTS.index))
+
+
+def over_mor(df, keys):
+    """designs(df) without MoR, with `mor_s`, MoR's mean time `s` in the same `keys` and kind of
+    phase, and `over_mor`, the design's over it."""
+    keys = list(keys) + ["what"]
+    mor = df[df.design == "MoR"][keys + ["s"]].rename(columns={"s": "mor_s"})
+    d = df[df.design != "MoR"].merge(mor, on=keys)
+    d["over_mor"] = d.s / d.mor_s
+    return d
+
+
+def tradeoff(spread, keys=("store", "config")):
+    """designs(spread) (spread: bp_spread's, or cs_frame's of it) as one point per `keys` and
+    design: the mean write and full read (s), the writes' 10th and 90th percentiles, and the full
+    reads after the fewest and the most writes (`setting` named where `keys` has `config`)."""
+    keys = list(keys)
+    d = designs(spread)
+    w = (d[d.what == WRITE][keys + ["design", "s", "p10", "p90"]]
+         .rename(columns={"s": "write_s", "p10": "write_p10", "p90": "write_p90"}))
+    r = (d[d.what == READ]
+         .rename(columns={"s": "read_s", "first_s": "read_first", "last_s": "read_last"}))
+    out = r.merge(w, on=keys + ["design"])[
+        keys + ["design", "ord", "write_s", "write_p10", "write_p90", "read_s", "read_first",
+                "read_last", "first_step", "last_step"]]
+    if "config" in out:
+        out.insert(len(keys), "setting", out.config.map(CS_SETTING))
+    return out
+
+
+TRADEOFF_TOOLTIP = [
+    alt.Tooltip("write_s:Q", title="write, mean (s)", format=".2f"),
+    alt.Tooltip("write_p10:Q", title="write, p10 (s)", format=".2f"),
+    alt.Tooltip("write_p90:Q", title="write, p90 (s)", format=".2f"),
+    alt.Tooltip("read_s:Q", title="full read, mean (s)", format=".2f"),
+    alt.Tooltip("read_first:Q", title="full read after 5 writes (s)", format=".2f"),
+    alt.Tooltip("read_last:Q", title="full read after 30 writes (s)", format=".2f")]
+
+
+def _tradeoff_layers(d, x, y, x_lo, y_lo, color, shape, tooltip):
+    """A point per design at its means, a whisker across its writes' p10 to p90 and one up from its
+    full read after 5 writes to the one after 30."""
+    base = alt.Chart(d).encode(color=color)
+    across = base.mark_rule(strokeWidth=1.5, opacity=0.55).encode(x=x_lo, x2="write_p90:Q", y=y)
+    up = base.mark_rule(strokeWidth=1.5, opacity=0.55).encode(x=x, y=y_lo, y2="read_last:Q")
+    point = base.mark_point(filled=True, size=70, opacity=1, stroke="white",
+                            strokeWidth=0.8).encode(x=x, y=y, shape=shape, tooltip=tooltip)
+    return [across, up, point]
+
+
+def bp_tradeoff_chart(pts, store, color, shape, x_max, y_max):
+    """tradeoff(bp_spread(..., key="store"), ["store"])'s points for one store, on linear scales from
+    0 to x_max and y_max (pass the same to both stores), each design labeled beside its point."""
+    xs, ys = (alt.Scale(domain=[0, m], nice=False) for m in (x_max, y_max))
+    x = alt.X("write_s:Q", title="write latency (s)", scale=xs)
+    y = alt.Y("read_s:Q", title="read latency (s)", scale=ys)
+    d = pts[pts.store == store]
+    layers = _tradeoff_layers(d, x, y, alt.X("write_p10:Q", scale=xs),
+                              alt.Y("read_first:Q", scale=ys), color, shape,
+                              ["design", *TRADEOFF_TOOLTIP])
+    # a label above each point, but below RMoW-external's, which sits under RMoR's; right-aligned
+    # in the right half
+    below = d.design == "RMoW-external"
+    right = d.write_s > 0.55 * x_max
+    for sel, dy in ((~below, -12), (below, 16)):
+        for side, align, dx in ((~right, "left", 7), (right, "right", -7)):
+            layers.append(alt.Chart(d[sel & side]).mark_text(
+                align=align, dx=dx, dy=dy, fontSize=12, fontWeight="bold").encode(
+                x=x, y=y, text="design:N", color=color))
+    return alt.layer(*layers).properties(width=420, height=320, title=store)
+
+
+def _log_axis(domain, ticks=(0.5, 1, 2, 5, 10, 20, 50, 100, 200)):
+    return (alt.Scale(type="log", domain=domain, nice=False),
+            alt.Axis(values=[t for t in ticks if domain[0] <= t <= domain[1]], format="~g"))
+
+
+def cs_tradeoff_chart(pts, store, color, shape, write_domain=(0.5, 64), read_domain=(5, 64)):
+    """tradeoff(cs_frame(bp_spread))'s points for one store on CS_GRID (a row per axis, a panel per
+    setting): each design at its mean write and mean full read, with a whisker from its writes'
+    10th to 90th percentile and one from its full read after 5 writes to its full read after 30;
+    log scales, the same domains in every panel (pass the same to both stores' charts)."""
+    xs, xa = _log_axis(list(write_domain))
+    ys, ya = _log_axis(list(read_domain))
+    d0 = pts[pts.store == store]
+    rows = []
+    for r, (axis, panels) in enumerate(CS_GRID):
+        cols = []
+        for c, (config, title) in enumerate(panels):
+            xt = "write latency (s)" if r == len(CS_GRID) - 1 else None
+            yt = "read latency (s)" if c == 0 else None
+            layers = _tradeoff_layers(
+                d0[d0.config == config],
+                alt.X("write_s:Q", title=xt, scale=xs, axis=xa),
+                alt.Y("read_s:Q", title=yt, scale=ys, axis=ya),
+                alt.X("write_p10:Q", title=xt, scale=xs, axis=xa),
+                alt.Y("read_first:Q", title=yt, scale=ys, axis=ya),
+                color, shape, ["setting", "design", *TRADEOFF_TOOLTIP])
+            cols.append(alt.layer(*layers).properties(width=190, height=150, title=title))
+        rows.append(alt.hconcat(*cols, title=alt.Title(axis, anchor="start", fontSize=13)))
+    return alt.vconcat(*rows, title=alt.Title(store, anchor="start", fontSize=15))
+
+
+def parts_chart(parts, what, rows=None, row_sort=None, width=220):
+    """Stacked bars of designs(...bp_parts...) for one kind of phase (WRITE or READ): mean seconds
+    per design by part, a column per store and a row per value of `rows` (sorted by row_sort; none
+    by default), on one time axis."""
+    d = _part_order(parts[parts.what == what])
+    tip = [c for c in ("setting", "store") if c in d] + ["design", "part"]
+    chart = alt.Chart(d).mark_bar().encode(
+        x=alt.X("s:Q", title=f"mean {TIME_TITLE[what]} (s)", stack="zero"),
+        y=alt.Y("design:N", title=None, sort=MAIN),
+        color=part_color(),
+        order=alt.Order("part_ord:Q", sort="ascending"),
+        tooltip=[*tip, alt.Tooltip("s:Q", format=".2f")]).properties(width=width,
+                                                                       height=alt.Step(13))
+    facets = dict(column=alt.Column("store:N", title=None, sort=CS_STORES,
+                                    header=alt.Header(labelFontSize=12)))
+    if rows:
+        facets["row"] = alt.Row(f"{rows}:N", title=None, sort=row_sort,
+                                header=alt.Header(labelAngle=0, labelAlign="left",
+                                                  labelFontSize=11))
+    return chart.facet(**facets)
+
+
+def steps_chart(steps):
+    """Stacked bars of designs(...bp_steps...): a write's mean seconds per design by part, a column
+    per step of the write and a row per store, on one time axis. With several configurations
+    (column `config`), one at a time, chosen in a dropdown (the base point first)."""
+    d = _part_order(steps.assign(step=steps.write_step.map(CS_STEP)))
+    many = "config" in d and d.config.nunique() > 1
+    if many:
+        d["setting"] = d.config.map(CS_SETTING)
+    top = d[d.s > 0].groupby([c for c in ("store", "config") if c in d]
+                             + ["design", "write_step"]).s.sum().max()
+    chart = alt.Chart(d).mark_bar().encode(
+        x=alt.X("s:Q", title="mean write latency (s)", stack="zero",
+                scale=alt.Scale(domain=[0, 1.02 * top], nice=False)),
+        y=alt.Y("design:N", title=None, sort=MAIN),
+        color=part_color(),
+        order=alt.Order("part_ord:Q", sort="ascending"),
+        tooltip=[c for c in ("setting", "store") if c in d] + ["design", "step", "part",
+                                                               alt.Tooltip("s:Q", format=".2f")])
+    setting = None
+    if many:
+        options = [s for s in CS_SETTINGS if s in set(d.setting)]
+        setting = alt.param(name="setting", value=options[0],
+                            bind=alt.binding_select(options=options, name="setting "))
+        chart = chart.transform_filter(alt.datum.setting == setting)
+    chart = (chart.properties(width=150, height=alt.Step(13))
+             .facet(row=alt.Row("store:N", title=None, sort=CS_STORES),
+                    column=alt.Column("step:N", title=None, sort=list(CS_STEP.values()))))
+    return chart.add_params(setting) if setting is not None else chart
+
+
+def latency_chart(series, width=300, height=170):
+    """designs(...bp_series...) as lines over the snapshots a run adds, one per design: write
+    latency at each write, and read latency after the initial load and every 5 writes; a graph for
+    each, with a column per store on one latency axis. With several configurations (column
+    `config`), one at a time, chosen in a dropdown (the base point first)."""
+    d = series.copy()
+    many = "config" in d and d.config.nunique() > 1
+    if many:
+        d["setting"] = d.config.map(CS_SETTING)
+    color, shape = design_encoding()
+    tip = [c for c in ("setting", "store") if c in d] + ["design", "step",
+                                                          alt.Tooltip("s:Q", format=".2f")]
+    setting = None
+    if many:
+        options = [x for x in CS_SETTINGS if x in set(d.setting)]
+        setting = alt.param(name="setting", value=options[0],
+                            bind=alt.binding_select(options=options, name="setting "))
+
+    def graph(what, point):
+        c = alt.Chart(d[d.what == what]).mark_line(strokeWidth=2, point=point).encode(
+            x=alt.X("step:Q", title="snapshots (writes since the initial load)",
+                    scale=alt.Scale(domain=[0, 30], nice=False), axis=alt.Axis(values=list(range(0, 31, 5)))),
+            y=alt.Y("s:Q", title=f"{TIME_TITLE[what]} (s)"),
+            color=color, shape=shape, detail="design:N", tooltip=tip)
+        if many:
+            c = c.transform_filter(alt.datum.setting == setting)
+        return (c.properties(width=width, height=height)
+                .facet(column=alt.Column("store:N", title=None, sort=CS_STORES))
+                .properties(title=alt.Title(TIME_TITLE[what].capitalize(), anchor="start")))
+
+    graphs = [graph(WRITE, alt.OverlayMarkDef(size=18)), graph(READ, alt.OverlayMarkDef(size=50))]
+    # the dropdown on the whole: add_params on a vconcat of facets fails in Altair 6
+    return alt.vconcat(*graphs, params=[setting.param]) if many else alt.vconcat(*graphs)
+
 
 # Each configuration's twin: its run with a local store on its S3 Express VM (the deploy's twin
 # step, 2026-11-01), but the base point's, which is the laptop's on the same build; and havoc's run

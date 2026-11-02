@@ -15,6 +15,7 @@ project:
       children:
         - file: pages/base-point.md
         - file: pages/cloud-sweep.md
+        - file: pages/reader-changes.md
     - title: Calibration
       children:
         - file: pages/base-point-model.md
@@ -37,5 +38,6 @@ project:
         - file: pages/micro.md
   exclude:
     - NOTES.md
+    - pages/_*.md
 site:
   template: book-theme
