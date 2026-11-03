@@ -114,12 +114,36 @@ public final class Main {
     pretty.writeValue(manifestFile.toFile(), manifest);
 
     long t0 = System.nanoTime();
-    String oplog = new Runner(cfg, runDir, started, options).run();
+    String oplog;
+    try {
+      oplog = new Runner(cfg, runDir, started, options).run();
+    } catch (Throwable t) {
+      fail(t, manifest, manifestFile, pretty, t0);
+      return;
+    }
     manifest.put("oplog_sha256", oplog);
     manifest.put("elapsed_s", (System.nanoTime() - t0) / 1e9);
     manifest.put("finished", Instant.now().toString());
     pretty.writeValue(manifestFile.toFile(), manifest);
     System.out.println(runDir);
+  }
+
+  /**
+   * A run that fails says so in its manifest ({@code failed}, which the lab reads as the run's
+   * status) and ends the JVM with status 1, whatever threads are still alive, so that a script or a
+   * VM running it moves on instead of waiting.
+   */
+  private static void fail(
+      Throwable t, Map<String, Object> manifest, Path manifestFile, ObjectWriter pretty, long t0) {
+    t.printStackTrace();
+    try {
+      manifest.put("failed", t.toString());
+      manifest.put("elapsed_s", (System.nanoTime() - t0) / 1e9);
+      pretty.writeValue(manifestFile.toFile(), manifest);
+    } catch (Throwable e) {
+      e.printStackTrace();
+    }
+    System.exit(1);
   }
 
   private static Map<String, Object> versions() throws IOException, NoSuchAlgorithmException {

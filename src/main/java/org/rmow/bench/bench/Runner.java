@@ -13,6 +13,8 @@ import java.util.Map;
 import java.util.SplittableRandom;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.apache.iceberg.deletes.DeleteGranularity;
 import org.apache.iceberg.expressions.Expression;
 import org.apache.iceberg.expressions.Expressions;
@@ -145,6 +147,20 @@ public final class Runner {
     }
   }
 
+  /**
+   * A reader's pool threads, as daemons: a run that fails before it shuts its pools down must not
+   * leave them holding the JVM (a run whose 8-thread read ran out of memory hung for hours,
+   * 2026-11-02).
+   */
+  private static ThreadFactory daemons(String reader) {
+    AtomicInteger n = new AtomicInteger();
+    return task -> {
+      Thread t = new Thread(task, "read-" + reader + "-" + n.incrementAndGet());
+      t.setDaemon(true);
+      return t;
+    };
+  }
+
   /** Whether an arm appends to its files: the appendable RMoW arms, and RMoR-C with footers. */
   private static boolean appends(String arm) {
     return arm.startsWith("rmow-") && !arm.endsWith("-split") || arm.equals("rmor-c-footer");
@@ -170,7 +186,8 @@ public final class Runner {
 
     List<ExecutorService> pools = new ArrayList<>();
     for (BenchConfig.ReaderSpec r : cfg.reads.readers) {
-      ExecutorService pool = r.parallelism > 1 ? Executors.newFixedThreadPool(r.parallelism) : null;
+      ExecutorService pool =
+          r.parallelism > 1 ? Executors.newFixedThreadPool(r.parallelism, daemons(r.name)) : null;
       if (pool != null) {
         pools.add(pool);
       }

@@ -721,3 +721,12 @@ work on Azure is priced at the S3 Express VMs' pace. Every setting's instruction
 point's comes from two machines (the twin on its VM, the new run on the laptop; Zen 4 both, on the
 same JDK), between which MoR's full reads, which the fix leaves alone, moved by up to 4.2%. Where a
 predicted ratio sits within 10% of what it is compared with, the comparison decides nothing.
+
+## RMoR with the check by range: the build (registered 2026-11-03)
+
+The runs of R1–R3 (2026-11-02) build at the commit that registers this note, not at 378c967. It
+changes only how a run that fails ends: the JVM exits with status 1 and the manifest records the
+error, where a failed run had been left alive by its readers' pool threads (a run on the laptop
+hung for 4.5 hours after its 8-thread read ran out of memory). A run that finishes sends the same
+requests and bytes and does the same work, so the section's predictions and the laptop's
+reference runs stand.

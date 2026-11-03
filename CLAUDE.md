@@ -70,7 +70,8 @@ bin/matrix.sh --build configs/local-compact-*.json   # several, from a build sna
 
 - A run writes `results/<label>-<config hash>/<UTC start>/`:
   - `manifest.json`: the full config, git commit and dirty flag, versions, host, and the op log's
-    SHA-256;
+    SHA-256. A run that fails records its error as `failed` (the lab's status `failed`) and exits
+    with status 1;
   - `oplog.bin`;
   - `steps.jsonl`: one record per arm, step and phase;
   - `versions/` with `--dump-versions`.
