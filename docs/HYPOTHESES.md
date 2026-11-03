@@ -616,3 +616,108 @@ the Azure runs come one after another over about a day, each priced by its own s
 is at the S3 Express VMs' pace, which the Azure VM's may not share; the ratios move little with it
 (the base point's, by at most 0.12 between the laptop's pace and the VM's). Where a write's predicted
 ratio sits within 10% of another it is compared with, the comparison decides nothing.
+
+## RMoR with the check by range, in the cloud (registered 2026-11-02)
+
+**What it decides:** RMoR's times on S3 Express and Azure Blob with its check of dead row groups
+by range (d8a47dd). Every cloud run of RMoR so far (the base point and the sweeps, at 6f24575)
+looked up each position of a row group in its deletion vector, which cost its skipping reader and
+its writer up to 2.5 s of CPU a phase, so the results pages call its times upper bounds (ROADMAP).
+The runs decide whether RMoR's full read, skipping the row groups its deletion vectors cover
+whole, now beats MoR's, and where its write stands against RMoW-append's. The check decides the
+same row groups as before (`DeletedRangesTest`), so no request or byte changes (R1).
+
+**Setup:** `configs/rmor-*.json`, the sweeps' eleven configurations (the base point and the ten),
+each `configs/sweep-<setting>.json` with MoR (`mor-v3`) and RMoR (`rmor-c`) as its only arms and
+`rmor-<setting>` as its label, all five readers kept. MoR is each run's anchor: the store drifts
+between runs, so times are compared by their ratio over MoR's in the same run. The build is the
+commit that registers this section (its code is 505ba07's) on the fork at af875ccfd1, in a 16 GB
+heap, with requests and held memory logged. The runs go on the stores as `rmor-<setting>-s3x` and
+`rmor-<setting>-azure`, each after its VM's spike; how many VMs is left to the launch (AWS allowed
+four `c7a.4xlarge` on 2026-11-01, Azure one `D8as_v6`; deploy/README.md, Quotas).
+- **The laptop's runs are the reference:** each configuration once at 505ba07 (2026-11-03 UTC,
+  campaign `rmor-rerun`). In every record (508–536 each), MoR's and RMoR's requests, bytes and
+  table state equal what the twin of its setting sent at 6f24575: the cloud sweep's twins on their
+  VMs, and for the base point the laptop's run of `sweep-base` at 6f24575
+  (`sweep-base-f970149711a9/20261102T235620Z`). `rmor-s0`, `rmor-s2` and `rmor-rg32m` ran twice,
+  and the two runs of each are alike in every record.
+- **The base point under both builds,** every design, on the laptop
+  (`sweep-base-f970149711a9/20261102T235620Z` at 6f24575, `/20261103T045636Z` at 505ba07): all
+  1,325 records alike. The other four designs' work (user-mode instructions of a write and of a
+  full read) is within 0.2%. RMoR's skipping full read takes 43% fewer instructions and its write
+  12% fewer. Its read without skipping, which does not check, takes 2% more, within the 2.7% by
+  which the two runs of `rmor-s0` differ.
+
+**Predicted,** from the earlier cloud runs of each setting (the cloud sweep's, and the base point's
+`sweep-base-s3x-89a55338cd9a/20261031T164030Z` and `sweep-base-azure-0c88452d93b4/20261031T234956Z`):
+RMoR's mean write and mean full read, less the work the check no longer does. That work is the drop
+in instructions from the setting's twin at 6f24575 to its laptop run at 505ba07, at the pace of
+RMoR's phase (median cycles per instruction and clock) in the earlier S3 Express run of the
+setting. The Azure VM counts no instructions, so Azure is priced at the same pace. The check took
+0.3–2.5 s of a write and 0.0–2.3 s of a full read, least at p = 0.3 and in the two ingest settings,
+where fewer row groups are dead whole. MoR's times are its earlier ones, the check not being on its
+path. The means are over the 30 writes and the full reads after the initial load, MoR's under
+`cached` and RMoR's under `cached-skip`. RMoW-append's (`rmow-c`) write over MoR's is the earlier
+run's, for R3.
+
+S3 Express:
+
+| Run | Varies | MoR's write (s) | RMoR's write (s) | over MoR's | RMoW-append's, over MoR's | MoR's full read (s) | RMoR's full read (s) | over MoR's |
+|---|---|---|---|---|---|---|---|---|
+| `rmor-base` | the base point | 2.6 | 21.0 → 18.9 | 8.01 → 7.21 | 4.18 | 10.7 | 11.3 → 9.1 | 1.06 → 0.85 |
+| `rmor-p10` | p = 0.1 | 1.9 | 11.4 → 10.2 | 6.10 → 5.46 | 2.81 | 10.5 | 10.7 → 9.4 | 1.01 → 0.89 |
+| `rmor-p30` | p = 0.3 | 1.2 | 4.0 → 3.7 | 3.22 → 2.99 | 2.13 | 10.4 | 9.9 → 9.3 | 0.95 → 0.90 |
+| `rmor-s0` | a skew of 0 | 2.9 | 27.6 → 25.2 | 9.50 → 8.65 | 4.47 | 10.9 | 11.3 → 9.3 | 1.03 → 0.85 |
+| `rmor-s2` | a skew of 2 | 2.2 | 9.8 → 8.2 | 4.49 → 3.74 | 3.63 | 10.4 | 10.9 → 9.2 | 1.05 → 0.89 |
+| `rmor-rg32m` | 32 MiB row groups | 2.6 | 23.8 → 21.5 | 9.17 → 8.29 | 5.32 | 10.4 | 11.0 → 8.7 | 1.06 → 0.84 |
+| `rmor-rg64m` | 64 MiB row groups | 2.6 | 29.5 → 27.0 | 11.24 → 10.30 | 8.16 | 10.4 | 11.0 → 8.8 | 1.06 → 0.85 |
+| `rmor-late99-1` | lateness, p99 of 1 batch | 2.6 | 15.1 → 13.1 | 5.75 → 4.99 | 4.11 | 10.4 | 10.9 → 8.9 | 1.05 → 0.86 |
+| `rmor-late99-20` | lateness, p99 of 20 batches | 2.6 | 24.0 → 21.8 | 9.10 → 8.29 | 4.22 | 10.7 | 11.2 → 9.2 | 1.04 → 0.86 |
+| `rmor-ingest` | the ingest window | 1.3 | 12.6 → 12.2 | 9.91 → 9.65 | 3.38 | 10.4 | 9.4 → 9.2 | 0.90 → 0.89 |
+| `rmor-ingest-rows` | the ingest window, a row a change | 2.0 | 18.3 → 18.0 | 9.14 → 8.99 | 6.27 | 10.6 | 9.4 → 9.4 | 0.88 → 0.88 |
+
+Azure Blob:
+
+| Run | Varies | MoR's write (s) | RMoR's write (s) | over MoR's | RMoW-append's, over MoR's | MoR's full read (s) | RMoR's full read (s) | over MoR's |
+|---|---|---|---|---|---|---|---|---|
+| `rmor-base` | the base point | 4.2 | 26.2 → 24.1 | 6.24 → 5.74 | 3.14 | 14.0 | 20.0 → 17.8 | 1.43 → 1.27 |
+| `rmor-p10` | p = 0.1 | 3.1 | 14.5 → 13.3 | 4.70 → 4.31 | 2.08 | 14.1 | 17.9 → 16.6 | 1.27 → 1.18 |
+| `rmor-p30` | p = 0.3 | 1.9 | 5.1 → 4.8 | 2.73 → 2.58 | 1.68 | 13.4 | 14.7 → 14.1 | 1.09 → 1.05 |
+| `rmor-s0` | a skew of 0 | 5.4 | 34.2 → 31.7 | 6.37 → 5.91 | 2.84 | 14.8 | 19.4 → 17.4 | 1.31 → 1.18 |
+| `rmor-s2` | a skew of 2 | 3.5 | 12.5 → 10.8 | 3.51 → 3.05 | 2.63 | 13.4 | 16.3 → 14.6 | 1.21 → 1.09 |
+| `rmor-rg32m` | 32 MiB row groups | 4.0 | 28.9 → 26.6 | 7.17 → 6.61 | 3.87 | 12.8 | 19.4 → 17.1 | 1.51 → 1.33 |
+| `rmor-rg64m` | 64 MiB row groups | 4.8 | 35.6 → 33.1 | 7.46 → 6.94 | 5.08 | 13.0 | 22.9 → 20.7 | 1.76 → 1.59 |
+| `rmor-late99-1` | lateness, p99 of 1 batch | 4.2 | 20.2 → 18.2 | 4.77 → 4.30 | 3.11 | 13.6 | 17.4 → 15.4 | 1.28 → 1.14 |
+| `rmor-late99-20` | lateness, p99 of 20 batches | 4.2 | 30.9 → 28.8 | 7.38 → 6.87 | 3.18 | 14.0 | 18.3 → 16.4 | 1.31 → 1.17 |
+| `rmor-ingest` | the ingest window | 2.1 | 16.1 → 15.8 | 7.52 → 7.37 | 2.50 | 13.5 | 13.9 → 13.8 | 1.03 → 1.02 |
+| `rmor-ingest-rows` | the ingest window, a row a change | 3.3 | 23.0 → 22.7 | 6.94 → 6.85 | 4.65 | 13.7 | 14.4 → 14.4 | 1.05 → 1.05 |
+
+- **R1: each cloud run sends what its laptop run counts** (a control). Every record's requests,
+  bytes and table state equal its laptop run's, so MoR and RMoR send what they sent in the earlier
+  cloud runs of their setting.
+- **R2 (time): on S3 Express, RMoR's skipping full read is faster than MoR's; on Azure Blob it is
+  not.** On S3 Express, RMoR's mean full read over MoR's is below 0.90 at every setting but
+  p = 0.3 (predicted 0.84–0.89), where the runs at 6f24575 had it above 1 at eight settings
+  (1.01–1.06). At p = 0.3 it is predicted at 0.90, on the 10% line, so that setting decides
+  nothing. On Azure Blob it stays above 1.1 at seven settings (predicted 1.14–1.59); p = 0.3, a
+  skew of 2 and the two ingest settings (1.02–1.09) decide nothing.
+- **R3 (time): RMoR's write still costs more than RMoW-append's.** On both stores, at every setting,
+  RMoR's mean write over MoR's is more than 1.1 times RMoW-append's over MoR's in the earlier run
+  of its setting (predicted 1.21–2.86 times on S3 Express, 1.16–2.95 on Azure), except a skew of 2
+  on S3 Express (1.03), which decides nothing.
+
+**Measured, not judged:** RMoR's write against RMoW-external's (`rmor-c-footer`; predicted at
+0.86–0.98 of its ratio over MoR's, mostly near the 10% line); RMoR's skipping read against the
+RMoW designs' (predicted at 0.97–1.01 of RMoW-append's on S3 Express); RMoR's read without skipping,
+which does not check; how far each RMoR time falls from its prediction, and each MoR time from the
+earlier run's (the stores' drift between the runs); the spikes.
+
+**Limits:** one run of each configuration, on one seed. R3 compares across runs: RMoW-append's
+ratio comes from the earlier runs, with all five designs. MoR's write took 1.3–5.7% fewer
+instructions in the laptop's runs of two designs than in the twins of five (1.5% at the base point,
+both on the laptop; 0.2% between the builds in runs of five), so a ratio over MoR's write carries a
+few percent from the designs a run holds. The check's
+work on Azure is priced at the S3 Express VMs' pace. Every setting's instruction drop but the base
+point's comes from two machines (the twin on its VM, the new run on the laptop; Zen 4 both, on the
+same JDK), between which MoR's full reads, which the fix leaves alone, moved by up to 4.2%. Where a
+predicted ratio sits within 10% of what it is compared with, the comparison decides nothing.

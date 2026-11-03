@@ -283,14 +283,20 @@ reads.
   - [x] **The check by range** (done 2026-11-02). It looked up each position of a row group in
     the deletion vector, about 514,000 lookups a 16 MiB row group, which cost RMoR about 1.8 s of
     CPU per full read and 1.3 s per write (in its locate scan) in the cloud runs at 6f24575, the
-    point of RMoR being a check per row group. `DeletedRanges` now looks up a row group's two ends,
+    point of RMoR being a check per row group. Measured, the laptop's runs under both builds put it
+    at 2.2 s a full read and 2.1 s a write at the base point, at the S3 Express
+    VM's pace, and up to 2.3 s and 2.5 s across the sweeps' settings (docs/HYPOTHESES.md,
+    2026-11-02). `DeletedRanges` now looks up a row group's two ends,
     then asks the vector's Roaring bitmaps (read back through the index's `serialize()`, Iceberg's
     index answering only per position) whether the whole range is deleted: 0.2 ms a file of 16
     row groups, half of them dead, against 54 ms. It decides the same row groups
     (`DeletedRangesTest`), so no request or byte changes.
   - [ ] **RMoR re-measured with it:** every cloud run of RMoR (the base point and the sweeps, on
     both stores) charged it the per-position check; the results pages call RMoR's latencies an
-    upper bound until it runs again.
+    upper bound until it runs again. Registered 2026-11-02 (docs/HYPOTHESES.md, RMoR with the
+    check by range, in the cloud; R1–R3): `configs/rmor-*.json`, MoR and RMoR alone at each of
+    the sweeps' eleven settings, with the laptop's runs at 505ba07 as their reference (campaign
+    `rmor-rerun`). The cloud runs are to launch.
 
 ## Workload generator
 
