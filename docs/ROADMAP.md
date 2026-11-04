@@ -303,6 +303,14 @@ reads.
     waits on the store fell 1.2 s from the earlier run. The results pages (base-point,
     cloud-sweep) take RMoR's times from these runs, each over the MoR of its own run; the model's
     pages keep the earlier runs they price.
+- [ ] **RMoR and RMoW-external with their row groups kept whole** (found 2026-11-04). Their
+  writer puts the rows of every row group a write rewrites in one list with the write's inserts,
+  sorts it by event time and cuts it into new row groups. So late inserts land among old
+  regions' rows, and a later update of a new region rewrites most of the recent files' row groups
+  for a few rows each. At the base point that made 396–771 MB writes, against RMoW-append's
+  161–292 MB. Arms `rmor-c-kept` and `rmor-c-footer-kept` will write each rewritten row group as
+  one of its own, and the inserts apart, as RMoW-append does. Registered 2026-11-04
+  (docs/HYPOTHESES.md, W1–W3): four laptop runs, `configs/kept-*.json`. Not built.
 
 ## Workload generator
 

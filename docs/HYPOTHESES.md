@@ -730,3 +730,106 @@ error, where a failed run had been left alive by its readers' pool threads (a ru
 hung for 4.5 hours after its 8-thread read ran out of memory). A run that finishes sends the same
 requests and bytes and does the same work, so the section's predictions and the laptop's
 reference runs stand.
+
+## RMoR and RMoW-external with their row groups kept whole (registered 2026-11-04)
+
+**What it decides:** whether RMoR's and RMoW-external's write spikes come from how their writer
+lays out a write's new data file, and whether laying it out as RMoW-append does removes them. The
+two designs were meant to differ from RMoW-append in two things only: where a rewritten row group
+goes (a new data file, not its own object) and what hides its old copy (a deletion vector, or a
+footer appended to its file). Their writer (`TailCowArm`) differs in a third. It puts the rows of
+every row group a write rewrites, with the write's changes, in one list with the write's inserts,
+sorts the list by event time, and lets the Parquet writer cut it into new 16 MiB row groups.
+RMoW-append writes each rewritten row group back as one row group of the same rows, and the
+inserts as a row group of their own.
+
+Sorting by event time puts the far tail of each write's late inserts among the old regions' rows.
+At the base point, every one of the 15 row groups of write 1's file holds some of region 50's rows
+(write 1's inserts); its first holds regions 4 and 5 and 58 rows of region 50. A later statement
+on a new region changes a few of those rows in nearly every row group of the recent files, and
+each costs a whole row group. Writes 3, 4 and 5 rewrote 13, 14 and 18 row groups (192, 206 and
+283 MB) only for a new region's rows, most of them for 1–12 changed rows, and each rewritten file
+carried its scattered rows into the next. Over the base point's 30 writes on S3 Express
+(`sweep-base-s3x-89a55338cd9a/20261031T164030Z`), the 18 writes that change a region inserted
+since the load wrote 396–771 MB each in both designs and took RMoW-external 19–37 s. The 12 that
+don't wrote 162–313 MB, at most 1.14 times RMoW-append's bytes. RMoW-append wrote about 30 MB for
+each region changed, old or new, and took 7.5–13.6 s throughout. This was found on a laptop
+replay of the base point's first six writes with the objects kept, whose requests and bytes equal
+the S3 Express run's; the row groups each write must rewrite, rebuilt from those files and the op
+log, give each write's bytes read back exactly. The replay is not kept in `results/`.
+
+**Setup:** two new arms, `TailCowArm` with its row groups kept whole:
+- **The arms:** `rmor-c-kept` (RMoR) and `rmor-c-footer-kept` (RMoW-external). A write's new data
+  file holds each row group the write rewrites as one row group of its own: its live rows with
+  the write's changes, sorted by event time, as RMoW-append writes a region. The inserts follow
+  as a row group of their own, sorted by event time among themselves. The file is encoded by
+  RMoW-append's region writer, so a row group of the same rows has the same bytes, and created
+  in one request, as now. Finding the rows (`locate`), θ = 0, and what hides the old copies are
+  unchanged.
+- **The configurations:** `configs/kept-<setting>.json` for the base point, insert lateness with
+  a p99 of 1 and of 20 writes, and the ingest window. Each is `configs/sweep-<setting>.json`
+  with label `kept-<setting>` and arms MoR (`mor-v3`), RMoR and RMoW-external both as now and
+  kept, and RMoW-append (`rmow-c`); TailCoW-C is dropped. At these settings every tail seals at
+  once (a write's inserts alone are 11.7 MB, and four times that passes the 16 MiB seal), so no
+  design merges its tail.
+- **The runs:** on the laptop, one run each, from one build snapshot (`bin/matrix.sh --build`),
+  with requests and held memory logged. As a control, the four arms that exist now must send
+  the requests and bytes of their earlier runs of the setting in every record: the base point's
+  laptop run at 505ba07 (`sweep-base-f970149711a9/20261103T045636Z`); elsewhere, the laptop's
+  `rmor-<setting>` at 505ba07 for MoR and RMoR, and the S3 Express sweep for RMoW-external and
+  RMoW-append.
+
+**Predicted:**
+- **W1 (bytes): the kept arms rewrite what RMoW-append rewrites.** At every write of the four
+  runs, each kept arm reads back RMoW-append's bytes within 1% (its merge-read) and writes within
+  2% of RMoW-append's bytes. Their mean write's bytes over RMoW-append's fall to at most 1.02.
+  Now, for RMoR and RMoW-external alike, that ratio is 1.86 at the base point, 1.26 and 2.18 with
+  lateness p99 of 1 and 20 writes, and 3.29 in the ingest window. Their largest write falls to
+  within 2% of RMoW-append's largest (292 MB at the base point, against 771 MB now).
+- **W2 (work): their writes cost what RMoW-append's do, plus finding the rows.** Over
+  RMoW-append's mean write work (user-mode instructions), the kept RMoW-external's is at most 1.25
+  and the kept RMoR's at most 1.35, at each setting. No single write costs more than 1.4 and 1.55
+  times RMoW-append's same write.
+  - **Now:** 1.97 and 2.16 over the mean at the base point (the laptop at 505ba07), and up to
+    3.17 and 3.53 for a single write. RMoW-external's mean is 1.40, 2.27 and 3.37 at the other
+    three settings.
+  - **The basis:** on the base point's 12 writes that change no new region, where the bytes
+    nearly match, RMoW-external's write took 1.08–1.31 times RMoW-append's work (1.17 over the
+    twelve) and RMoR's 1.19–1.47 (1.29). The excess is their locate, which reads row ids (10–15
+    billion instructions a write) where RMoW-append looks ids up in its footers, and RMoR's
+    deletion vectors (about 4 billion).
+  - **On S3 Express,** where a write's time followed its bytes at 46–49 ms a MB, this would put
+    both designs' writes within about 1.5 s of RMoW-append's (about 11 s at the base point,
+    against 21 s at 6f24575). That is expected, not judged: no cloud run is planned.
+- **W3 (what it costs): the kept RMoW-external's sorted read is RMoW-append's.** The current file's
+  row groups each cover a narrow slice of event time. A kept arm's insert row groups, like
+  RMoW-append's, each hold a few very late rows that reach back across the table, so a read in
+  event-time order opens them early and holds them to the end (M2).
+  - **Memory:** at its last probe, the kept RMoW-external's sorted read (`cached`) holds within
+    10% of RMoW-append's peak: 367 MB at the base point, and 245, 368 and 349 MB at the other
+    three settings. RMoW-external holds 32–83 MB now.
+  - **Work:** the sorted read does within 10% of RMoW-append's work (at the base point on the
+    laptop, 76.7 billion instructions, against RMoW-external's 50.8 billion now).
+
+**Measured, not judged:**
+- the kept RMoR's sorted read (its `cached` reader reads the row groups its deletion vectors
+  cover);
+- the kept arms' full reads, whose live bytes should be RMoW-append's;
+- the kept RMoR's stock full read, whose dead row groups should now pile up at RMoW-append's
+  write rate;
+- their locate;
+- what their writes hold (they no longer sort a whole file; M4);
+- their simulated write latency on the S3 Express profile.
+
+**Limits:**
+- **One run:** one seed and one run per setting, on the laptop, so time is judged as work.
+- **The tail:** the kept arms keep TailCoW's tail unit, a write's whole data file, which any
+  write that rewrites a row group seals. At 64 MiB row groups RMoW-append's tail merges and
+  theirs would not, so that setting is not run.
+- **The writer:** the kept arms need a writer that ends a row group at a chosen row. Iceberg's
+  Parquet writer, like parquet-java's, cuts row groups by size alone, so an engine would need
+  its own writer for this layout, though the files are plain Parquet that any reader reads. A
+  stock writer could come close by ordering a write's rows by the row group they came from,
+  inserts last, instead of by event time. That is not tested.
+- **Late inserts:** a write could also keep its very late inserts in a small row group of their
+  own, which would keep the sorted read cheap in all three designs. That is not tested either.
