@@ -77,5 +77,5 @@ title = "The sweeps in the cloud on the vectorized reader (6f24575, 2026-11-01):
 select = ["where:regexp_matches(label, '^sweep-.*-(s3x|azure)$') AND label NOT LIKE 'sweep-base-%' AND git_sha LIKE '6f24575%'", "where:label LIKE 'sweep-%' AND host LIKE 'ip-%' AND NOT regexp_matches(label, '-(s3x|azure)$')", "spike/s3x-spike-sweep-*", "where:run_id LIKE 'spike/azure-spike-20261101T%'"]
 
 [campaigns.rmor-rerun]
-title = "RMoR with the check by range (505ba07, 2026-11-03 UTC): the sweeps' eleven configurations with MoR and RMoR alone on the laptop, the cloud runs' reference (docs/HYPOTHESES.md, 2026-11-02), and the base point with every design under both builds (6f24575 and 505ba07)"
-select = ["where:label LIKE 'rmor-%' AND host = 'bearyak'", "sweep-base-f970149711a9/20261102T235620Z", "sweep-base-f970149711a9/20261103T045636Z"]
+title = "RMoR with the check by range (505ba07, 2026-11-03 UTC): the sweeps' eleven configurations with MoR and RMoR alone on the laptop, the cloud runs' reference (docs/HYPOTHESES.md, 2026-11-02), and the base point with every design under both builds (6f24575 and 505ba07); then the eleven on S3 Express and Azure Blob at d30544a, one VM per store after its spike (page rmor-rerun)"
+select = ["where:label LIKE 'rmor-%' AND host = 'bearyak'", "sweep-base-f970149711a9/20261102T235620Z", "sweep-base-f970149711a9/20261103T045636Z", "where:regexp_matches(label, '^rmor-.*-(s3x|azure)$') AND git_sha LIKE 'd30544a%'", "spike/s3x-spike-20261103T184852Z", "spike/azure-spike-20261103T185155Z"]

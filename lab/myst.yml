@@ -20,6 +20,7 @@ project:
       children:
         - file: pages/base-point-model.md
         - file: pages/cloud-sweep-model.md
+        - file: pages/rmor-rerun.md
         - file: pages/cloud.md
         - file: pages/store-latency.md
         - file: pages/cpu-measure.md

@@ -1470,3 +1470,94 @@ CS_RUNS = {
                               "spike/azure-spike-20261101T204829Z"),
     },
 }
+
+
+# RMoR re-measured (docs/HYPOTHESES.md, RMoR with the check by range, in the cloud, 2026-11-02, and
+# its build note of 2026-11-03; page rmor-rerun, calibration): the sweeps' eleven configurations with
+# MoR and RMoR alone, at d30544a (RMoR's check of dead row groups by range, 505ba07's code), one VM
+# per store running them in turn after one spike. RR_LAPTOP holds each one's reference run on the
+# laptop (the first, where it ran twice), RR_PRED the registered predictions of RMoR's mean write and
+# skipping full read in s (the tables in HYPOTHESES.md round them to 0.1 s), and RR_RUNS the cloud
+# runs with their VM's spike. The earlier runs of each setting (per-position check, 6f24575) are
+# CS_RUNS' sweep-<setting>.
+RR_CONFIGS = ["rmor-base", "rmor-p10", "rmor-p30", "rmor-s0", "rmor-s2", "rmor-rg32m", "rmor-rg64m",
+              "rmor-late99-1", "rmor-late99-20", "rmor-ingest", "rmor-ingest-rows"]
+RR_LAPTOP = {
+    "rmor-base": "rmor-base-b6591653aff1/20261103T005121Z",
+    "rmor-p10": "rmor-p10-e6848db0117d/20261103T011425Z",
+    "rmor-p30": "rmor-p30-877a0064a43b/20261103T013038Z",
+    "rmor-s0": "rmor-s0-d438be1a44a8/20261103T045630Z",
+    "rmor-s2": "rmor-s2-5af74f61f041/20261103T052944Z",
+    "rmor-rg32m": "rmor-rg32m-a08959d367e1/20261103T054830Z",
+    "rmor-rg64m": "rmor-rg64m-7566db0cc088/20261102T235630Z",
+    "rmor-late99-1": "rmor-late99-1-50c139067210/20261103T002610Z",
+    "rmor-late99-20": "rmor-late99-20-8c863b8bb3a6/20261103T004756Z",
+    "rmor-ingest": "rmor-ingest-8f60b490af63/20261103T011155Z",
+    "rmor-ingest-rows": "rmor-ingest-rows-9cfbf1a760d1/20261103T012519Z",
+}
+RR_PRED = {
+    "S3 Express": {
+        "rmor-base": {"write": 18.87, "read": 9.14},
+        "rmor-p10": {"write": 10.23, "read": 9.35},
+        "rmor-p30": {"write": 3.70, "read": 9.34},
+        "rmor-s0": {"write": 25.18, "read": 9.28},
+        "rmor-s2": {"write": 8.19, "read": 9.21},
+        "rmor-rg32m": {"write": 21.51, "read": 8.73},
+        "rmor-rg64m": {"write": 27.00, "read": 8.84},
+        "rmor-late99-1": {"write": 13.14, "read": 8.95},
+        "rmor-late99-20": {"write": 21.84, "read": 9.18},
+        "rmor-ingest": {"write": 12.24, "read": 9.25},
+        "rmor-ingest-rows": {"write": 18.04, "read": 9.36},
+    },
+    "Azure Blob": {
+        "rmor-base": {"write": 24.15, "read": 17.85},
+        "rmor-p10": {"write": 13.26, "read": 16.61},
+        "rmor-p30": {"write": 4.82, "read": 14.11},
+        "rmor-s0": {"write": 31.73, "read": 17.36},
+        "rmor-s2": {"write": 10.82, "read": 14.63},
+        "rmor-rg32m": {"write": 26.61, "read": 17.13},
+        "rmor-rg64m": {"write": 33.14, "read": 20.65},
+        "rmor-late99-1": {"write": 18.20, "read": 15.43},
+        "rmor-late99-20": {"write": 28.79, "read": 16.36},
+        "rmor-ingest": {"write": 15.76, "read": 13.80},
+        "rmor-ingest-rows": {"write": 22.67, "read": 14.39},
+    },
+}
+RR_RUNS = {
+    "S3 Express": {
+        "rmor-base": ("rmor-base-s3x-62a8a0f25695/20261103T185354Z", "spike/s3x-spike-20261103T184852Z"),
+        "rmor-p10": ("rmor-p10-s3x-021475e60a00/20261103T194321Z", "spike/s3x-spike-20261103T184852Z"),
+        "rmor-p30": ("rmor-p30-s3x-fe6d011b4604/20261103T202116Z", "spike/s3x-spike-20261103T184852Z"),
+        "rmor-s0": ("rmor-s0-s3x-a4c2005b1dd5/20261103T204827Z", "spike/s3x-spike-20261103T184852Z"),
+        "rmor-s2": ("rmor-s2-s3x-c86000ef9786/20261103T213944Z", "spike/s3x-spike-20261103T184852Z"),
+        "rmor-rg32m": ("rmor-rg32m-s3x-b4f09cd9a4bb/20261103T221936Z", "spike/s3x-spike-20261103T184852Z"),
+        "rmor-rg64m": ("rmor-rg64m-s3x-db34e42a1484/20261103T230823Z", "spike/s3x-spike-20261103T184852Z"),
+        "rmor-late99-1": ("rmor-late99-1-s3x-dfd3a458d7e1/20261104T000012Z", "spike/s3x-spike-20261103T184852Z"),
+        "rmor-late99-20": ("rmor-late99-20-s3x-0ed69560c749/20261104T004503Z", "spike/s3x-spike-20261103T184852Z"),
+        "rmor-ingest": ("rmor-ingest-s3x-71a422135f0b/20261104T013353Z", "spike/s3x-spike-20261103T184852Z"),
+        "rmor-ingest-rows": ("rmor-ingest-rows-s3x-b5a5d697c9f7/20261104T020133Z", "spike/s3x-spike-20261103T184852Z"),
+    },
+    "Azure Blob": {},  # running: added when its VM is done
+}
+
+
+def rr_earlier(store, config):
+    """The earlier cloud run (per-position check) of an rmor-* configuration's setting."""
+    return CS_RUNS[store]["sweep-" + config[len("rmor-"):]][0]
+
+
+def rr_times(runs=None):
+    """Per store and rmor-* configuration with a run in runs (RR_RUNS): each arm's mean write and
+    full read (RMoR's skipping, and without skipping) over MoR's in the same run (bp_over_mor; MoR's
+    own in column mor_v3_s), in this run (column build: "range check") and in the earlier run of
+    its setting ("per-position check"), which held every design."""
+    runs = RR_RUNS if runs is None else runs
+    frames = []
+    for store, by in runs.items():
+        if not by:
+            continue
+        for build, rs in [("range check", {c: r for c, (r, _) in by.items()}),
+                          ("per-position check", {c: rr_earlier(store, c) for c in by})]:
+            frames.append(bp_over_mor(bp_times(rs, key="config"), key="config")
+                          .assign(build=build, store=store))
+    return pd.concat(frames, ignore_index=True)
