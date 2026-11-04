@@ -194,6 +194,55 @@ class RmorTest {
         .isLessThan(sum(steps, "rmor-c", "read_full", "stock", "gets"));
   }
 
+  /**
+   * With their row groups kept whole ({@code rmor-c-kept}, {@code rmor-c-footer-kept}): a batch's
+   * new data file holds each rewritten row group as one row group of the same rows and the inserts
+   * apart, as RMoW-C's regions are, written a row group at a time. Both write the same data files;
+   * neither holds the batch's rows at once, as the mixed writer must to sort them; every read is
+   * checked by the runner.
+   */
+  @Test
+  void keptRowGroupsAreWrittenOneAtATime(@TempDir Path dir) throws IOException {
+    BenchConfig cfg = config(0);
+    cfg.layout.compactEvery = 0;
+    cfg.layout.tailSealBytes = 1; // every tail unit seals at once, as at the sweeps' settings
+    cfg.arms = List.of("rmor-c", "rmor-c-footer", "rmor-c-kept", "rmor-c-footer-kept", "rmow-c");
+    List<JsonNode> steps = run(cfg, dir);
+    Map<String, JsonNode> dv = of(steps, "rmor-c-kept");
+    Map<String, JsonNode> footer = of(steps, "rmor-c-footer-kept");
+    for (String k : dv.keySet()) {
+      if (k.endsWith(" write ")) {
+        assertThat(footer.get(k).get("bytes_written").asLong()).as(k + " bytes_written")
+            .isEqualTo(dv.get(k).get("bytes_written").asLong());
+      }
+    }
+    for (String arm : List.of("rmor-c-kept", "rmor-c-footer-kept")) {
+      assertThat(max(steps, arm, "batch", "held_rows"))
+          .as(arm + ": rows held at once")
+          .isLessThan(max(steps, "rmor-c", "batch", "held_rows"))
+          .isLessThanOrEqualTo(max(steps, "rmow-c", "batch", "held_rows"));
+    }
+  }
+
+  @Test
+  void keptRowGroupsNeedEveryChangedRegionRewritten(@TempDir Path dir) {
+    BenchConfig cfg = config(0.5);
+    cfg.arms = List.of("rmor-c-kept");
+    assertThatThrownBy(() -> new Runner(cfg, dir, "t").run())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("rmorRewriteShare 0");
+  }
+
+  private static long max(List<JsonNode> steps, String arm, String phase, String f) {
+    long m = 0;
+    for (JsonNode r : steps) {
+      if (r.get("arm").asText().equals(arm) && r.get("phase").asText().equals(phase)) {
+        m = Math.max(m, r.path(f).asLong());
+      }
+    }
+    return m;
+  }
+
   /** A row group's removal moves its file's later rows up, so a DV would go stale: θ must be 0. */
   @Test
   void footersNeedEveryChangedRegionRewritten(@TempDir Path dir) {

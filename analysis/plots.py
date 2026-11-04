@@ -41,6 +41,8 @@ ARMS = {  # arm -> (family, marker, label)
     "tailcow-c": ("cow", "^", "TailCoW-C"),
     "rmor-c": ("rmor", "^", "RMoR-C"),
     "rmor-c-footer": ("rmor", "s", "RMoR-C footer"),
+    "rmor-c-kept": ("rmor", "D", "RMoR-C kept"),
+    "rmor-c-footer-kept": ("rmor", "P", "RMoR-C footer kept"),
     "rmow-a": ("rmow", "o", "RMoW-A"),
     "rmow-b": ("rmow", "s", "RMoW-B"),
     "rmow-c": ("rmow", "^", "RMoW-C"),

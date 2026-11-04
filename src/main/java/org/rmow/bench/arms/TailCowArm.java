@@ -1,10 +1,12 @@
 package org.rmow.bench.arms;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -16,11 +18,13 @@ import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.data.Record;
 import org.apache.iceberg.io.InputFile;
+import org.apache.iceberg.io.PositionOutputStream;
 import org.apache.parquet.format.FileMetaData;
 import org.apache.parquet.format.RowGroup;
 import org.rmow.bench.io.Held;
 import org.rmow.bench.io.MemFileIO;
 import org.rmow.bench.rmow.FooterCodec;
+import org.rmow.bench.rmow.RegionWriter;
 import org.rmow.bench.rmow.RmowFile;
 import org.rmow.bench.workload.OpLog;
 import org.rmow.bench.workload.Rows;
@@ -61,20 +65,51 @@ import org.rmow.bench.workload.Rows;
  * offsets and metrics, as RMoW's do. Rows after an elided row group move up in their file, so a DV
  * on its other rows would go stale; θ must be 0, which rewrites every region a batch changes and
  * so leaves no DV.
+ *
+ * <p>The batch's new data file mixes its rows: the rewritten row groups' rows and the inserts are
+ * sorted together by event time and cut into new row groups, so a row group's rows do not stay
+ * together, and late inserts land among old regions' rows. With {@code keep} ({@code rmor-c-kept},
+ * {@code rmor-c-footer-kept}; θ must be 0) the file is laid out as RMoW-C lays out its regions:
+ * each rewritten row group is one row group of the same rows with the batch's changes, sorted by
+ * event time within itself, and the inserts (with the open tail files the policy merges) follow
+ * as a row group of their own. It is written a row group at a time, as parts of the batch's
+ * merge-read and write: a row group is read, rewritten, encoded and its rows dropped before the
+ * next is read. RMoR-C's file streams to the store as it is encoded; with footers, the file is
+ * held to its single create, as before.
  */
 public final class TailCowArm extends MorArm {
 
   /**
    * A region a batch rewrites: rows {@code [first, first + rows)} of data file {@code k}, the whole
-   * file ({@code whole}, an open tail file) or one row group, of which the batch changes {@code
-   * changed}; and its live rows, read back, as {id, version}.
+   * file ({@code whole}, an open tail file) or one row group at {@code [start, start + length)}
+   * (start -1: the file's one row group), of which the batch changes {@code changed}; its live rows
+   * ({@code liveRows}; -1 until read) and, while held, the rows themselves, as {id, version}.
    */
   private record Rewrite(
-      int k, boolean whole, long first, long rows, int changed, List<long[]> live) {}
+      int k,
+      boolean whole,
+      long first,
+      long rows,
+      int changed,
+      long start,
+      long length,
+      int liveRows,
+      List<long[]> live) {
+    Rewrite read(List<long[]> rows) {
+      return new Rewrite(k, whole, first, this.rows, changed, start, length, rows.size(), rows);
+    }
+
+    /** The same rewrite once its rows are written and dropped. */
+    Rewrite dropped() {
+      return new Rewrite(k, whole, first, rows, changed, start, length, liveRows, null);
+    }
+  }
 
   private final TailPolicy policy;
   private final double rewriteShare; // above 1: regions are never rewritten (TailCoW)
   private final boolean elide; // hide a rewritten row group with a new footer, not a DV
+  private final boolean keep; // a rewritten row group stays one row group; inserts apart
+  private final RegionWriter regions; // with keep: encodes one row group at a time
   // with elide: each data file's ids by position, and the last footer appended to it, serialized
   private final Map<Integer, long[]> idsOf = new HashMap<>();
   private final Map<Integer, FileMetaData> appended = new HashMap<>();
@@ -96,15 +131,31 @@ public final class TailCowArm extends MorArm {
 
   /** @param elide hide a rewritten row group with a footer appended to its file (θ must be 0) */
   public TailCowArm(ArmContext ctx, TailPolicy.Kind kind, double rewriteShare, boolean elide) {
+    this(ctx, kind, rewriteShare, elide, false);
+  }
+
+  /**
+   * @param keep write each rewritten row group as one row group of its own, and the inserts apart
+   *     (θ must be 0)
+   */
+  public TailCowArm(
+      ArmContext ctx, TailPolicy.Kind kind, double rewriteShare, boolean elide, boolean keep) {
     super(ctx);
     if (elide && rewriteShare != 0) {
       throw new IllegalArgumentException(
           "RMoR-C with footers rewrites every region it changes (rmorRewriteShare 0), not "
               + rewriteShare);
     }
+    if (keep && rewriteShare != 0) {
+      throw new IllegalArgumentException(
+          "RMoR-C with its row groups kept rewrites every region it changes (rmorRewriteShare 0),"
+              + " not " + rewriteShare);
+    }
     this.policy = new TailPolicy(kind, ctx.layout().tailSealBytes, ctx.layout().tierFanout);
     this.rewriteShare = rewriteShare;
     this.elide = elide;
+    this.keep = keep;
+    this.regions = keep ? new RegionWriter(Rows.SCHEMA, ctx.layout().writerProperties()) : null;
   }
 
   @Override
@@ -196,6 +247,41 @@ public final class TailCowArm extends MorArm {
       Map<Integer, List<Integer>> dvPositions,
       Map<Long, Integer> versions)
       throws IOException {
+    List<Rewrite> rewrites =
+        keep
+            ? writeKept(b, seq, plan, merge, replaced, dvPositions, versions)
+            : writeMixed(b, seq, plan, merge, replaced, dvPositions, versions);
+    if (elide) {
+      Map<Integer, List<Rewrite>> sealed = sealedRewrites(rewrites, dvPositions);
+      if (!sealed.isEmpty()) {
+        ctx.phases().run("delete-write", () -> elide(sealed));
+      }
+      endBatch();
+      return;
+    }
+    if (regional()) {
+      deadAfter(rewrites, dvPositions);
+    }
+    if (!dvPositions.isEmpty()) {
+      ctx.phases().run("delete-write", () -> writeDVs(b.index(), seq, dvPositions));
+    }
+    endBatch();
+  }
+
+  /**
+   * The batch's new data file with its rows mixed: the inserts, the merged tail files' rows and the
+   * rewritten row groups' rows, sorted together and cut into row groups by the Parquet writer.
+   * Returns the regions it rewrote.
+   */
+  private List<Rewrite> writeMixed(
+      OpLog.Batch b,
+      long seq,
+      TailPolicy.Plan plan,
+      Set<Integer> merge,
+      Set<Long> replaced,
+      Map<Integer, List<Integer>> dvPositions,
+      Map<Long, Integer> versions)
+      throws IOException {
     Map<Integer, List<long[]>> mergedRows = new HashMap<>();
     List<Rewrite> rewrites = new ArrayList<>();
     boolean planRegions = regional() && !dvPositions.isEmpty();
@@ -208,7 +294,7 @@ public final class TailCowArm extends MorArm {
                   mergedRows.put(k, readLive(k));
                 }
                 if (planRegions) {
-                  rewrites.addAll(rewrites(dvPositions));
+                  rewrites.addAll(rewrites(dvPositions, true));
                 }
               });
     }
@@ -253,21 +339,181 @@ public final class TailCowArm extends MorArm {
               rewriteOpen(b, rewrites, versions, seq);
               rowsHeld.close(); // the batch's files are written
             });
-    if (elide) {
-      Map<Integer, List<Rewrite>> sealed = sealedRewrites(rewrites, dvPositions);
-      if (!sealed.isEmpty()) {
-        ctx.phases().run("delete-write", () -> elide(sealed));
+    return rewrites;
+  }
+
+  /**
+   * With keep: the batch's new data file, a row group at a time, as RMoW-C writes its regions. The
+   * regions to rewrite are planned from footers, with the merged tail files and the open files
+   * rewritten whole read back; then each rewritten row group is read, rewritten as one row group of
+   * the same rows and encoded, and its rows dropped, before the next is read (parts of merge-read
+   * and write). The inserts, with the merged files' rows, follow as a row group of their own.
+   * Returns the regions it rewrote, their rows dropped.
+   */
+  private List<Rewrite> writeKept(
+      OpLog.Batch b,
+      long seq,
+      TailPolicy.Plan plan,
+      Set<Integer> merge,
+      Set<Long> replaced,
+      Map<Integer, List<Integer>> dvPositions,
+      Map<Long, Integer> versions)
+      throws IOException {
+    Map<Integer, List<long[]>> mergedRows = new HashMap<>();
+    List<Rewrite> rewrites = new ArrayList<>();
+    boolean planRegions = !dvPositions.isEmpty();
+    if (!merge.isEmpty() || planRegions) {
+      ctx.phases()
+          .part(
+              "merge-read",
+              () -> {
+                for (int k : merge) {
+                  mergedRows.put(k, readLive(k));
+                }
+                if (planRegions) {
+                  rewrites.addAll(rewrites(dvPositions, false));
+                }
+              });
+    }
+    KeptFile out = new KeptFile(batchName(b));
+    for (int i = 0; i < rewrites.size(); i++) {
+      if (rewrites.get(i).whole()) {
+        continue; // an open tail file, read back whole and written as its own file
       }
-      endBatch();
-      return;
+      int at = i;
+      ctx.phases()
+          .part(
+              "merge-read",
+              () -> {
+                Rewrite r = rewrites.get(at);
+                List<long[]> live =
+                    r.start() < 0
+                        ? readLive(r.k())
+                        : readLive(r.k(), held(r.k()), tailOf(r.k()), r.start(), r.length());
+                rewrites.set(at, r.read(live));
+              });
+      ctx.phases()
+          .part(
+              "write",
+              () -> {
+                Rewrite r = rewrites.get(at);
+                out.add(changed(r.live(), versions));
+                rowsHeld.release(
+                    Held.Kind.ROWS, r.liveRows(), "a row group of " + out.name + " encoded");
+                rewrites.set(at, r.dropped());
+              });
     }
-    if (regional()) {
-      deadAfter(rewrites, dvPositions);
+    ctx.phases()
+        .part(
+            "write",
+            () -> {
+              // the inserts, and the new versions of the merged files' rows; at θ = 0 every other
+              // changed row is in a rewritten region
+              List<long[]> rows = batchRows(b);
+              rows.removeIf(r -> versions.containsKey(r[0]) && !replaced.contains(r[0]));
+              rowsHeld.hold(Held.Kind.ROWS, rows.size(), "the batch's inserts to sort");
+              for (List<long[]> rs : mergedRows.values()) {
+                for (long[] r : rs) {
+                  if (!replaced.contains(r[0])) {
+                    rows.add(r);
+                  }
+                }
+              }
+              out.add(rows);
+              int k = out.finish(seq);
+              for (int m : merge) {
+                retire(m);
+              }
+              if (k >= 0 && b.insertIds().length > 0) {
+                long bytes = files.get(k).fileSizeInBytes();
+                bytesPerRow = bytes / (double) out.rows();
+                policy.commit(plan, k, bytes);
+              }
+              rewriteOpen(b, rewrites, versions, seq);
+              rowsHeld.close(); // the batch's files are written
+            });
+    return rewrites;
+  }
+
+  /**
+   * With keep: a batch's new data file, written a row group at a time. Without footers it streams
+   * to the store as each row group is encoded; with footers each row group is held for the file's
+   * single create, as {@link MorArm#writeDataFile} holds a file it creates.
+   */
+  private final class KeptFile {
+    final String name;
+    final String location;
+    final List<FileMetaData> rowGroups = new ArrayList<>();
+    final List<RegionWriter.Region> waiting = new ArrayList<>(); // with footers: for the create
+    final Held.Scope pending;
+    long[] ids = new long[1 << 16];
+    int n = 0;
+    long base = 0;
+    PositionOutputStream stream; // without footers: opened with the first row group
+
+    KeptFile(String name) {
+      this.name = name;
+      this.location = String.format("%s/data/%s.parquet", ctx.root(), name);
+      this.pending = Held.scope("created " + name);
     }
-    if (!dvPositions.isEmpty()) {
-      ctx.phases().run("delete-write", () -> writeDVs(b.index(), seq, dvPositions));
+
+    long rows() {
+      return n;
     }
-    endBatch();
+
+    /** Encodes {@code rows} ({id, version}) as the file's next row group, sorted by event time. */
+    void add(List<long[]> rows) throws IOException {
+      if (rows.isEmpty()) {
+        return;
+      }
+      if (ctx.layout().sortWrites) {
+        OpLog log = ctx.log();
+        rows.sort(Comparator.comparingLong((long[] r) -> log.ts(r[0])).thenComparingLong(r -> r[0]));
+      }
+      RegionWriter.Region r = regions.write(location, base, new MadeRows(rows, ctx.log()));
+      if (n + rows.size() > ids.length) {
+        ids = Arrays.copyOf(ids, Math.max(ids.length * 2, n + rows.size()));
+      }
+      for (long[] row : rows) {
+        ids[n++] = row[0];
+      }
+      rowGroups.add(r.footer());
+      if (elide) {
+        pending.hold(Held.Kind.PENDING, r.bytes().length, "a row group of " + name + " to create");
+        waiting.add(r);
+      } else {
+        if (stream == null) {
+          stream = ctx.io().newOutputFile(location).create();
+        }
+        stream.write(r.bytes());
+      }
+      base = r.end();
+    }
+
+    /** Writes the footer and adds the file to the table; returns its index, or -1 if empty. */
+    int finish(long seq) throws IOException {
+      if (rowGroups.isEmpty()) {
+        pending.close();
+        return -1;
+      }
+      FileMetaData footer = FooterCodec.merge(null, Set.of(), rowGroups, 0, 0);
+      byte[] tail = FooterCodec.serialize(footer);
+      long length = base + tail.length;
+      if (elide) {
+        ByteArrayOutputStream all = new ByteArrayOutputStream((int) length);
+        for (RegionWriter.Region r : waiting) {
+          all.write(r.bytes());
+        }
+        all.write(tail);
+        ctx.io().create(location, all.toByteArray());
+        waiting.clear();
+      } else {
+        stream.write(tail);
+        stream.close();
+      }
+      pending.close();
+      return addFile(RmowFile.describe(location, length, footer), seq, Arrays.copyOf(ids, n));
+    }
   }
 
   /**
@@ -381,8 +627,12 @@ public final class TailCowArm extends MorArm {
    * The regions the batch rewrites, of the files outside its merge whose rows at {@code changed}
    * it updates or deletes, with their live rows read back: each open tail file whole, and each
    * sealed file's row groups, where the batch changes at least θ of the region's live rows.
+   *
+   * @param readSealed whether to read the sealed files' row groups back now; if not, they are
+   *     planned from footers alone, to be read one at a time
    */
-  private List<Rewrite> rewrites(Map<Integer, List<Integer>> changed) throws IOException {
+  private List<Rewrite> rewrites(Map<Integer, List<Integer>> changed, boolean readSealed)
+      throws IOException {
     List<Rewrite> out = new ArrayList<>();
     for (int k : new TreeSet<>(changed.keySet())) {
       List<Integer> positions = changed.get(k);
@@ -391,7 +641,10 @@ public final class TailCowArm extends MorArm {
       if (policy.isOpen(k)) {
         long liveRows = df.recordCount() - gone.cardinality();
         if (positions.size() >= rewriteShare * liveRows) {
-          out.add(new Rewrite(k, true, 0, df.recordCount(), positions.size(), readLive(k)));
+          List<long[]> live = readLive(k);
+          out.add(
+              new Rewrite(
+                  k, true, 0, df.recordCount(), positions.size(), -1, -1, live.size(), live));
         }
         continue;
       }
@@ -408,9 +661,13 @@ public final class TailCowArm extends MorArm {
         if (touched == 0 || touched < rewriteShare * liveRows) {
           continue;
         }
+        if (!readSealed) {
+          out.add(new Rewrite(k, false, first, rows, touched, g[2], g[3], -1, null));
+          continue;
+        }
         List<long[]> live =
             g[2] < 0 ? readLive(k) : readLive(k, held(k), tailOf(k), g[2], g[3]);
-        out.add(new Rewrite(k, false, first, rows, touched, live));
+        out.add(new Rewrite(k, false, first, rows, touched, g[2], g[3], live.size(), live));
       }
     }
     return out;
@@ -509,7 +766,7 @@ public final class TailCowArm extends MorArm {
         ps.add((int) p);
       }
       // the row group's live rows the batch did not change are gone from it too
-      for (int i = r.changed(); i < r.live().size(); i++) {
+      for (int i = r.changed(); i < r.liveRows(); i++) {
         removed(r.k());
       }
     }

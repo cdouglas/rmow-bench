@@ -10,6 +10,8 @@ SELECT * FROM (VALUES
     (6, 'tailcow-c', 'cow', 'triangle-up', 'TailCoW-C', true),
     (10, 'rmor-c', 'rmor', 'triangle-up', 'RMoR-C', true),
     (11, 'rmor-c-footer', 'rmor', 'square', 'RMoR-C footer', true),
+    (16, 'rmor-c-kept', 'rmor', 'diamond', 'RMoR-C kept', false),
+    (17, 'rmor-c-footer-kept', 'rmor', 'cross', 'RMoR-C footer kept', false),
     (7, 'rmow-a', 'rmow', 'circle', 'RMoW-A', false),
     (8, 'rmow-b', 'rmow', 'square', 'RMoW-B', true),
     (9, 'rmow-c', 'rmow', 'triangle-up', 'RMoW-C', true),

@@ -1,0 +1,11 @@
+{
+  "description": "RMoR and RMoW-external with their row groups kept whole (docs/HYPOTHESES.md, 2026-11-04, W1-W3): the base point, insert lateness with a p99 of 1 and 20 writes, and the ingest window, each with MoR, RMoR and RMoW-external as built and kept, and RMoW-append; payload checks off, requests and held memory logged.",
+  "flags": ["--log-requests", "--log-held"],
+  "cores_per_job": 10,
+  "jobs": [
+    {"config": "configs/kept-base.json", "heap": "16g", "store_gib": 40},
+    {"config": "configs/kept-late99-1.json", "heap": "16g", "store_gib": 40},
+    {"config": "configs/kept-late99-20.json", "heap": "16g", "store_gib": 40},
+    {"config": "configs/kept-ingest.json", "heap": "16g", "store_gib": 30}
+  ]
+}

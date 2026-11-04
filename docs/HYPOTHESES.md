@@ -833,3 +833,19 @@ log, give each write's bytes read back exactly. The replay is not kept in `resul
   inserts last, instead of by event time. That is not tested.
 - **Late inserts:** a write could also keep its very late inserts in a small row group of their
   own, which would keep the sorted read cheap in all three designs. That is not tested either.
+
+## Row groups kept whole: where the runs go (registered 2026-11-04)
+
+The four runs of W1–W3 go on havoc, as campaign `kept` (`docker/campaigns/kept.json`), not the
+laptop, from the commit that registers this note: the arms are built there, and each run's
+manifest names its image. The runs keep everything else of the setup. havoc counts no
+instructions (`kernel.perf_event_paranoid` is 4), so its runs decide W1 and W3, which are exact
+on any host (bytes, and held memory on one thread). W2 needs the counts: it is decided by runs of
+the same four configurations with counters, on havoc if its setting is lowered to 2, or else on
+the laptop. Their requests and bytes must equal havoc's in every record, as a control.
+
+The kept arms are written a row group at a time, as RMoW-append is: a row group is read back,
+rewritten, encoded and its rows dropped before the next is read, and the inserts come last.
+RMoR's file streams to the store as it is encoded. RMoW-external's is held for its single create,
+as now. Measured, not judged: the rows their writes hold at once against RMoR's and
+RMoW-external's as built, which hold every row of a write's file to sort it (M4).
