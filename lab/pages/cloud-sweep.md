@@ -217,14 +217,19 @@ against its deletion vector by asking about the row group's whole range, where t
 tested each row position in turn and spent up to seconds of each write and read on it
 ([RMoR re-measured](./rmor-rerun.md)). RMoR's ratios are over the MoR of its own run.
 
+(writing-against-reading)=
 ## 1. Writing against reading
 
-Each design's mean write latency against its mean read latency at every setting (RMoR's from its
-own runs): a row per axis with the base point in each, on log scales that every panel and both stores share. The horizontal
-whisker runs from the 10th to the 90th percentile of the design's 30 writes. The vertical one runs
-from its full read after 5 writes to its full read after 30. Each setting ran once, and with no
-compaction a full read slows as updates pile up, so the vertical whisker shows the table aging,
-not noise.
+Each design's mean write latency and mean read latency at every setting, a row per setting (RMoR's
+from its own runs), and how many full reads per write repay a region design's write against MoR's:
+its extra time per write over the time it saves per full read, or never where it saves none
+([4. When a write pays for itself](#when-a-write-pays) has the numbers). Read a row
+across: a region design writes slower than MoR (left) and mostly reads faster (middle), and the
+right panel says how often the table must be read in full, per write, to make up for it. On a write
+the whisker runs from the 10th to the 90th percentile of the design's 30 writes. On a read it runs
+from the full read after 5 writes to the one after 30: each setting ran once, and with no compaction
+a full read slows as updates pile up, so it shows the table aging, not noise. Each panel's scale
+fits its store's values.
 
 ```{code-cell} ipython3
 :label: cloud-sweep-tradeoff-s3x
@@ -232,7 +237,9 @@ not noise.
 :class: col-page-right
 
 color, shape = fig.design_encoding()
-fig.cs_tradeoff_chart(trade, S3X, color, shape).configure_legend(orient="bottom", symbolOpacity=1)
+be_frame = BE.rename("reads").reset_index()
+fig.cs_tradeoff_panels(trade, be_frame, S3X, color, shape).configure_legend(orient="bottom",
+                                                                            symbolOpacity=1)
 ```
 
 ```{code-cell} ipython3
@@ -240,7 +247,8 @@ fig.cs_tradeoff_chart(trade, S3X, color, shape).configure_legend(orient="bottom"
 :tags: [remove-input]
 :class: col-page-right
 
-fig.cs_tradeoff_chart(trade, AZ, color, shape).configure_legend(orient="bottom", symbolOpacity=1)
+fig.cs_tradeoff_panels(trade, be_frame, AZ, color, shape).configure_legend(orient="bottom",
+                                                                           symbolOpacity=1)
 ```
 
 ```{code-cell} ipython3
@@ -528,10 +536,12 @@ parts_table(READ)
   settings and stores, RMoR's included, whose reader checks each row group against its deletion
   vector.
 
+(when-a-write-pays)=
 ## 4. When a write pays for itself
 
 How many full reads per write repay a design's write against MoR's: its extra time per write over
-the time it saves per full read ("never" where it saves none).
+the time it saves per full read ("never" where it saves none), as the right panels of
+[1. Writing against reading](#writing-against-reading) draw it.
 
 ```{code-cell} ipython3
 :tags: [remove-input]

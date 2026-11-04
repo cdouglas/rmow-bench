@@ -1078,22 +1078,6 @@ def cs_axes(df):
     return df.merge(pts, on="config")
 
 
-# The settings as a grid: a row per axis and one for the workloads, each a panel per configuration
-# (the base point in every row), with the panel's title
-CS_GRID = [
-    ("update share", [("sweep-base", "p = 0.03 (base point)"), ("sweep-p10", "p = 0.1"),
-                      ("sweep-p30", "p = 0.3")]),
-    ("region skew", [("sweep-s0", "skew 0"), ("sweep-base", "skew 1 (base point)"),
-                     ("sweep-s2", "skew 2")]),
-    ("row group", [("sweep-base", "16 MiB (base point)"), ("sweep-rg32m", "32 MiB"),
-                   ("sweep-rg64m", "64 MiB")]),
-    ("lateness of inserts", [("sweep-late99-1", "p99 1 write"),
-                             ("sweep-base", "p99 5 writes (base point)"),
-                             ("sweep-late99-20", "p99 20 writes")]),
-    ("workload", [("sweep-base", "region statements (base point)"),
-                  ("sweep-ingest", "ingest window, statements"),
-                  ("sweep-ingest-rows", "ingest window, a row a change")]),
-]
 # Each configuration's setting, named on its own (CS_CONFIGS' order)
 CS_SETTING = {"sweep-base": "base point", "sweep-p10": "update share 0.1",
               "sweep-p30": "update share 0.3", "sweep-s0": "region skew 0",
@@ -1258,30 +1242,60 @@ def _log_axis(domain, ticks=(0.5, 1, 2, 5, 10, 20, 50, 100, 200)):
             alt.Axis(values=[t for t in ticks if domain[0] <= t <= domain[1]], format="~g"))
 
 
-def cs_tradeoff_chart(pts, store, color, shape, write_domain=(0.5, 64), read_domain=(5, 64)):
-    """tradeoff(cs_frame(bp_spread))'s points for one store on CS_GRID (a row per axis, a panel per
-    setting): each design at its mean write and mean full read, with a whisker from its writes'
-    10th to 90th percentile and one from its full read after 5 writes to its full read after 30;
-    log scales, the same domains in every panel (pass the same to both stores' charts)."""
-    xs, xa = _log_axis(list(write_domain))
-    ys, ya = _log_axis(list(read_domain))
-    d0 = pts[pts.store == store]
-    rows = []
-    for r, (axis, panels) in enumerate(CS_GRID):
-        cols = []
-        for c, (config, title) in enumerate(panels):
-            xt = "write latency (s)" if r == len(CS_GRID) - 1 else None
-            yt = "read latency (s)" if c == 0 else None
-            layers = _tradeoff_layers(
-                d0[d0.config == config],
-                alt.X("write_s:Q", title=xt, scale=xs, axis=xa),
-                alt.Y("read_s:Q", title=yt, scale=ys, axis=ya),
-                alt.X("write_p10:Q", title=xt, scale=xs, axis=xa),
-                alt.Y("read_first:Q", title=yt, scale=ys, axis=ya),
-                color, shape, ["setting", "design", *TRADEOFF_TOOLTIP])
-            cols.append(alt.layer(*layers).properties(width=190, height=150, title=title))
-        rows.append(alt.hconcat(*cols, title=alt.Title(axis, anchor="start", fontSize=13)))
-    return alt.vconcat(*rows, title=alt.Title(store, anchor="start", fontSize=15))
+def cs_tradeoff_panels(pts, be, store, color, shape, width=200, row=30):
+    """One store's trade-off at every setting, in three panels on one row per setting (CS_SETTINGS,
+    the designs side by side within it): each design's mean write (s), with a whisker from its
+    writes' 10th to 90th percentile; its mean full read (s), with one from its full read after 5
+    writes to the one after 30; and the full reads per write that repay each region design's write
+    against MoR's (be: BE's frame, `reads` per store, config and design, infinite where its read
+    saves nothing, drawn as "never" at the panel's right). pts: tradeoff(cs_frame(bp_spread)). Each
+    panel's scale fits this store's values."""
+    d = pts[pts.store == store].assign(setting=lambda x: x.config.map(CS_SETTING))
+    b = be[be.store == store].assign(setting=lambda x: x.config.map(CS_SETTING))
+    height = row * len(CS_SETTINGS)
+    y = alt.Y("setting:N", title=None, sort=CS_SETTINGS, axis=alt.Axis(labelLimit=220))
+    y_bare = alt.Y("setting:N", title=None, sort=CS_SETTINGS, axis=None)
+    yo = alt.YOffset("design:N", sort=MAIN, scale=alt.Scale(domain=MAIN, paddingOuter=0.6))
+    # every other setting's row shaded, so a row reads across the three panels
+    shade = alt.Chart(pd.DataFrame({"setting": CS_SETTINGS[1::2]})).mark_rect(
+        color="#eef0f2").encode(x=alt.value(0), x2=alt.value(width))
+
+    def log_scale(lo, hi):
+        lo = 2 ** np.floor(np.log2(lo * 0.9))
+        hi = 2 ** np.ceil(np.log2(hi * 1.1))
+        return _log_axis([lo, hi], ticks=(0.5, 1, 2, 4, 8, 16, 32, 64, 128))
+
+    def panel(data, mean, lo, hi, title, x_title, scale, axis, ytick, tooltip, extra=()):
+        x = alt.X(f"{mean}:Q", title=x_title, scale=scale, axis=axis)
+        base = alt.Chart(data).encode(y=ytick, yOffset=yo, color=color)
+        layers = [shade.encode(y=ytick)]
+        if lo:
+            layers.append(base.mark_rule(strokeWidth=1.5, opacity=0.55).encode(
+                x=alt.X(f"{lo}:Q", scale=scale), x2=f"{hi}:Q"))
+        layers.append(base.mark_point(filled=True, size=45, opacity=1, stroke="white",
+                                      strokeWidth=0.6).encode(x=x, shape=shape, tooltip=tooltip))
+        return alt.layer(*layers, *extra).properties(
+            width=width, height=height, title=alt.Title(title, anchor="start", fontSize=12))
+
+    ws, wa = log_scale(d.write_p10.min(), d.write_p90.max())
+    lo, hi = d.read_first.min(), d.read_last.max()
+    pad = 0.05 * (hi - lo)
+    rs = alt.Scale(domain=[np.floor(lo - pad), np.ceil(hi + pad)], nice=False, zero=False)
+    finite = b[np.isfinite(b.reads)]
+    bs, ba = log_scale(finite.reads.min(), finite.reads.max())
+    never = b[~np.isfinite(b.reads)].assign(x=bs.domain[1])
+    tip = ["setting", "design"]
+    write = panel(d, "write_s", "write_p10", "write_p90", "Write latency", "seconds (log scale)",
+                  ws, wa, y, tip + TRADEOFF_TOOLTIP[:3])
+    read = panel(d, "read_s", "read_first", "read_last", "Read latency", "seconds", rs,
+                 alt.Axis(), y_bare, tip + TRADEOFF_TOOLTIP[3:])
+    never_text = alt.Chart(never).mark_text(text="never", align="right", dx=-2, fontSize=10).encode(
+        x=alt.X("x:Q", scale=bs), y=y_bare, yOffset=yo, color=color, tooltip=tip)
+    pays = panel(finite, "reads", None, None, "Full reads per write that repay it",
+                 "against MoR (log scale)", bs, ba, y_bare,
+                 tip + [alt.Tooltip("reads:Q", format=".1f")], extra=[never_text])
+    return alt.hconcat(write, read, pays, spacing=14,
+                       title=alt.Title(store, anchor="start", fontSize=15))
 
 
 def parts_chart(parts, what, rows=None, row_sort=None, width=220):
