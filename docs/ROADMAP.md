@@ -291,7 +291,7 @@ reads.
     index answering only per position) whether the whole range is deleted: 0.2 ms a file of 16
     row groups, half of them dead, against 54 ms. It decides the same row groups
     (`DeletedRangesTest`), so no request or byte changes.
-  - [ ] **RMoR re-measured with it:** every cloud run of RMoR (the base point and the sweeps, on
+  - [x] **RMoR re-measured with it** (done 2026-11-04)**:** every cloud run of RMoR (the base point and the sweeps, on
     both stores) charged it the per-position check; the results pages call RMoR's latencies an
     upper bound until it runs again. Registered 2026-11-02 (docs/HYPOTHESES.md, RMoR with the
     check by range, in the cloud; R1–R3): `configs/rmor-*.json`, MoR and RMoR alone at each of
@@ -300,8 +300,9 @@ reads.
     R2 is contradicted on S3 Express at p = 0.1 and a skew of 2, where RMoR's skipping read is
     0.91–0.92 of MoR's, not below 0.90 (0.88–0.89 at the other eight settings; the check cost less
     than predicted), and on Azure Blob at p = 0.1 (1.09, not above 1.1), where the time the read
-    waits on the store fell 1.2 s from the earlier run. Left: the results pages take RMoR's times
-    from these runs.
+    waits on the store fell 1.2 s from the earlier run. The results pages (base-point,
+    cloud-sweep) take RMoR's times from these runs, each over the MoR of its own run; the model's
+    pages keep the earlier runs they price.
 
 ## Workload generator
 

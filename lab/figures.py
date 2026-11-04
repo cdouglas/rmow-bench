@@ -1172,12 +1172,23 @@ def _part_order(d):
     return d.assign(part_ord=d.part.map(TIME_PARTS.index))
 
 
-def over_mor(df, keys):
+def over_mor(df, keys, own=None):
     """designs(df) without MoR, with `mor_s`, MoR's mean time `s` in the same `keys` and kind of
-    phase, and `over_mor`, the design's over it."""
+    phase, and `over_mor`, the design's over it. With `own`, designs() of the frame RMoR's rows
+    came from (rmor_spliced), RMoR's (with and without skipping) are over that frame's MoR: the MoR
+    of its own run."""
     keys = list(keys) + ["what"]
-    mor = df[df.design == "MoR"][keys + ["s"]].rename(columns={"s": "mor_s"})
-    d = df[df.design != "MoR"].merge(mor, on=keys)
+
+    def mor(f):
+        return f[f.design == "MoR"][keys + ["s"]].rename(columns={"s": "mor_s"})
+
+    d = df[df.design != "MoR"]
+    if own is None:
+        d = d.merge(mor(df), on=keys)
+    else:
+        r = d.arm == "rmor-c"
+        d = pd.concat([d[~r].merge(mor(df), on=keys), d[r].merge(mor(own), on=keys)],
+                      ignore_index=True)
     d["over_mor"] = d.s / d.mor_s
     return d
 
@@ -1573,3 +1584,20 @@ def rr_times(runs=None):
             frames.append(bp_over_mor(bp_times(rs, key="config"), key="config")
                           .assign(build=build, store=store))
     return pd.concat(frames, ignore_index=True)
+
+
+# The results pages (base-point, cloud-sweep) take RMoR's times from its rerun with the check by
+# range, the other designs' from the runs pinned for them (BP_STORE_RUNS, CS_RUNS). The rerun holds
+# MoR and RMoR alone, and RMoR's ratios are over the MoR of its own run: the store drifts between
+# runs (docs/HYPOTHESES.md, 2026-11-02). The calibration pages keep the pinned runs whole, as they
+# price those runs.
+BP_RMOR_RUNS = {s: RR_RUNS[s]["rmor-base"][0] for s in BP_STORES}
+CS_RMOR_RUNS = {s: {"sweep-" + c[len("rmor-"):]: v for c, v in by.items()}
+                for s, by in RR_RUNS.items()}
+
+
+def rmor_spliced(main, rerun):
+    """main (a bp_* function's frame, or cs_frame's) with RMoR's rows (arm rmor-c, with and without
+    skipping) from rerun, the same function's frame over RMoR's runs."""
+    return pd.concat([main[main.arm != "rmor-c"], rerun[rerun.arm == "rmor-c"]],
+                     ignore_index=True)

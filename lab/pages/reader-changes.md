@@ -29,8 +29,9 @@ its old file under a deletion vector, and stock Iceberg fetches and decodes that
 drop every one of its rows. Our reader plans no split for a row group whose rows the file's
 deletion vector all covers, nor for a file whose vector covers every row, and RMoR's writers skip
 them the same way when they scan for the rows a write changes. Our check asks the vector's bitmap
-whether each row group's range is deleted whole, at the cost of a few of its containers, though
-the runs on the results pages predate it and tested each row position in turn (their Limits).
+whether each row group's range is deleted whole, at the cost of a few of its containers. The
+results pages take RMoR's times from runs with this check; earlier runs tested each row position in
+turn, which cost RMoR seconds of each write and read ([RMoR re-measured](./rmor-rerun.md)).
 
 **Delete files opened with their length.** Stock Iceberg's delete filter opens a delete file
 without the length the table records, so the store client asks the store for it: a HEAD per file

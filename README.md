@@ -591,6 +591,7 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
   hypotheses registered 2026-11-02 (R1–R3). RMoR's full read, skipping dead row groups, is now
   0.88–0.92 of MoR's on S3 Express and 0.96–1.31 on Azure Blob; its write still costs more than
   RMoW-append's, by ratio over MoR's, everywhere
-  ([lab/pages/rmor-rerun.md](lab/pages/rmor-rerun.md)).
+  ([lab/pages/rmor-rerun.md](lab/pages/rmor-rerun.md)). The results pages take RMoR's times from
+  these runs.
 - **Next:** decide what follows the sweeps (θ against p; GCS needs APPEND in the fork first).
   Split files can also run on standard S3.

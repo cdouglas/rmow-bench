@@ -195,7 +195,8 @@ az_bad_text = "; ".join(
 RMoR's times in the cloud now that its writers and its skipping reader check a row group against
 the file's deletion vector by range, not position by position (docs/HYPOTHESES.md, "RMoR with the
 check by range, in the cloud", 2026-11-02). Every earlier cloud run of RMoR checked each position,
-which is why the results pages call its times upper bounds.
+so the results pages called its times upper bounds; they now take them from these runs, each over
+the MoR of its own run.
 
 ## Setup
 

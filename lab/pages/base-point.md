@@ -16,21 +16,33 @@ theme()
 fig = figures_module()
 
 # The vectorized reader's runs on each store (figures.py, BP_STORE_RUNS), as an application reads
-# the table
+# the table; RMoR's from its own run on each store, with its check by range (BP_RMOR_RUNS)
 STORES = fig.BP_STORES
 RUNS = fig.BP_STORE_RUNS
+RMOR = fig.BP_RMOR_RUNS
 S3X, AZ = STORES
 KEYS = ["store"]
 MAIN, REGION = fig.MAIN, fig.REGION_DESIGNS
 WRITE, READ = fig.WRITE, fig.READ
 
+
+
+def spliced(fn, runs=RUNS, rmor=RMOR, **kw):
+    """fn over the pinned runs, with RMoR's rows from its own runs"""
+    return fig.rmor_spliced(fn(runs, key="store", **kw), fn(rmor, key="store", **kw))
+
+
 # each design's mean write and full read (s), and what it sent and moved; `every` has the
-# appendix's two variants too
-every = fig.designs(fig.bp_times(RUNS, key="store"), main=False)
+# appendix's two variants too. RMoR's are over the MoR of its own run (`own`)
+every = fig.designs(spliced(fig.bp_times), main=False)
 times = every[every.design.isin(MAIN)]
-over = fig.over_mor(times, KEYS)
+own = fig.designs(fig.bp_times(RMOR, key="store"))
+over = fig.over_mor(times, KEYS, own)
 T = times.set_index(["store", "design", "what"]).sort_index()
-O = over.set_index(["store", "design", "what"]).over_mor.sort_index()
+O = over.set_index(["store", "design", "what"]).sort_index()
+# MoR's time in RMoR's run over its time in the others'
+mor_drift = (own[own.design == "MoR"].set_index(["store", "what"]).s
+             / T.s.xs("MoR", level="design") - 1)
 
 
 def s(design, what=WRITE, store=S3X):
@@ -38,21 +50,41 @@ def s(design, what=WRITE, store=S3X):
 
 
 def o(design, what=WRITE, store=S3X):
-    return O[(store, design, what)]
+    return O.over_mor[(store, design, what)]
 
 
-# a design's extra time per write over the time it saves per full read, against MoR: how many full
-# reads per write repay its write
+# a design's extra time per write over the time it saves per full read, against the MoR of its run:
+# how many full reads per write repay its write (infinite where it saves none)
 def break_even(design, store=S3X):
-    return (s(design, store=store) - s("MoR", store=store)) / (
-        s("MoR", READ, store) - s(design, READ, store))
+    w, r = O.loc[(store, design, WRITE)], O.loc[(store, design, READ)]
+    saved = r.mor_s - r.s
+    return (w.s - w.mor_s) / saved if saved > 0 else float("inf")
+
+
+def repays(design, store):
+    b = break_even(design, store)
+    return "never" if b == float("inf") else f"past {b:.0f} full reads per write"
+
+
+def moved(d):
+    return f"{abs(d):.2f} s {'less' if d < 0 else 'more'}"
+
+
+# the time a full read waits on the store in RMoR's run against the others' run (Limits): MoR's and
+# RMoR's, the designs RMoR's run holds
+def waits(runs):
+    p = fig.designs(fig.bp_parts(runs, key="store", fine=True))
+    return p[(p.what == READ) & (p.part == "the store")].set_index(["store", "design"]).s
+
+
+wait_d = (waits(RMOR) - waits(RUNS)).dropna()
 
 
 # each design's writes and full reads over its run (1. Writing against reading)
-trade = fig.tradeoff(fig.bp_spread(RUNS, key="store"), KEYS)
+trade = fig.tradeoff(spliced(fig.bp_spread), KEYS)
 
 # where the time went (phase_breakdown), by part and by the write's steps
-parts = fig.designs(fig.bp_parts(RUNS, key="store", fine=True))
+parts = fig.designs(spliced(fig.bp_parts, fine=True))
 share = parts.pivot_table(index=["store", "design", "what"], columns="part", values="s")
 share = share.div(share.sum(axis=1), axis=0)["the store"]
 
@@ -64,22 +96,19 @@ def share_range(store, what, designs=MAIN):
 
 
 write_parts = parts[parts.what == WRITE].set_index(["store", "design", "part"]).s.sort_index()
-steps = fig.designs(fig.bp_steps(RUNS, key="store"))
+steps = fig.designs(spliced(fig.bp_steps))
 step_share = steps.groupby(["store", "design", "write_step"]).s.sum().unstack()
 step_share = step_share.div(step_share.sum(axis=1), axis=0)
-# rows and planning in each design's write, its locate scan and its read: in RMoR's, mostly its
-# check of each row group against its deletion vector (Limits)
+# rows and planning in each design's write, its locate scan and its read
 RP = "rows and planning"
 rp_write = parts[(parts.what == WRITE) & (parts.part == RP)].set_index(["store", "design"]).s
 rp_read = parts[(parts.what == READ) & (parts.part == RP)].set_index(["store", "design"]).s
-rp_locate = steps[(steps.write_step == "locate") & (steps.part == RP)].set_index(
-    ["store", "design"]).s
 
 # each design's latency at every write and full read of its run (Latency as snapshots are added)
-series = fig.designs(fig.bp_series(RUNS, key="store"))
+series = fig.designs(spliced(fig.bp_series))
 
 # what a table stores follows from the updates, the same on both stores (base-point-model)
-storage = fig.designs(fig.bp_storage({S3X: RUNS[S3X]}, key="store"))
+storage = fig.designs(spliced(fig.bp_storage, {S3X: RUNS[S3X]}, {S3X: RMOR[S3X]}))
 ST = storage.set_index("design")
 
 # Appendix B: RMoR read without skipping, against RMoR's read; TailCoW against MoR
@@ -104,9 +133,13 @@ Azure Blob, written and read with the Parquet code Spark uses for an Iceberg tab
   {eval}`f"{s('RMoW-external') / s('RMoW-append'):.1f}"` and
   {eval}`f"{s('RMoW-external', store=AZ) / s('RMoW-append', store=AZ):.1f}"` times as long as
   RMoW-append's.
-- **RMoR writes as slowly as RMoW-external, and reads no faster than MoR**
+- **RMoR writes almost as slowly as RMoW-external** (in
+  {eval}`f"{o('RMoR') / o('RMoW-external'):.2f}"` and
+  {eval}`f"{o('RMoR', store=AZ) / o('RMoW-external', store=AZ):.2f}"` of its time, by ratio over
+  MoR's), **and reads a little faster than MoR on S3 Express and slower on Azure**
   ({eval}`f"{o('RMoR', READ):.2f}"` and {eval}`f"{o('RMoR', READ, AZ):.2f}"` of MoR's full read),
-  so it never repays its write.
+  so it repays its write {eval}`repays('RMoR', S3X)` on S3 Express and
+  {eval}`repays('RMoR', AZ)` on Azure.
 
 ## The designs
 
@@ -133,6 +166,16 @@ every 5 writes.
   2026-10-31 (run {eval}`RUNS[S3X]`);
 - **Azure Blob:** one `Standard_D8as_v6` (AMD Zen 4, 8 vCPUs) beside an ADLS Gen2 account (Standard)
   in westus, on 2026-11-01 (run {eval}`RUNS[AZ]`).
+
+**RMoR's times are from runs of its own,** with MoR and RMoR alone, on a VM of the same type on
+each store on 2026-11-03 (runs {eval}`RMOR[S3X]` and {eval}`RMOR[AZ]`), at d30544a. That build
+changes one thing a run does: RMoR's writer and reader check a row group against its deletion
+vector by asking about the row group's whole range, where the runs above tested each row position
+in turn and spent seconds of each write and read on it ([RMoR re-measured](./rmor-rerun.md)).
+RMoR's ratios are over the MoR of its own run, whose write took
+{eval}`f"{mor_drift[(S3X, WRITE)]:+.1%}"` and full read {eval}`f"{mor_drift[(S3X, READ)]:+.1%}"`
+against MoR's here on S3 Express, and {eval}`f"{mor_drift[(AZ, WRITE)]:+.1%}"` and
+{eval}`f"{mor_drift[(AZ, READ)]:+.1%}"` on Azure.
 
 ## 1. Writing against reading
 
@@ -162,7 +205,7 @@ r = over.pivot_table(index=["store", "design"], columns="what", values="over_mor
 r.columns = [f"{w[2:]} over MoR's" for w in r.columns]
 table(t[["store", "design", *names]].rename(columns=names)
       .merge(r.reset_index(), on=["store", "design"], how="left").round(2),
-      caption="Seconds, and each design's mean over MoR's")
+      caption="Seconds, and each design's mean over MoR's (RMoR's over the MoR of its own run)")
 ```
 
 - **RMoW-append** takes {eval}`f"{s('RMoW-append'):.1f}"` s per write against MoR's
@@ -181,7 +224,7 @@ table(t[["store", "design", *names]].rename(columns=names)
   {eval}`f"{break_even('RMoW-external', AZ):.0f}"` full reads per write.
 - **RMoR** writes {eval}`f"{o('RMoR'):.1f}"` and {eval}`f"{o('RMoR', store=AZ):.1f}"` times as long
   as MoR, and reads in {eval}`f"{o('RMoR', READ):.2f}"` and {eval}`f"{o('RMoR', READ, AZ):.2f}"` of
-  its time. On Azure its reads are slower for a reason of the store's: its write files average
+  its time (each over the MoR of its own run). On Azure its reads are slower for a reason of the store's: its write files average
   418 MiB, and Iceberg's Azure writer uploads a file larger than 256 MiB in blocks of 4 MiB, from
   which a 16 MiB range reads at about 1.6 times the time it takes from a file written in one
   request ([the model's page](./base-point-model.md)).
@@ -296,8 +339,7 @@ table(w.reset_index().drop(columns="ord").round(2),
   {eval}`f"{rp_write[(S3X, 'RMoR')]:.1f}"` s of RMoR's, {eval}`f"{rp_write[(S3X, 'RMoW-external')]:.1f}"` s
   of RMoW-external's and {eval}`f"{rp_write[(S3X, 'RMoW-append')]:.1f}"` s of RMoW-append's on S3
   Express, against MoR's {eval}`f"{rp_write[(S3X, 'MoR')]:.2f}"` s. A region design makes and sorts
-  every row of every region it rewrites; RMoR's also includes its writer's check of each row group it
-  scans against its deletion vector (Limits).
+  every row of every region it rewrites.
 - **MoR's write is mostly finding the rows it changes:** its scan of the files that may hold them
   takes {eval}`f"{100 * step_share.locate[(S3X, 'MoR')]:.0f}"`% of its write on S3 Express and
   {eval}`f"{100 * step_share.locate[(AZ, 'MoR')]:.0f}"`% on Azure, where RMoW-append finds them in
@@ -327,10 +369,9 @@ parts_table(READ)
 ```
 
 A full read is mostly the store's: {eval}`share_range(S3X, READ)` of its time on S3
-Express and {eval}`share_range(AZ, READ)` on Azure, whatever the design. RMoR's read spends
-{eval}`f"{rp_read[(S3X, 'RMoR')]:.1f}"` s planning on S3 Express, the others' at most
-{eval}`f"{rp_read.drop('RMoR', level='design').max():.2f}"` s: our reader's check of each row group
-against its deletion vector (Limits).
+Express and {eval}`share_range(AZ, READ)` on Azure, whatever the design. Planning a read takes
+every design at most {eval}`f"{rp_read.max():.2f}"` s, RMoR's included, whose reader checks each
+row group against its deletion vector.
 
 ## 4. What each design sends and stores
 
@@ -371,12 +412,12 @@ three requests, an append past 100 MiB several, and a file past 256 MiB a block 
 - One kind of read: a single thread's full scan, through the changed reader
   ([Appendix A](./reader-changes.md)). Reads of a recent window, of old versions, and in parallel
   were measured too, and are not shown here.
-- In these runs RMoR's check of a row group against its deletion vector tested each row position
-  in turn. It cost RMoR's full read the planning time above, and its write some more in its locate
-  scan, where rows and planning take {eval}`f"{rp_locate[(S3X, 'RMoR')]:.1f}"` s on S3 Express
-  against MoR's {eval}`f"{rp_locate[(S3X, 'MoR')]:.2f}"` s. The check now asks the vector's bitmap
-  about each row group's whole range (since 2026-11-02), and these runs are yet to be repeated with
-  it, so RMoR's latencies here are an upper bound.
+- RMoR's times are from runs of their own, three days after the others' on S3 Express and two on
+  Azure (Setup), and are compared over the MoR of the same run. On Azure the time a full read waits on the store moves
+  from run to run: in RMoR's run its read waited {eval}`moved(wait_d[(AZ, 'RMoR')])` on the store
+  than in the others' run, and MoR's {eval}`moved(wait_d[(AZ, 'MoR')])`, where on S3 Express
+  neither moved by more than {eval}`f"{wait_d[S3X].abs().max():.3f}"` s. Every setting is in
+  [RMoR re-measured](./rmor-rerun.md).
 - No compaction: storage grows with every write, and the cost of reclaiming it is not counted.
 - Parquet is written by parquet-java, as Spark and Flink write it. Engines with Parquet code of
   their own (Trino, DuckDB, Photon) may encode and decode faster, which would move time from CPU
@@ -387,7 +428,7 @@ three requests, an append past 100 MiB several, and a file past 256 MiB a block 
 
 How well the latency model predicted these times, and the checks that each cloud run did exactly
 the work its laptop twin counts, are in [The model on the cloud base point](./base-point-model.md),
-which names the designs as the code does: MoR-v3 for MoR, RMoR-C for RMoR, RMoR-C footer for
+which prices the runs above, RMoR's with the check by position among them, and names the designs as the code does: MoR-v3 for MoR, RMoR-C for RMoR, RMoR-C footer for
 RMoW-external and RMoW-C for RMoW-append. Why every design reads through Iceberg's vectorized
 reader, and what that changed, is in [Row reader or vectorized reader](./vectorized-reader.md).
 
