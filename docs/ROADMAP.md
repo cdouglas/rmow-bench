@@ -296,10 +296,12 @@ reads.
     upper bound until it runs again. Registered 2026-11-02 (docs/HYPOTHESES.md, RMoR with the
     check by range, in the cloud; R1–R3): `configs/rmor-*.json`, MoR and RMoR alone at each of
     the sweeps' eleven settings, with the laptop's runs at 505ba07 as their reference (campaign
-    `rmor-rerun`). S3 Express done 2026-11-04: R1 and R3 held; R2 contradicted at p = 0.1 and a
-    skew of 2, where RMoR's skipping read is 0.91–0.92 of MoR's, not below 0.90 (0.88–0.89 at the
-    other eight settings); the check cost less than predicted (lab/pages/rmor-rerun.md). Azure
-    Blob is running. Then the results pages take RMoR's times from these runs.
+    `rmor-rerun`). Both stores done 2026-11-04 (lab/pages/rmor-rerun.md): R1 and R3 held on both.
+    R2 is contradicted on S3 Express at p = 0.1 and a skew of 2, where RMoR's skipping read is
+    0.91–0.92 of MoR's, not below 0.90 (0.88–0.89 at the other eight settings; the check cost less
+    than predicted), and on Azure Blob at p = 0.1 (1.09, not above 1.1), where the time the read
+    waits on the store fell 1.2 s from the earlier run. Left: the results pages take RMoR's times
+    from these runs.
 
 ## Workload generator
 

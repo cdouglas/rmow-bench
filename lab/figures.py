@@ -1537,7 +1537,19 @@ RR_RUNS = {
         "rmor-ingest": ("rmor-ingest-s3x-71a422135f0b/20261104T013353Z", "spike/s3x-spike-20261103T184852Z"),
         "rmor-ingest-rows": ("rmor-ingest-rows-s3x-b5a5d697c9f7/20261104T020133Z", "spike/s3x-spike-20261103T184852Z"),
     },
-    "Azure Blob": {},  # running: added when its VM is done
+    "Azure Blob": {
+        "rmor-base": ("rmor-base-azure-2f5561c3ee58/20261103T185700Z", "spike/azure-spike-20261103T185155Z"),
+        "rmor-p10": ("rmor-p10-azure-1f0113c0df89/20261103T201150Z", "spike/azure-spike-20261103T185155Z"),
+        "rmor-p30": ("rmor-p30-azure-6af3da9feb95/20261103T210822Z", "spike/azure-spike-20261103T185155Z"),
+        "rmor-s0": ("rmor-s0-azure-56d25433ddf3/20261103T214550Z", "spike/azure-spike-20261103T185155Z"),
+        "rmor-s2": ("rmor-s2-azure-3cd08b1c2b26/20261103T230919Z", "spike/azure-spike-20261103T185155Z"),
+        "rmor-rg32m": ("rmor-rg32m-azure-56b5aaeadedc/20261104T000611Z", "spike/azure-spike-20261103T185155Z"),
+        "rmor-rg64m": ("rmor-rg64m-azure-59549fe1fa6a/20261104T011845Z", "spike/azure-spike-20261103T185155Z"),
+        "rmor-late99-1": ("rmor-late99-1-azure-517b2471e7ba/20261104T023259Z", "spike/azure-spike-20261103T185155Z"),
+        "rmor-late99-20": ("rmor-late99-20-azure-ab2828f0c62f/20261104T033909Z", "spike/azure-spike-20261103T185155Z"),
+        "rmor-ingest": ("rmor-ingest-azure-4b9c3a9933e1/20261104T045328Z", "spike/azure-spike-20261103T185155Z"),
+        "rmor-ingest-rows": ("rmor-ingest-rows-azure-e391e5690a3e/20261104T053132Z", "spike/azure-spike-20261103T185155Z"),
+    },
 }
 
 

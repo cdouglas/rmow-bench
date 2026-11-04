@@ -17,14 +17,13 @@ fig = figures_module()
 
 RUNS, LAPTOP, PRED = fig.RR_RUNS, fig.RR_LAPTOP, fig.RR_PRED
 S3X, AZ = fig.CS_STORES
-STORES = [s for s in fig.CS_STORES if RUNS[s]]
-PENDING = [s for s in fig.CS_STORES if not RUNS[s]]
+STORES = fig.CS_STORES
 CONFIGS = fig.RR_CONFIGS
 VARIES = {"rmor-base": "the base point", "rmor-p10": "p = 0.1", "rmor-p30": "p = 0.3",
           "rmor-s0": "a skew of 0", "rmor-s2": "a skew of 2", "rmor-rg32m": "32 MiB row groups",
           "rmor-rg64m": "64 MiB row groups", "rmor-late99-1": "lateness, p99 of 1 batch",
           "rmor-late99-20": "lateness, p99 of 20 batches", "rmor-ingest": "the ingest window",
-          "rmor-ingest-rows": "the ingest window, a row a change"}
+          "rmor-ingest-rows": "the ingest window (a row a change)"}
 SETTINGS = [VARIES[c] for c in CONFIGS]
 NOW, WAS = "range check", "per-position check"
 WRITE, READ, SKIP = "a write", "a full read", "a full read, skipping dead row groups"
@@ -102,28 +101,38 @@ J["r3_verdict"] = [verdict(v > 1.1, s == S3X and c == "rmor-s2")
                    for s, c, v in zip(J.store, J.config, J.r3)]
 
 
-# Where the time went: the part of RMoR's phases that holds the check (rows and planning: the
-# thread's CPU outside decoding, encoding, footers and deletes), before and after
-def planning(runs):
+# Where the time went, before and after (the results pages' parts of a phase's own thread): rows
+# and planning (the thread's CPU outside decoding, encoding, footers and deletes), which holds the
+# check; and the store (its client's CPU and waiting on it), for RMoR's skipping read and MoR's read
+def parts(runs):
     p = fig.bp_parts(runs, key="config", fine=True)
-    p = p[(p.arm == "rmor-c") & (p.part == "rows and planning") & p.what.isin([WRITE, SKIP])]
-    return p.set_index(["config", "what"]).s
+    keep = p.part.isin(["rows and planning", "the store"]) & (
+        ((p.arm == "rmor-c") & p.what.isin([WRITE, SKIP])) | ((p.arm == "mor-v3") & (p.what == READ)))
+    return p[keep].set_index(["config", "arm", "what", "part"]).s
 
 
-plan = []
+P = {}
 for st in STORES:
-    now = planning({c: r for c, (r, _) in RUNS[st].items()})
-    was = planning({c: fig.rr_earlier(st, c) for c in RUNS[st]})
-    plan.append(pd.DataFrame({"plan": now, "plan_was": was}).reset_index().assign(store=st))
-plan = pd.concat(plan, ignore_index=True).pivot_table(index=["store", "config"], columns="what",
-                                                      values=["plan", "plan_was"])
+    P[st, NOW] = parts({c: r for c, (r, _) in RUNS[st].items()})
+    P[st, WAS] = parts({c: fig.rr_earlier(st, c) for c in RUNS[st]})
+
+
+def part(build, arm, what, name):
+    return [P[s, build][c, arm, what, name] for s, c in zip(J.store, J.config)]
+
+
 for col, what in [("w", WRITE), ("r", SKIP)]:
-    J[f"{col}_plan"] = [plan.loc[(s, c), ("plan", what)] for s, c in zip(J.store, J.config)]
-    J[f"{col}_plan_was"] = [plan.loc[(s, c), ("plan_was", what)] for s, c in zip(J.store, J.config)]
+    J[f"{col}_plan"] = part(NOW, "rmor-c", what, "rows and planning")
+    J[f"{col}_plan_was"] = part(WAS, "rmor-c", what, "rows and planning")
     J[f"{col}_check"] = J[f"{col}_plan_was"] - J[f"{col}_plan"]  # the check's time, measured
 J["w_saved"], J["r_saved"] = J.rmor_w_was - J.rmor_w, J.rmor_r_was - J.rmor_r
 J["w_saved_pred"], J["r_saved_pred"] = J.rmor_w_was - J.rmor_w_pred, J.rmor_r_was - J.rmor_r_pred
 J["w_rest"] = J.w_saved - J.w_check  # the rest of a write, earlier run less this one
+J["r_wait"], J["r_wait_was"] = part(NOW, "rmor-c", SKIP, "the store"), part(WAS, "rmor-c", SKIP, "the store")
+J["mor_wait"], J["mor_wait_was"] = part(NOW, "mor-v3", READ, "the store"), part(WAS, "mor-v3", READ, "the store")
+J["r_wait_d"], J["mor_wait_d"] = J.r_wait - J.r_wait_was, J.mor_wait - J.mor_wait_was
+# a skipping read's ratio over MoR's with the earlier run's waits on the store in place of this one's
+J["r_over_same_wait"] = (J.rmor_r - J.r_wait_d) / (J.mor_r - J.mor_wait_d)
 
 # The check's pace (S3 Express, where the VMs count instructions): the instructions it no longer
 # runs over the time it no longer takes, against its phase's in the earlier run
@@ -150,9 +159,6 @@ def side(store, col, ok):
     return d[d[col] == ok]
 
 
-status = ("Both stores' runs are in." if not PENDING else
-          f"{' and '.join(STORES) or 'No store'}'s runs are in; {' and '.join(PENDING)}'s are "
-          "still running, and this page judges them once they land.")
 d3 = J[J.store == S3X]
 faster = ("at every setting" if (d3.r_over < 1).all() else
           f"at {(d3.r_over < 1).sum()} of {len(d3)} settings")
@@ -160,12 +166,36 @@ off = d3.rmor_r - d3.rmor_r_pred
 r_gap = (s3[BIG].r_saved - s3[BIG].r_check).abs()
 more = ("more than predicted wherever the check had taken a read more than 0.2 s"
         if (off[BIG.values] > 0).all() else "more or less than predicted")
+
+da = J[J.store == AZ]
+fa = da[da.r_over < 1]
+az_faster = (f"It is faster than MoR's at {names(fa.config)}" if len(fa) else
+             "It is slower than MoR's at every setting")
+off_a = da.rmor_r - da.rmor_r_pred
+# the check's time in a read, Azure Blob's against S3 Express's at the same setting
+chk_gap = (da.set_index("config").r_check - d3.set_index("config").r_check).abs().max()
+s3_wait = max(d3.r_wait_d.abs().max(), d3.mor_wait_d.abs().max())
+wait_over = int((da.r_wait_d.abs() > da.r_check).sum())  # settings where the wait moved more
+# the full reads a run's mean is over (RMoR's skipping reads after the initial load)
+n_reads = q(f"""SELECT count(*) AS n FROM steps WHERE run_id = $r AND arm = 'rmor-c'
+                AND {fig.BP_JUDGED} AND reader = 'cached-skip'""", r=RUNS[AZ]["rmor-base"][0]).n[0]
+
+
+def moved(d):
+    return f"{abs(d):.2f} s {'less' if d < 0 else 'more'}"
+
+
+az_bad = da[da.r2_verdict == "contradicted"]
+az_bad_text = "; ".join(
+    f"at {VARIES[r.config]}, RMoR's read waited {moved(r.r_wait_d)} on the store than in the earlier "
+    f"run and MoR's {moved(r.mor_wait_d)}, and with the earlier run's waits its ratio would be "
+    f"{r.r_over_same_wait:.2f}" for r in az_bad.itertuples()) or "nowhere"
 ```
 
 RMoR's times in the cloud now that its writers and its skipping reader check a row group against
 the file's deletion vector by range, not position by position (docs/HYPOTHESES.md, "RMoR with the
 check by range, in the cloud", 2026-11-02). Every earlier cloud run of RMoR checked each position,
-which is why the results pages call its times upper bounds. {eval}`status`
+which is why the results pages call its times upper bounds.
 
 ## Setup
 
@@ -242,7 +272,13 @@ table(J[["store", "setting", "mor_r", "rmor_r_was", "rmor_r_pred", "rmor_r", "r_
 On S3 Express, RMoR's skipping read now takes {eval}`span(d3.r_over)` of MoR's, where checking
 each position had it at {eval}`span(d3.r_over_was)`: faster than MoR's full read
 {eval}`faster`. The prediction was {eval}`span(d3.r_over_pred)`; against it, each read took
-{eval}`span(off, "{:+.2f}")` s ({eval}`more`; [below](#why-less-than-predicted) is why).
+{eval}`span(off, "{:+.2f}")` s ({eval}`more`; [below](#why-not-as-predicted) is why).
+
+On Azure Blob it takes {eval}`span(da.r_over)` of MoR's, where it took
+{eval}`span(da.r_over_was)` before, against a prediction of {eval}`span(da.r_over_pred)`.
+{eval}`az_faster`. Against the prediction, each read took {eval}`span(off_a, "{:+.2f}")` s: the
+check took what it took on S3 Express, but the time a read waits on Azure's store moved between
+the runs, at {eval}`wait_over` of {eval}`len(da)` settings by more than the check took.
 
 ## A write (R3)
 
@@ -262,15 +298,18 @@ table(J[["store", "setting", "mor_w", "rmor_w_was", "rmor_w_pred", "rmor_w", "w_
 ```
 
 On S3 Express, RMoR's write is still {eval}`span(d3.w_over, "{:.1f}")` times MoR's, which is
-{eval}`span(d3.r3)` times RMoW-append's ratio.
+{eval}`span(d3.r3)` times RMoW-append's ratio (predicted {eval}`span(d3.r3_pred)`). On Azure Blob
+it is {eval}`span(da.w_over, "{:.1f}")` times MoR's, {eval}`span(da.r3)` times RMoW-append's ratio
+(predicted {eval}`span(da.r3_pred)`).
 
-(why-less-than-predicted)=
-## Why less than predicted
+(why-not-as-predicted)=
+## Why not as predicted
 
 The prediction took the instructions the check no longer runs and priced them at the pace of the
 phase it ran in. The check ran faster than its phase: a tight loop over a bitmap. The part of
 RMoR's phase that holds it (rows and planning, the thread's CPU outside Parquet's decoding and
-encoding, footers and deletes) is where the time went, before and after.
+encoding, footers and deletes) is where the time went, before and after. On Azure Blob, the time a
+read waits on the store moved too.
 
 ```{code-cell} ipython3
 :label: rmor-rerun-saved
@@ -328,6 +367,31 @@ table(J[["store", "setting", "r_plan_was", "r_plan", "r_saved_pred", "r_saved", 
   {eval}`span(s3w.w_saved_pred, "{:.2f}")` s predicted. In the two ingest settings the check took
   a write almost nothing, and the writes moved by
   {eval}`span(J[(J.store == S3X) & J.config.str.startswith('rmor-ingest')].w_saved, "{:+.2f}")` s.
+- **On Azure Blob the check took what it took on S3 Express:** in a read, within
+  {eval}`f"{chk_gap:.2f}"` s at every setting (both VMs are Zen 4 EPYCs, a 9R14 and a 9V74), less
+  than priced there too.
+- **But on Azure Blob the time a read waits on the store moved between the runs:** RMoR's skipping
+  read by {eval}`span(da.r_wait_d, "{:+.2f}")` s, MoR's full read by
+  {eval}`span(da.mor_wait_d, "{:+.2f}")` s, where on S3 Express neither moved by more than
+  {eval}`f"{s3_wait:.2f}"` s. A run's mean is over {eval}`n_reads` reads. So on Azure Blob a read
+  saved {eval}`span(da.r_saved, "{:+.2f}")` s (negative: it took longer) where its check took
+  {eval}`span(da.r_check)` s.
+- **Where Azure Blob contradicts R2,** the store's wait did it: {eval}`az_bad_text`.
+
+The time a full read waited on the store (its client's CPU and waiting on it), mean seconds, in the
+earlier run and this one; and RMoR's skipping read over MoR's, as measured and with the earlier
+run's waits in place of this run's:
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(J[["store", "setting", "r_wait_was", "r_wait", "mor_wait_was", "mor_wait", "r_over",
+         "r_over_same_wait"]]
+      .rename(columns={"r_wait_was": "RMoR: store before", "r_wait": "RMoR: store",
+                       "mor_wait_was": "MoR: store before", "mor_wait": "MoR: store",
+                       "r_over": "over MoR's", "r_over_same_wait": "with the earlier waits"})
+      .round(2))
+```
 
 ## Verdicts
 
@@ -346,7 +410,8 @@ def r2_text(st):
         out.append(f"holds at the other {len(held)} decided settings ({span(held.r_over)})"
                    if len(bad) else f"holds at all {len(held)} decided settings ({span(held.r_over)})")
     if len(und):
-        out.append(f"{names(und.config)} decides nothing ({span(und.r_over)})")
+        out.append(f"{names(und.config)} {'decides' if len(und) == 1 else 'decide'} nothing "
+                   f"({span(und.r_over)})")
     return "; ".join(out)
 
 
@@ -360,7 +425,8 @@ def r3_text(st):
         out.append(f"holds at {'the other ' if len(bad) else 'all '}{len(held)} decided settings "
                    f"({span(held.r3)} times)")
     if len(und):
-        out.append(f"{names(und.config)} decides nothing ({span(und.r3)} times)")
+        out.append(f"{names(und.config)} {'decides' if len(und) == 1 else 'decide'} nothing "
+                   f"({span(und.r3)} times)")
     return "; ".join(out)
 
 
@@ -372,7 +438,6 @@ def r1_text(st):
 
 VERDICTS = "\n".join(
     f"- **{st}.** R1 {r1_text(st)}. R2 {r2_text(st)}. R3 {r3_text(st)}." for st in STORES)
-VERDICTS += "".join(f"\n- **{st}.** Its runs are still running." for st in PENDING)
 ```
 
 As registered:
@@ -398,24 +463,38 @@ Markdown(VERDICTS)
 ```{code-cell} ipython3
 :tags: [remove-cell]
 
-mor_drift_w = (d3.mor_w / d3.mor_w_was - 1)
-mor_drift_r = (d3.mor_r / d3.mor_r_was - 1)
+def drift(d, now, was):
+    return span(d[now] / d[was] - 1, "{:+.1%}")
+
+
+def both(f, pred=None):
+    """A span on each store, with its predicted span after it when pred is given."""
+    def one(d):
+        return span(f(d)) + (f" (predicted {span(pred(d))})" if pred else "")
+    return f"{one(d3)} on S3 Express and {one(da)} on Azure Blob"
 ```
 
-- **RMoR's skipping read against RMoW-append's full read:** on S3 Express, RMoR's ratio over MoR's
-  is {eval}`span(d3.r_over / d3.app_r_over)` times RMoW-append's in the earlier run (predicted
-  {eval}`span(d3.r_over_pred / d3.app_r_over)`).
-- **RMoR's write against RMoW-external's:** on S3 Express, {eval}`span(d3.w_over / d3.ext_w_over)`
-  times its ratio over MoR's (predicted {eval}`span(d3.w_over_pred / d3.ext_w_over)`).
-- **RMoR's read without skipping,** which does no check: {eval}`span(d3.noskip_over)` times MoR's
-  on S3 Express, against {eval}`span(d3.noskip_over_was)` before.
-- **MoR's own times against the earlier runs':** on S3 Express a write moved by
-  {eval}`span(mor_drift_w, "{:+.1%}")` and a full read by {eval}`span(mor_drift_r, "{:+.1%}")`.
+- **RMoR's skipping read against RMoW-append's full read:** RMoR's ratio over MoR's is
+  {eval}`both(lambda d: d.r_over / d.app_r_over, lambda d: d.r_over_pred / d.app_r_over)` times
+  RMoW-append's in the earlier run.
+- **RMoR's write against RMoW-external's:**
+  {eval}`both(lambda d: d.w_over / d.ext_w_over, lambda d: d.w_over_pred / d.ext_w_over)` times its
+  ratio over MoR's.
+- **RMoR's read without skipping,** which does no check: {eval}`both(lambda d: d.noskip_over)`
+  times MoR's, against {eval}`both(lambda d: d.noskip_over_was)` before.
+- **MoR's own times against the earlier runs':** a write moved by
+  {eval}`drift(d3, "mor_w", "mor_w_was")` on S3 Express and {eval}`drift(da, "mor_w", "mor_w_was")`
+  on Azure Blob, a full read by {eval}`drift(d3, "mor_r", "mor_r_was")` and
+  {eval}`drift(da, "mor_r", "mor_r_was")`.
 
 ## Limits
 
 - One run of each configuration, on one seed, against one earlier run on another VM of the same
   type. On S3 Express the earlier runs had nine VMs loading the bucket at once; these had one.
+- On Azure Blob, the time a read waits on the store moved between runs by up to
+  {eval}`f"{da.r_wait_d.abs().max():.1f}"` s, where the check took at most
+  {eval}`f"{da.r_check.max():.2f}"` s; a run's mean is over {eval}`n_reads` reads, and a ratio there
+  carries that.
 - R3 compares across runs: RMoW-append's ratio is the earlier run's, with all five designs.
 - Azure Blob's VMs count no instructions, so the check's pace is S3 Express's alone.
 - A ratio within 10% of what it is compared with decides nothing.
