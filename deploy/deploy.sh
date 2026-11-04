@@ -47,6 +47,8 @@ BENCH_REPS="${BENCH_REPS:-${CALIBRATION_REPS:-1}}"
 BENCH_HEAP="${BENCH_HEAP:-8g}"
 BENCH_FLAGS="${BENCH_FLAGS:---log-requests}"
 FLEET="${FLEET:-false}"
+# How long `wait` waits on a VM it cannot reach before it gives up on it (minutes)
+WAIT_UNREACHABLE_MIN="${WAIT_UNREACHABLE_MIN:-60}"
 case "$CLOUD" in
   aws) CONFIGS="${AWS_CONFIGS:-s3x-calibration}" SUFFIX=s3x ;;
   azure) CONFIGS="${AZURE_CONFIGS:-azure-calibration}" SUFFIX=azure ;;
@@ -364,26 +366,46 @@ cmd_status() {
   done
 }
 
-# Until no VM's steps run; fails if any ended without finishing them
+# Until no VM's steps run; fails if any ended without finishing them. A VM it cannot reach is
+# waited on, not taken for ended: its steps run detached, and the likeliest cause is this machine's
+# address leaving the SSH rule (rerun infra-up). After WAIT_UNREACHABLE_MIN minutes unreachable a VM
+# is no longer waited on, and the wait fails naming it. The report gives the states the last poll
+# saw, rather than polling again, so a VM that drops out once its steps end is reported as done.
 cmd_wait() {
-  local vm state running failed=()
+  local vm state pending failed=() limit=$((WAIT_UNREACHABLE_MIN * 60))
+  local -A last=() since=()
   while :; do
-    running=0
+    pending=0
     for vm in $(targets); do
       use_vm "$vm"
-      [[ "$(remote_state)" != running ]] || running=$((running + 1))
+      state="$(remote_state)"
+      last[$vm]="$state"
+      if [[ "$state" == unreachable ]]; then
+        if [[ -z "${since[$vm]:-}" ]]; then
+          since[$vm]=$SECONDS
+          say "$vm is unreachable; waiting on it (if this machine's address changed, run infra-up)"
+        fi
+        ((SECONDS - since[$vm] >= limit)) || pending=$((pending + 1))
+      else
+        if [[ -n "${since[$vm]:-}" ]]; then
+          unset 'since[$vm]'
+          say "$vm is reachable again ($state)"
+        fi
+        [[ "$state" != running ]] || pending=$((pending + 1))
+      fi
     done
-    ((running)) || break
+    ((pending)) || break
     sleep 60
   done
   for vm in $(targets); do
     use_vm "$vm"
-    state="$(remote_state)"
-    echo "== $CUR: $state"
-    remote bash remote.sh status 15 || true
-    [[ "$state" == done ]] || failed+=("$CUR ($state)")
+    echo "== $CUR: ${last[$vm]}"
+    [[ "${last[$vm]}" == unreachable ]] || remote bash remote.sh status 15 || true
+    [[ "${last[$vm]}" == done ]] || failed+=("$CUR (${last[$vm]})")
   done
-  ((${#failed[@]} == 0)) || die "steps ended without finishing on: ${failed[*]}"
+  ((${#failed[@]} == 0)) || die "steps ended without finishing on: ${failed[*]}$(
+    [[ " ${last[*]} " != *" unreachable "* ]] \
+      || echo "; unreachable for ${WAIT_UNREACHABLE_MIN} minutes: if this machine's address changed, run infra-up, then wait again")"
 }
 
 cmd_fetch() {

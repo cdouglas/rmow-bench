@@ -98,7 +98,10 @@ CLOUD=azure ./deploy/deploy.sh all   # the same on Azure, without editing deploy
 ```
 
 `run` takes steps, to run one at a time (`run test`, then `run spike`, and so on). `status` shows
-whether the steps still run and the log's tail, and `ssh` opens a shell on the VM. The steps run
+whether the steps still run and the log's tail, and `ssh` opens a shell on the VM. `wait` waits on
+a VM it cannot reach, whose steps run on, and gives up on it after `WAIT_UNREACHABLE_MIN` minutes
+(60 by default), failing with its name; the likeliest cause is this machine's address leaving the
+SSH rule (rerun `infra-up`, then `wait` again). The steps run
 detached on the VM (`setsid nohup`), so a dropped connection does not stop them. A step whose suite
 skipped every test fails: a suite without credentials skips rather than fails.
 
@@ -199,7 +202,8 @@ with the store (in an existing bucket, with the `rmow-bench/` prefix).
 - **A shared bucket:** in catalog-bench's bucket, don't run a campaign while catalog-bench runs
   one, since both would load the same bucket while measuring its latency.
 - **Your public IP:** SSH is open to this machine's address at `infra-up`. If it changes, rerun
-  `infra-up`.
+  `infra-up`; a `wait` running meanwhile waits on the VMs it cannot reach (up to
+  `WAIT_UNREACHABLE_MIN` minutes).
 - **One store per cloud, shared by its VMs.** A fleet's runs load the same bucket or account at
   once, so each measures the store under the others' load, as their spikes do. The two clouds'
   states are apart, so both can be up at once.
