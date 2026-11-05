@@ -1,5 +1,6 @@
 package org.rmow.bench.arms;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.apache.iceberg.TableProperties;
@@ -105,6 +106,35 @@ public final class LayoutSpec {
    * drop their rows one by one.
    */
   public boolean writerSkipsDeadRowGroups = false;
+
+  /**
+   * RMoR with a cleaner ({@code rmor-c-clean}; docs/HYPOTHESES.md, 2026-11-04): its settings, or
+   * null for the defaults. Left out of the configuration's hash when null, so configurations from
+   * before it keep theirs.
+   */
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  public Clean clean = null;
+
+  /** The cleaner's settings, and its threshold for rewriting a row group. */
+  public static final class Clean {
+    /** A write rewrites a row group when it changes at least this share of its live rows. */
+    public double rewriteShare = 0.25;
+    /** A row group with fewer live rows than this share of its rows is sparse. */
+    public double low = 0.5;
+    /** A unit is cold once no write has changed it for this many writes. */
+    public int age = 2;
+    /** The cleaner carries at most this share of the write's own rows, drains apart. */
+    public double budget = 0.5;
+    /** A cold file with fewer live rows than this share of its rows has them all carried. */
+    public double drain = 0.5;
+    /** Files with at least this share of their rows dead have their row groups judged. */
+    public double examine = 0.1;
+  }
+
+  /** The cleaner's settings in effect. */
+  public Clean cleanOrDefault() {
+    return clean != null ? clean : new Clean();
+  }
 
   /** The Parquet writer properties for data files. */
   public Map<String, String> writerProperties() {

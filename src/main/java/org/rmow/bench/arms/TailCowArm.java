@@ -119,6 +119,12 @@ public final class TailCowArm extends MorArm {
   // the files of at most 1 MiB fetched whole to plan this batch, by file
   private final Map<Integer, byte[]> planned = new HashMap<>();
   private double bytesPerRow = 40; // running estimate, for planning merges
+  // with a cleaner: its settings, each file's batch of birth (-1: the initial load), and each row
+  // group's last change (by its first row), the history the cleaner judges age by
+  private final LayoutSpec.Clean clean;
+  private final Map<Integer, Integer> born = new HashMap<>();
+  private final Map<Integer, Map<Long, Integer>> changedAt = new HashMap<>();
+  private int batch = -1; // the batch being applied
 
   public TailCowArm(ArmContext ctx, TailPolicy.Kind kind) {
     this(ctx, kind, Double.POSITIVE_INFINITY);
@@ -140,22 +146,41 @@ public final class TailCowArm extends MorArm {
    */
   public TailCowArm(
       ArmContext ctx, TailPolicy.Kind kind, double rewriteShare, boolean elide, boolean keep) {
+    this(ctx, kind, rewriteShare, elide, keep, null);
+  }
+
+  /**
+   * @param clean with row groups kept, a cleaner with these settings ({@code rmor-c-clean}): a
+   *     write rewrites a row group only when it changes at least {@code clean.rewriteShare} of its
+   *     live rows, and carries sparse, cold row groups forward (null: no cleaner, and θ must be 0)
+   */
+  public TailCowArm(
+      ArmContext ctx,
+      TailPolicy.Kind kind,
+      double rewriteShare,
+      boolean elide,
+      boolean keep,
+      LayoutSpec.Clean clean) {
     super(ctx);
     if (elide && rewriteShare != 0) {
       throw new IllegalArgumentException(
           "RMoR-C with footers rewrites every region it changes (rmorRewriteShare 0), not "
               + rewriteShare);
     }
-    if (keep && rewriteShare != 0) {
+    if (keep && clean == null && rewriteShare != 0) {
       throw new IllegalArgumentException(
           "RMoR-C with its row groups kept rewrites every region it changes (rmorRewriteShare 0),"
               + " not " + rewriteShare);
+    }
+    if (clean != null && (!keep || elide)) {
+      throw new IllegalArgumentException("The cleaner needs row groups kept, and DVs");
     }
     this.policy = new TailPolicy(kind, ctx.layout().tailSealBytes, ctx.layout().tierFanout);
     this.rewriteShare = rewriteShare;
     this.elide = elide;
     this.keep = keep;
     this.regions = keep ? new RegionWriter(Rows.SCHEMA, ctx.layout().writerProperties()) : null;
+    this.clean = clean;
   }
 
   @Override
@@ -184,6 +209,7 @@ public final class TailCowArm extends MorArm {
     if (elide) {
       idsOf.put(k, ids);
     }
+    born.put(k, batch);
     return k;
   }
 
@@ -191,6 +217,8 @@ public final class TailCowArm extends MorArm {
   @Override
   protected void retire(int k) {
     super.retire(k);
+    born.remove(k);
+    changedAt.remove(k);
     idsOf.remove(k);
     dead.remove(k);
   }
@@ -201,6 +229,7 @@ public final class TailCowArm extends MorArm {
 
   @Override
   public void apply(OpLog.Batch b) throws IOException {
+    batch = b.index();
     footers.begin();
     planned.clear();
     long seq = batchSeq(b);
@@ -403,14 +432,19 @@ public final class TailCowArm extends MorArm {
                 rewrites.set(at, r.dropped());
               });
     }
+    // the updated rows whose regions are rewritten have their new versions there; the others' (in
+    // merged files, or, with a cleaner, below its threshold) join the inserts
+    Set<Long> inRegions = rewrittenUpdates(b, rewrites, replaced);
+    if (clean != null) {
+      carry(b, rewrites, merge, out);
+    }
     ctx.phases()
         .part(
             "write",
             () -> {
-              // the inserts, and the new versions of the merged files' rows; at θ = 0 every other
-              // changed row is in a rewritten region
+              // the inserts, and the new versions of the rows outside the rewritten regions
               List<long[]> rows = batchRows(b);
-              rows.removeIf(r -> versions.containsKey(r[0]) && !replaced.contains(r[0]));
+              rows.removeIf(r -> inRegions.contains(r[0]));
               rowsHeld.hold(Held.Kind.ROWS, rows.size(), "the batch's inserts to sort");
               for (List<long[]> rs : mergedRows.values()) {
                 for (long[] r : rs) {
@@ -433,6 +467,140 @@ public final class TailCowArm extends MorArm {
               rowsHeld.close(); // the batch's files are written
             });
     return rewrites;
+  }
+
+  /** The updated rows, outside the merged files, whose regions this batch rewrites. */
+  private Set<Long> rewrittenUpdates(OpLog.Batch b, List<Rewrite> rewrites, Set<Long> replaced) {
+    Map<Integer, List<Rewrite>> byFile = new HashMap<>();
+    for (Rewrite r : rewrites) {
+      byFile.computeIfAbsent(r.k(), x -> new ArrayList<>()).add(r);
+    }
+    Set<Long> out = new HashSet<>();
+    for (long id : b.updateIds()) {
+      List<Rewrite> rs = replaced.contains(id) ? null : byFile.get(fileOfId[(int) id]);
+      if (rs == null) {
+        continue;
+      }
+      int pos = posOfId[(int) id];
+      for (Rewrite r : rs) {
+        if (r.whole() || (pos >= r.first() && pos < r.first() + r.rows())) {
+          out.add(id);
+          break;
+        }
+      }
+    }
+    return out;
+  }
+
+  /**
+   * The cleaner: carries forward the live rows of the row groups {@link #cleanerPicks} chooses,
+   * packed into row groups of about the writer's size in the batch's file, a row group at a time
+   * (phase {@code clean}); each joins {@code rewrites}, so a DV covers it whole after the write.
+   */
+  private void carry(OpLog.Batch b, List<Rewrite> rewrites, Set<Integer> merge, KeptFile out)
+      throws IOException {
+    long own = b.insertIds().length + b.updateIds().length;
+    Set<Integer> skip = new HashSet<>(merge);
+    for (Rewrite r : rewrites) {
+      if (r.whole()) {
+        skip.add(r.k());
+      } else {
+        own += Math.max(0, r.liveRows());
+      }
+    }
+    long budget = (long) (clean.budget * own);
+    List<Rewrite> picks = new ArrayList<>();
+    ctx.phases().part("clean", () -> picks.addAll(cleanerPicks(skip, budget)));
+    long target = Math.max(1, (long) (0.95 * ctx.layout().rowGroupBytes / bytesPerRow));
+    List<long[]> buffer = new ArrayList<>();
+    for (Rewrite c : picks) {
+      ctx.phases()
+          .part(
+              "clean",
+              () -> {
+                List<long[]> live =
+                    c.start() < 0
+                        ? readLive(c.k())
+                        : readLive(c.k(), held(c.k()), tailOf(c.k()), c.start(), c.length());
+                rewrites.add(c.read(live).dropped());
+                buffer.addAll(live);
+                if (buffer.size() >= target) {
+                  flushCarried(buffer, out);
+                }
+              });
+    }
+    if (!buffer.isEmpty()) {
+      ctx.phases().part("clean", () -> flushCarried(buffer, out));
+    }
+  }
+
+  private void flushCarried(List<long[]> buffer, KeptFile out) throws IOException {
+    out.add(new ArrayList<>(buffer));
+    rowsHeld.release(Held.Kind.ROWS, buffer.size(), "carried rows of " + out.name + " encoded");
+    buffer.clear();
+  }
+
+  /**
+   * The cleaner's picks this batch, as rewrites of no changed row: every live row group of each
+   * cold file with fewer than {@code clean.drain} of its rows live (it then leaves the table); then
+   * row groups with fewer than {@code clean.low} of their rows live, unchanged for {@code clean.age}
+   * batches, by cost-benefit (1 - u) * age / (1 + u), within {@code budget} rows. Files are judged
+   * from their deletes (as a manifest has them), and a file with at least {@code clean.examine} of
+   * its rows dead from its footer, read for it.
+   */
+  private List<Rewrite> cleanerPicks(Set<Integer> skip, long budget) throws IOException {
+    record Unit(Rewrite r, int liveRows, double u, int age) {}
+    List<Rewrite> out = new ArrayList<>();
+    List<Unit> sparse = new ArrayList<>();
+    for (int k = live.nextSetBit(0); k >= 0; k = live.nextSetBit(k + 1)) {
+      if (skip.contains(k) || policy.isOpen(k)) {
+        continue;
+      }
+      long total = files.get(k).recordCount();
+      BitSet gone = dead.getOrDefault(k, new BitSet());
+      long deadRows = gone.cardinality();
+      if (deadRows < clean.examine * total || deadRows >= total) {
+        continue;
+      }
+      int bornAt = born.getOrDefault(k, -1);
+      Map<Long, Integer> changes = changedAt.getOrDefault(k, Map.of());
+      List<Unit> units = new ArrayList<>();
+      boolean quiet = true;
+      for (long[] g : rowGroups(k)) {
+        int lr = (int) (g[1] - gone.get((int) g[0], (int) (g[0] + g[1])).cardinality());
+        if (lr == 0) {
+          continue;
+        }
+        int age = batch - Math.max(bornAt, changes.getOrDefault(g[0], -1));
+        quiet &= age >= clean.age;
+        units.add(
+            new Unit(
+                new Rewrite(k, false, g[0], g[1], 0, g[2], g[3], -1, null),
+                lr,
+                lr / (double) g[1],
+                age));
+      }
+      if (quiet && total - deadRows < clean.drain * total) {
+        for (Unit u : units) {
+          out.add(u.r());
+        }
+        continue;
+      }
+      for (Unit u : units) {
+        if (u.u() < clean.low && u.age() >= clean.age) {
+          sparse.add(u);
+        }
+      }
+    }
+    sparse.sort(Comparator.comparingDouble((Unit u) -> -(1 - u.u()) * u.age() / (1 + u.u())));
+    long used = 0;
+    for (Unit u : sparse) {
+      if (used + u.liveRows() <= budget) {
+        out.add(u.r());
+        used += u.liveRows();
+      }
+    }
+    return out;
   }
 
   /**
@@ -658,6 +826,9 @@ public final class TailCowArm extends MorArm {
           }
         }
         long liveRows = rows - gone.get((int) first, (int) (first + rows)).cardinality();
+        if (touched > 0) {
+          changedAt.computeIfAbsent(k, x -> new HashMap<>()).put(first, batch);
+        }
         if (touched == 0 || touched < rewriteShare * liveRows) {
           continue;
         }
@@ -761,7 +932,7 @@ public final class TailCowArm extends MorArm {
         dvPositions.remove(r.k());
         continue;
       }
-      List<Integer> ps = dvPositions.get(r.k());
+      List<Integer> ps = dvPositions.computeIfAbsent(r.k(), x -> new ArrayList<>());
       for (long p = r.first(); p < r.first() + r.rows(); p++) {
         ps.add((int) p);
       }

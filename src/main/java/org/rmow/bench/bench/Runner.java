@@ -21,6 +21,7 @@ import org.apache.iceberg.expressions.Expressions;
 import org.rmow.bench.arms.Arm;
 import org.rmow.bench.arms.ArmContext;
 import org.rmow.bench.arms.ArmStats;
+import org.rmow.bench.arms.LayoutSpec;
 import org.rmow.bench.arms.CowArm;
 import org.rmow.bench.arms.InitialLoad;
 import org.rmow.bench.arms.MorV2Arm;
@@ -309,6 +310,10 @@ public final class Runner {
           new TailCowArm(ctx, TailPolicy.Kind.C, ctx.layout().rmorRewriteShare, false, true);
       case "rmor-c-footer-kept" ->
           new TailCowArm(ctx, TailPolicy.Kind.C, ctx.layout().rmorRewriteShare, true, true);
+      case "rmor-c-clean" -> {
+        LayoutSpec.Clean clean = ctx.layout().cleanOrDefault();
+        yield new TailCowArm(ctx, TailPolicy.Kind.C, clean.rewriteShare, false, true, clean);
+      }
       case "cow" -> new CowArm(ctx);
       default -> throw new IllegalArgumentException("Unknown arm: " + name);
     };

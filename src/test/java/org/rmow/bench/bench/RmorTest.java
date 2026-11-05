@@ -233,6 +233,49 @@ class RmorTest {
         .hasMessageContaining("rmorRewriteShare 0");
   }
 
+  /**
+   * RMoR with a cleaner ({@code rmor-c-clean}): on churn (most of each batch updates the newest
+   * rows, so MoR's files go sparse), it carries the live rows of sparse, cold row groups forward and
+   * drains mostly-dead files, so fewer files stay live than MoR's; every read is checked by the
+   * runner.
+   */
+  @Test
+  void theCleanerDrainsSparseFiles(@TempDir Path dir) throws IOException {
+    BenchConfig cfg = config(0);
+    cfg.layout.compactEvery = 0;
+    cfg.layout.tailSealBytes = 1;
+    cfg.workload.keyDist = org.rmow.bench.workload.WorkloadSpec.KeyDist.RECENCY_EXP;
+    cfg.workload.recencyMeanBatches = 1.0;
+    cfg.workload.insertFrac = 0.3;
+    cfg.workload.updateFrac = 0.6;
+    cfg.workload.deleteFrac = 0.1;
+    cfg.workload.opsPerBatch = 6_000;
+    cfg.workload.batches = 12;
+    cfg.arms = List.of("mor-v3", "rmor-c-clean");
+    List<JsonNode> steps = run(cfg, dir);
+    assertThat(sum(steps, "rmor-c-clean", "clean", null, "bytes_read"))
+        .as("rows carried forward")
+        .isPositive();
+    long morFiles = lastState(steps, "mor-v3", "data_files");
+    assertThat(lastState(steps, "rmor-c-clean", "data_files"))
+        .as("live data files at the end, against MoR's %d", morFiles)
+        .isLessThan(morFiles);
+  }
+
+  /** A field of an arm's last state record. */
+  private static long lastState(List<JsonNode> steps, String arm, String f) {
+    long step = -1;
+    long v = 0;
+    for (JsonNode r : steps) {
+      if (r.get("arm").asText().equals(arm) && r.get("phase").asText().equals("state")
+          && r.get("step").asLong() > step) {
+        step = r.get("step").asLong();
+        v = r.get(f).asLong();
+      }
+    }
+    return v;
+  }
+
   private static long max(List<JsonNode> steps, String arm, String phase, String f) {
     long m = 0;
     for (JsonNode r : steps) {

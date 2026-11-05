@@ -58,16 +58,6 @@ select = ["s3x-calibration-f57c86f8e3e7/*", "azure-calibration-cb4830f16cf3/*", 
 title = "The sweeps on havoc (docker/campaigns/sweep.json, 2026-10-30): 11 configurations, one run each, every job under foreign load"
 select = ["where:label LIKE 'sweep-%' AND host = 'havoc' AND git_sha LIKE 'a5e2ee2%'"]
 
-[[annotate]]
-select = "smoke-*"
-mark = "excluded"
-note = "in-memory smoke test of the harness"
-
-[[annotate]]
-select = "where:host = 'havoc' AND label = 'sim-validate-s3x'"
-mark = "excluded"
-note = "pipeline check of the havoc container (docker/campaigns/pipeline.json): requests and bytes match the laptop's run in 769 of 779 records, the other 10 being the split arm's stock reads, changed by the split planning"
-
 [campaigns.base-point]
 title = "The sweeps' base point on S3 Express (c7a.4xlarge, usw2-az3) on the row reader (f51796a, 2026-10-30) and the vectorized reader (6f24575, 2026-10-31), and on Azure Blob (D8as_v6, westus) on the vectorized reader (2026-11-01), each VM's spike, and the laptop twins"
 select = ["sweep-base-s3x-89a55338cd9a/*", "spike/s3x-spike-20261030T205211Z", "spike/s3x-spike-20261031T163533Z", "sweep-base-f970149711a9/20261030T054758Z", "sweep-base-f970149711a9/20261031T083323Z", "sweep-base-azure-0c88452d93b4/*", "spike/azure-spike-20261031T234510Z"]
@@ -79,3 +69,16 @@ select = ["where:regexp_matches(label, '^sweep-.*-(s3x|azure)$') AND label NOT L
 [campaigns.rmor-rerun]
 title = "RMoR with the check by range (505ba07, 2026-11-03 UTC): the sweeps' eleven configurations with MoR and RMoR alone on the laptop, the cloud runs' reference (docs/HYPOTHESES.md, 2026-11-02), and the base point with every design under both builds (6f24575 and 505ba07); then the eleven on S3 Express and Azure Blob at d30544a, one VM per store after its spike (page rmor-rerun)"
 select = ["where:label LIKE 'rmor-%' AND host = 'bearyak'", "sweep-base-f970149711a9/20261102T235620Z", "sweep-base-f970149711a9/20261103T045636Z", "where:regexp_matches(label, '^rmor-.*-(s3x|azure)$') AND git_sha LIKE 'd30544a%'", "spike/s3x-spike-20261103T184852Z", "spike/azure-spike-20261103T185155Z"]
+
+[campaigns.kept]
+select = ["kept-*"]
+[[annotate]]
+select = "smoke-*"
+mark = "excluded"
+note = "in-memory smoke test of the harness"
+
+[[annotate]]
+select = "where:host = 'havoc' AND label = 'sim-validate-s3x'"
+mark = "excluded"
+note = "pipeline check of the havoc container (docker/campaigns/pipeline.json): requests and bytes match the laptop's run in 769 of 779 records, the other 10 being the split arm's stock reads, changed by the split planning"
+
