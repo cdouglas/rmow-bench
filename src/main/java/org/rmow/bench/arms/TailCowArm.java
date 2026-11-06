@@ -2,7 +2,6 @@ package org.rmow.bench.arms;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
@@ -16,13 +15,11 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DeleteFile;
-import org.apache.iceberg.data.Record;
-import org.apache.iceberg.io.InputFile;
+import org.apache.iceberg.deletes.PositionDeleteIndex;
 import org.apache.iceberg.io.PositionOutputStream;
 import org.apache.parquet.format.FileMetaData;
 import org.apache.parquet.format.RowGroup;
 import org.rmow.bench.io.Held;
-import org.rmow.bench.io.MemFileIO;
 import org.rmow.bench.rmow.FooterCodec;
 import org.rmow.bench.rmow.RegionWriter;
 import org.rmow.bench.rmow.RmowFile;
@@ -116,8 +113,6 @@ public final class TailCowArm extends MorArm {
   private final Map<Integer, Integer> appendedBytes = new HashMap<>();
   // under RMoR, each data file's positions its DVs cover
   private final Map<Integer, BitSet> dead = new HashMap<>();
-  // the files of at most 1 MiB fetched whole to plan this batch, by file
-  private final Map<Integer, byte[]> planned = new HashMap<>();
   private double bytesPerRow = 40; // running estimate, for planning merges
   // with a cleaner: its settings, each file's batch of birth (-1: the initial load), and each row
   // group's last change (by its first row), the history the cleaner judges age by
@@ -125,6 +120,20 @@ public final class TailCowArm extends MorArm {
   private final Map<Integer, Integer> born = new HashMap<>();
   private final Map<Integer, Map<Long, Integer>> changedAt = new HashMap<>();
   private int batch = -1; // the batch being applied
+  // with deferred merges: their settings; each file's delta row groups (by first row); the ids
+  // whose live version waits in one, and the region each waits for; each region's row group (by
+  // file and first row: a region is numbered when first needed, and keeps its number through its
+  // merges), and the ids that entered its deltas since its last merge; this batch's delta row
+  // groups read to fold (by file and first row), and the ids it folds into the regions it merges
+  private final LayoutSpec.Defer defer;
+  private final Map<Integer, Set<Long>> deltaGroups = new HashMap<>();
+  private final BitSet inDelta = new BitSet();
+  private final int[] regionOf;
+  private final Map<Long, Integer> regionAt = new HashMap<>();
+  private final Map<Integer, List<Long>> waitingFor = new HashMap<>();
+  private int nextRegion = 0;
+  private final Map<Long, List<long[]>> deltaReads = new HashMap<>();
+  private final Set<Long> folded = new HashSet<>();
 
   public TailCowArm(ArmContext ctx, TailPolicy.Kind kind) {
     this(ctx, kind, Double.POSITIVE_INFINITY);
@@ -161,13 +170,30 @@ public final class TailCowArm extends MorArm {
       boolean elide,
       boolean keep,
       LayoutSpec.Clean clean) {
+    this(ctx, kind, rewriteShare, elide, keep, clean, null);
+  }
+
+  /**
+   * @param defer with row groups kept, deferred merges with these settings ({@code rmor-density}):
+   *     a write merges a row group it changes once its dead rows and the write's changes reach
+   *     {@code rewriteShare} of its rows, folding in the rows that wait for it in delta row groups
+   *     (null: none)
+   */
+  public TailCowArm(
+      ArmContext ctx,
+      TailPolicy.Kind kind,
+      double rewriteShare,
+      boolean elide,
+      boolean keep,
+      LayoutSpec.Clean clean,
+      LayoutSpec.Defer defer) {
     super(ctx);
     if (elide && rewriteShare != 0) {
       throw new IllegalArgumentException(
           "RMoR-C with footers rewrites every region it changes (rmorRewriteShare 0), not "
               + rewriteShare);
     }
-    if (keep && clean == null && rewriteShare != 0) {
+    if (keep && clean == null && defer == null && rewriteShare != 0) {
       throw new IllegalArgumentException(
           "RMoR-C with its row groups kept rewrites every region it changes (rmorRewriteShare 0),"
               + " not " + rewriteShare);
@@ -175,12 +201,21 @@ public final class TailCowArm extends MorArm {
     if (clean != null && (!keep || elide)) {
       throw new IllegalArgumentException("The cleaner needs row groups kept, and DVs");
     }
+    if (defer != null && (!keep || elide || clean != null)) {
+      throw new IllegalArgumentException(
+          "Deferred merges need row groups kept, and DVs, without the cleaner");
+    }
+    if (defer != null && !List.of("region", "write").contains(defer.deltas)) {
+      throw new IllegalArgumentException("Unknown defer.deltas: " + defer.deltas);
+    }
     this.policy = new TailPolicy(kind, ctx.layout().tailSealBytes, ctx.layout().tierFanout);
     this.rewriteShare = rewriteShare;
     this.elide = elide;
     this.keep = keep;
     this.regions = keep ? new RegionWriter(Rows.SCHEMA, ctx.layout().writerProperties()) : null;
     this.clean = clean;
+    this.defer = defer;
+    this.regionOf = defer == null ? null : new int[(int) ctx.log().totalIds()];
   }
 
   @Override
@@ -209,6 +244,11 @@ public final class TailCowArm extends MorArm {
     if (elide) {
       idsOf.put(k, ids);
     }
+    if (defer != null) {
+      for (long id : ids) {
+        inDelta.clear((int) id); // a row written in place; a file's deltas are marked after
+      }
+    }
     born.put(k, batch);
     return k;
   }
@@ -221,6 +261,7 @@ public final class TailCowArm extends MorArm {
     changedAt.remove(k);
     idsOf.remove(k);
     dead.remove(k);
+    deltaGroups.remove(k);
   }
 
   private boolean regional() {
@@ -231,7 +272,9 @@ public final class TailCowArm extends MorArm {
   public void apply(OpLog.Batch b) throws IOException {
     batch = b.index();
     footers.begin();
-    planned.clear();
+    beginPlanning();
+    deltaReads.clear();
+    folded.clear();
     long seq = batchSeq(b);
     locate(b);
     TailPolicy.Plan plan =
@@ -256,6 +299,7 @@ public final class TailCowArm extends MorArm {
       versions.put(id, -1);
       mark(id, merge, replaced, dvPositions);
       fileOfId[(int) id] = -1;
+      inDelta.clear((int) id);
     }
 
     rowsHeld = Held.scope("the batch's files written");
@@ -326,6 +370,9 @@ public final class TailCowArm extends MorArm {
                   rewrites.addAll(rewrites(dvPositions, true));
                 }
               });
+    }
+    if (readsUpdatedRows()) {
+      readUpdated(b, readWhole(merge, rewrites));
     }
     Set<Long> rewritten = new HashSet<>(); // the changed rows whose regions are rewritten
     for (Rewrite r : rewrites) {
@@ -405,6 +452,17 @@ public final class TailCowArm extends MorArm {
               });
     }
     KeptFile out = new KeptFile(batchName(b));
+    // with deferred merges: the files whose rows this batch writes elsewhere, which folds skip
+    Set<Integer> elsewhere = new HashSet<>(merge);
+    for (Rewrite r : rewrites) {
+      if (r.whole()) {
+        elsewhere.add(r.k());
+      }
+    }
+    List<List<long[]>> foldedRows = new ArrayList<>();
+    for (int i = 0; i < rewrites.size(); i++) {
+      foldedRows.add(null);
+    }
     for (int i = 0; i < rewrites.size(); i++) {
       if (rewrites.get(i).whole()) {
         continue; // an open tail file, read back whole and written as its own file
@@ -420,17 +478,39 @@ public final class TailCowArm extends MorArm {
                         ? readLive(r.k())
                         : readLive(r.k(), held(r.k()), tailOf(r.k()), r.start(), r.length());
                 rewrites.set(at, r.read(live));
+                if (defer != null) {
+                  foldedRows.set(at, fold(regionOf(r.k(), r.first()), elsewhere, versions,
+                      dvPositions));
+                }
               });
       ctx.phases()
           .part(
               "write",
               () -> {
                 Rewrite r = rewrites.get(at);
-                out.add(changed(r.live(), versions));
+                List<long[]> rows = changed(r.live(), versions);
+                if (foldedRows.get(at) != null) {
+                  rows.addAll(changed(foldedRows.get(at), versions));
+                  foldedRows.set(at, null);
+                }
+                out.add(rows, false, defer == null ? -1 : regionOf(r.k(), r.first()));
                 rowsHeld.release(
                     Held.Kind.ROWS, r.liveRows(), "a row group of " + out.name + " encoded");
                 rewrites.set(at, r.dropped());
               });
+    }
+    if (readsUpdatedRows()) {
+      Map<Integer, Set<Long>> whole = readWhole(merge, rewrites);
+      for (long key : deltaReads.keySet()) {
+        int k = (int) (key >>> 32);
+        if (!whole.containsKey(k)) {
+          whole.put(k, new HashSet<>());
+        }
+        if (whole.get(k) != null) {
+          whole.get(k).add(key & 0xFFFFFFFFL);
+        }
+      }
+      readUpdatedPart(b, whole);
     }
     // the updated rows whose regions are rewritten have their new versions there; the others' (in
     // merged files, or, with a cleaner, below its threshold) join the inserts
@@ -442,7 +522,8 @@ public final class TailCowArm extends MorArm {
         .part(
             "write",
             () -> {
-              // the inserts, and the new versions of the rows outside the rewritten regions
+              // the inserts, and the new versions of the rows outside the rewritten regions; with
+              // deferred merges, those of rows outside the merged files wait in delta row groups
               List<long[]> rows = batchRows(b);
               rows.removeIf(r -> inRegions.contains(r[0]));
               rowsHeld.hold(Held.Kind.ROWS, rows.size(), "the batch's inserts to sort");
@@ -453,7 +534,11 @@ public final class TailCowArm extends MorArm {
                   }
                 }
               }
-              out.add(rows);
+              List<List<long[]>> deltas = defer == null ? List.of() : deltas(b, rows, replaced);
+              out.add(rows, false, -1);
+              for (List<long[]> d : deltas) {
+                out.add(d, true, -1);
+              }
               int k = out.finish(seq);
               for (int m : merge) {
                 retire(m);
@@ -477,6 +562,10 @@ public final class TailCowArm extends MorArm {
     }
     Set<Long> out = new HashSet<>();
     for (long id : b.updateIds()) {
+      if (folded.contains(id)) {
+        out.add(id); // its region's merge folded it in
+        continue;
+      }
       List<Rewrite> rs = replaced.contains(id) ? null : byFile.get(fileOfId[(int) id]);
       if (rs == null) {
         continue;
@@ -535,7 +624,7 @@ public final class TailCowArm extends MorArm {
   }
 
   private void flushCarried(List<long[]> buffer, KeptFile out) throws IOException {
-    out.add(new ArrayList<>(buffer));
+    out.add(new ArrayList<>(buffer), false, -1);
     rowsHeld.release(Held.Kind.ROWS, buffer.size(), "carried rows of " + out.name + " encoded");
     buffer.clear();
   }
@@ -544,9 +633,15 @@ public final class TailCowArm extends MorArm {
    * The cleaner's picks this batch, as rewrites of no changed row: every live row group of each
    * cold file with fewer than {@code clean.drain} of its rows live (it then leaves the table); then
    * row groups with fewer than {@code clean.low} of their rows live, unchanged for {@code clean.age}
-   * batches, by cost-benefit (1 - u) * age / (1 + u), within {@code budget} rows. Files are judged
-   * from their deletes (as a manifest has them), and a file with at least {@code clean.examine} of
-   * its rows dead from its footer, read for it.
+   * batches, by cost-benefit (1 - u) * age / (1 + u), within {@code budget} rows.
+   *
+   * <p>It judges from what the writer holds or reads for it, and counts what it reads. Each file's
+   * dead rows are its DV's cardinality, as the manifest has it, at no read. A file with at least
+   * {@code clean.examine} of its rows dead is judged row group by row group: its footer is read
+   * (once in the batch, shared with the write's other uses of it), and its DV loaded, unless the
+   * batch's locate loaded it and checked it against those row groups already. A file of one row
+   * group needs neither. Each row group's age is the arm's history of the batches that changed it,
+   * a few bytes a row group that a cleaner would keep beside the table.
    */
   private List<Rewrite> cleanerPicks(Set<Integer> skip, long budget) throws IOException {
     record Unit(Rewrite r, int liveRows, double u, int age) {}
@@ -556,9 +651,19 @@ public final class TailCowArm extends MorArm {
       if (skip.contains(k) || policy.isOpen(k)) {
         continue;
       }
-      long total = files.get(k).recordCount();
+      DataFile df = files.get(k);
+      long total = df.recordCount();
+      DeleteFile[] ds = deletesOf(k);
       BitSet gone = dead.getOrDefault(k, new BitSet());
-      long deadRows = gone.cardinality();
+      long deadRows = 0; // as the manifest says: the DV's cardinality
+      for (DeleteFile d : ds) {
+        deadRows += d.recordCount();
+      }
+      if (deadRows != gone.cardinality()) {
+        throw new IllegalStateException(
+            "The manifest puts " + deadRows + " dead rows in " + df.location() + "; the arm "
+                + gone.cardinality());
+      }
       if (deadRows < clean.examine * total || deadRows >= total) {
         continue;
       }
@@ -566,8 +671,11 @@ public final class TailCowArm extends MorArm {
       Map<Long, Integer> changes = changedAt.getOrDefault(k, Map.of());
       List<Unit> units = new ArrayList<>();
       boolean quiet = true;
-      for (long[] g : rowGroups(k)) {
-        int lr = (int) (g[1] - gone.get((int) g[0], (int) (g[0] + g[1])).cardinality());
+      List<long[]> groups = rowGroups(k);
+      long[] deadIn = deadByRowGroup(k, ds, groups, gone);
+      for (int i = 0; i < groups.size(); i++) {
+        long[] g = groups.get(i);
+        int lr = (int) (g[1] - deadIn[i]);
         if (lr == 0) {
           continue;
         }
@@ -604,6 +712,44 @@ public final class TailCowArm extends MorArm {
   }
 
   /**
+   * The dead rows of each of data file {@code k}'s {@code groups}, for the cleaner: of a file of one
+   * row group, its DV's cardinality (the manifest's); of a file whose DV this batch's locate loaded
+   * and checked against its row groups, from that load; otherwise from its DV, loaded from storage
+   * now. Each is checked against the positions the arm knows dead ({@code gone}).
+   */
+  private long[] deadByRowGroup(int k, DeleteFile[] ds, List<long[]> groups, BitSet gone) {
+    long[] known = new long[groups.size()];
+    for (int i = 0; i < known.length; i++) {
+      long[] g = groups.get(i);
+      known[i] = gone.get((int) g[0], (int) (g[0] + g[1])).cardinality();
+    }
+    if (groups.size() == 1 || locateLoadedDeletes(k)) {
+      return known;
+    }
+    long[] loaded = new long[groups.size()];
+    long[] firsts = new long[groups.size()];
+    for (int i = 0; i < firsts.length; i++) {
+      firsts[i] = groups.get(i)[0];
+    }
+    try (DeleteCache planning = new DeleteCache()) {
+      PositionDeleteIndex index =
+          Scans.loadDeletes(
+              ctx, Reader.writer(ctx.layout()).footerPrefetchBytes(), files.get(k), ds, planning);
+      index.forEach(
+          pos -> {
+            int i = Arrays.binarySearch(firsts, pos);
+            loaded[i >= 0 ? i : -i - 2]++;
+          });
+    }
+    if (!Arrays.equals(loaded, known)) {
+      throw new IllegalStateException(
+          "The DV of " + files.get(k).location() + " covers " + Arrays.toString(loaded)
+              + " rows of its row groups; the arm knows " + Arrays.toString(known));
+    }
+    return loaded;
+  }
+
+  /**
    * With keep: a batch's new data file, written a row group at a time. Without footers it streams
    * to the store as each row group is encoded; with footers each row group is held for the file's
    * single create, as {@link MorArm#writeDataFile} holds a file it creates.
@@ -617,6 +763,8 @@ public final class TailCowArm extends MorArm {
     long[] ids = new long[1 << 16];
     int n = 0;
     long base = 0;
+    final List<long[]> deltaSpans = new ArrayList<>(); // its delta row groups: {first row, rows}
+    final List<long[]> regionFirsts = new ArrayList<>(); // its merged regions: {first row, region}
     PositionOutputStream stream; // without footers: opened with the first row group
 
     KeptFile(String name) {
@@ -629,10 +777,20 @@ public final class TailCowArm extends MorArm {
       return n;
     }
 
-    /** Encodes {@code rows} ({id, version}) as the file's next row group, sorted by event time. */
-    void add(List<long[]> rows) throws IOException {
+    /**
+     * Encodes {@code rows} ({id, version}) as the file's next row group, sorted by event time;
+     * {@code delta}: rows that wait there for their regions' merges; {@code region}: the region
+     * whose merged row group it is, or -1.
+     */
+    void add(List<long[]> rows, boolean delta, int region) throws IOException {
       if (rows.isEmpty()) {
         return;
+      }
+      if (delta) {
+        deltaSpans.add(new long[] {n, rows.size()});
+      }
+      if (region >= 0) {
+        regionFirsts.add(new long[] {n, region});
       }
       if (ctx.layout().sortWrites) {
         OpLog log = ctx.log();
@@ -680,7 +838,21 @@ public final class TailCowArm extends MorArm {
         stream.close();
       }
       pending.close();
-      return addFile(RmowFile.describe(location, length, footer), seq, Arrays.copyOf(ids, n));
+      int k = addFile(RmowFile.describe(location, length, footer), seq, Arrays.copyOf(ids, n));
+      if (!deltaSpans.isEmpty()) {
+        Set<Long> firsts = new HashSet<>();
+        for (long[] span : deltaSpans) {
+          firsts.add(span[0]);
+          for (long pos = span[0]; pos < span[0] + span[1]; pos++) {
+            inDelta.set((int) ids[(int) pos]);
+          }
+        }
+        deltaGroups.put(k, firsts);
+      }
+      for (long[] r : regionFirsts) {
+        regionAt.put(((long) k << 32) | r[0], (int) r[1]);
+      }
+      return k;
     }
   }
 
@@ -829,7 +1001,15 @@ public final class TailCowArm extends MorArm {
         if (touched > 0) {
           changedAt.computeIfAbsent(k, x -> new HashMap<>()).put(first, batch);
         }
-        if (touched == 0 || touched < rewriteShare * liveRows) {
+        if (defer != null) {
+          // deferred: a region's own row group is merged once its dead rows and the batch's
+          // changes reach θ of its rows; delta row groups wait to be folded into theirs
+          if (touched == 0
+              || deltaGroups.getOrDefault(k, Set.of()).contains(first)
+              || (rows - liveRows) + touched < rewriteShare * rows) {
+            continue;
+          }
+        } else if (touched == 0 || touched < rewriteShare * liveRows) {
           continue;
         }
         if (!readSealed) {
@@ -845,49 +1025,142 @@ public final class TailCowArm extends MorArm {
   }
 
   /**
-   * Data file {@code k}'s row groups, each {first row, rows, start, length}; one covering the whole
-   * file (start -1) if it has one row group. The footer of a file of several is read once per
-   * batch.
+   * The row groups and files the batch reads whole anyway, for the update read: file to the first
+   * rows of its rewritten row groups, or to null for a file read whole (merged, or rewritten
+   * whole).
    */
-  private List<long[]> rowGroups(int k) throws IOException {
-    DataFile df = files.get(k);
-    if (df.splitOffsets() == null || df.splitOffsets().size() <= 1) {
-      return List.of(new long[] {0, df.recordCount(), -1, -1});
+  private static Map<Integer, Set<Long>> readWhole(Set<Integer> merge, List<Rewrite> rewrites) {
+    Map<Integer, Set<Long>> out = new HashMap<>();
+    for (int m : merge) {
+      out.put(m, null);
     }
-    return Scans.rowGroups(tailOf(k));
+    for (Rewrite r : rewrites) {
+      if (r.whole()) {
+        out.put(r.k(), null);
+      } else if (!out.containsKey(r.k())) {
+        out.put(r.k(), new HashSet<>(Set.of(r.first())));
+      } else if (out.get(r.k()) != null) {
+        out.get(r.k()).add(r.first());
+      }
+    }
+    return out;
   }
 
   /**
-   * Data file {@code k}'s tail, as the writer holds it this batch: read once ({@link
-   * WriterFooters}), or, for a file of at most 1 MiB, which every open fetches whole, from the file
-   * fetched whole once to plan.
+   * The region whose row group starts at row {@code first} of data file {@code k}: numbered the
+   * first time a write needs it, and carried to the row group its merge writes.
    */
-  private byte[] tailOf(int k) throws IOException {
-    DataFile df = files.get(k);
-    byte[] tail = footers.tail(df.location(), df.fileSizeInBytes());
-    if (tail != null) {
-      return tail;
-    }
-    byte[] whole = planned.get(k);
-    if (whole == null) {
-      whole = Scans.readWhole(ctx, df.location(), df.fileSizeInBytes());
-      planned.put(k, whole);
-    }
-    return Scans.tailOf(whole);
+  private int regionOf(int k, long first) {
+    return regionAt.computeIfAbsent(((long) k << 32) | first, x -> nextRegion++);
   }
 
-  /** Data file {@code k} as fetched whole to plan this batch, in memory; null if it was not. */
-  private InputFile held(int k) throws IOException {
-    byte[] whole = planned.get(k);
-    if (whole == null) {
-      return null;
+  /**
+   * Deferred merges: the rows waiting in delta row groups for {@code region}, which the batch
+   * merges, outside the files the batch writes {@code elsewhere} (those wait on). Each delta row
+   * group that holds one is read whole, once a batch; DVs will hide the rows taken (added to
+   * {@code dvPositions} unless the batch changes them, which put them there already). The writer
+   * finds them in its index of the rows waiting for each region, as it would from the delta row
+   * groups' id statistics: a region is a range of ids.
+   */
+  private List<long[]> fold(
+      int region,
+      Set<Integer> elsewhere,
+      Map<Long, Integer> versions,
+      Map<Integer, List<Integer>> dvPositions)
+      throws IOException {
+    List<Long> entered = waitingFor.remove(region);
+    if (entered == null) {
+      return List.of();
     }
-    MemFileIO mem = new MemFileIO();
-    String location = files.get(k).location();
-    try (OutputStream out = mem.newOutputFile(location).create()) {
-      out.write(whole);
+    Map<Long, long[]> groups = new TreeMap<>(); // (file, first row) -> {file, row group...}
+    Set<Long> wanted = new HashSet<>();
+    List<Long> later = new ArrayList<>();
+    for (long id : entered) {
+      int i = (int) id;
+      if (!inDelta.get(i) || regionOf[i] != region || folded.contains(id) || !wanted.add(id)) {
+        continue; // deleted, or merged since (the list keeps every entry), or listed twice
+      }
+      int k = fileOfId[i];
+      if (k < 0 || !live.get(k)) {
+        throw new IllegalStateException("Row " + id + " waits in a delta that is not live");
+      }
+      if (elsewhere.contains(k)) {
+        wanted.remove(id);
+        later.add(id);
+        continue;
+      }
+      long[] g = rowGroupOf(k, posOfId[i]);
+      if (!deltaGroups.getOrDefault(k, Set.of()).contains(g[0])) {
+        throw new IllegalStateException("Row " + id + " waits outside a delta row group");
+      }
+      groups.putIfAbsent(((long) k << 32) | g[0], new long[] {k, g[0], g[1], g[2], g[3]});
     }
-    return mem.newInputFile(location, whole.length);
+    if (!later.isEmpty()) {
+      waitingFor.put(region, later);
+    }
+    List<long[]> out = new ArrayList<>();
+    for (Map.Entry<Long, long[]> e : groups.entrySet()) {
+      long[] g = e.getValue();
+      int k = (int) g[0];
+      List<long[]> rows = deltaReads.get(e.getKey());
+      if (rows == null) {
+        rows = g[3] < 0 ? readLive(k) : readLive(k, held(k), tailOf(k), g[3], g[4]);
+        deltaReads.put(e.getKey(), rows);
+      }
+      for (long[] row : rows) {
+        if (wanted.contains(row[0]) && folded.add(row[0])) {
+          out.add(row);
+          if (!versions.containsKey(row[0])) {
+            dvPositions.computeIfAbsent(k, x -> new ArrayList<>()).add(posOfId[(int) row[0]]);
+            removed(k);
+          }
+        }
+      }
+    }
+    if (out.size() != wanted.size()) {
+      throw new IllegalStateException(
+          "Folded " + out.size() + " of the " + wanted.size() + " rows waiting for a region");
+    }
+    return out;
+  }
+
+  /**
+   * Deferred merges: the rows among {@code rows} (taken out of it) that wait for their regions'
+   * merges: the new versions of the rows the batch updates outside its merged files, and rows of
+   * merged tail files that waited already. A row waits for the region it waited for, or else the
+   * region of the row group it left. One list a region ({@code deltas} {@code region}), or one
+   * list ({@code write}).
+   */
+  private List<List<long[]>> deltas(OpLog.Batch b, List<long[]> rows, Set<Long> replaced)
+      throws IOException {
+    Set<Long> updated = new HashSet<>();
+    for (long id : b.updateIds()) {
+      if (!replaced.contains(id)) {
+        updated.add(id);
+      }
+    }
+    Map<Integer, List<long[]>> byRegion = new TreeMap<>();
+    boolean perRegion = "region".equals(defer.deltas);
+    for (var it = rows.iterator(); it.hasNext(); ) {
+      long[] row = it.next();
+      int id = (int) row[0];
+      int region;
+      if (updated.contains(row[0])) {
+        int k = fileOfId[id];
+        long first = rowGroupOf(k, posOfId[id])[0];
+        region =
+            deltaGroups.getOrDefault(k, Set.of()).contains(first) ? regionOf[id] : regionOf(k, first);
+      } else if (inDelta.get(id)) {
+        region = regionOf[id]; // waited in a merged tail file
+      } else {
+        continue;
+      }
+      it.remove();
+      regionOf[id] = region;
+      waitingFor.computeIfAbsent(region, x -> new ArrayList<>()).add(row[0]);
+      byRegion.computeIfAbsent(perRegion ? region : 0, x -> new ArrayList<>()).add(row);
+    }
+    return new ArrayList<>(byRegion.values());
   }
 
   /**

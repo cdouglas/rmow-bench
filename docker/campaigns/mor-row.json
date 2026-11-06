@@ -1,0 +1,18 @@
+{
+  "description": "A calibration of earlier runs (docs/HYPOTHESES.md, 2026-11-06): MoR-v3 alone, with every update reading its old rows (updateRead row), at the eleven settings of RMoR's rerun in the cloud (configs/rmor-*.json), so that the cloud runs' MoR can be priced with what its updates read without running them again. Payload checks off, requests and held memory logged.",
+  "flags": ["--log-requests", "--log-held"],
+  "cores_per_job": 3,
+  "jobs": [
+    {"config": "configs/mor-row-rg64m.json", "heap": "12g", "store_gib": 70},
+    {"config": "configs/mor-row-rg32m.json", "heap": "12g", "store_gib": 50},
+    {"config": "configs/mor-row-ingest-rows.json", "heap": "12g", "store_gib": 45},
+    {"config": "configs/mor-row-s0.json", "heap": "12g", "store_gib": 32},
+    {"config": "configs/mor-row-base.json", "heap": "12g", "store_gib": 30},
+    {"config": "configs/mor-row-late99-1.json", "heap": "12g", "store_gib": 30},
+    {"config": "configs/mor-row-late99-20.json", "heap": "12g", "store_gib": 30},
+    {"config": "configs/mor-row-s2.json", "heap": "12g", "store_gib": 25},
+    {"config": "configs/mor-row-ingest.json", "heap": "12g", "store_gib": 22},
+    {"config": "configs/mor-row-p10.json", "heap": "12g", "store_gib": 20},
+    {"config": "configs/mor-row-p30.json", "heap": "12g", "store_gib": 16}
+  ]
+}

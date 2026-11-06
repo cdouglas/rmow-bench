@@ -340,6 +340,21 @@ final class Scans {
       DeleteFile[] deletes,
       byte[] tail,
       DeleteCache deleteCache) {
+    // without the read's cache, what planning loads is held while it plans
+    try (DeleteCache planning = deleteCache == null ? new DeleteCache() : null) {
+      return deadRowGroups(
+          loadDeletes(ctx, footerPrefetch, df, deletes, deleteCache == null ? planning : deleteCache),
+          tail);
+    }
+  }
+
+  /**
+   * {@code df}'s deleted positions: its {@code deletes} loaded from storage as a read loads them
+   * (each load a {@link Spans.Kind#DELETES} span), through {@code cache}, which holds them until it
+   * closes.
+   */
+  static PositionDeleteIndex loadDeletes(
+      ArmContext ctx, int footerPrefetch, DataFile df, DeleteFile[] deletes, DeleteCache cache) {
     FileScanTask task =
         new BaseFileScanTask(
             df,
@@ -347,14 +362,10 @@ final class Scans {
             SCHEMA_JSON,
             SPEC_JSON,
             ResidualEvaluator.unpartitioned(Expressions.alwaysTrue()));
-    // without the read's cache, what planning loads is held while it plans
-    try (DeleteCache planning = deleteCache == null ? new DeleteCache() : null) {
-      LengthAwareDeleteFilter filter =
-          new LengthAwareDeleteFilter(
-              ctx.io(), task, Rows.SCHEMA, Rows.SCHEMA, footerPrefetch,
-              deleteCache == null ? planning : deleteCache, null);
-      return deadRowGroups(filter.deletedRowPositions(), tail);
-    }
+    LengthAwareDeleteFilter filter =
+        new LengthAwareDeleteFilter(
+            ctx.io(), task, Rows.SCHEMA, Rows.SCHEMA, footerPrefetch, cache, null);
+    return filter.deletedRowPositions();
   }
 
   private static Set<Long> deadRowGroups(PositionDeleteIndex deleted, byte[] tail) {

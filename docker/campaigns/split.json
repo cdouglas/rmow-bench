@@ -1,0 +1,16 @@
+{
+  "description": "The two workloads apart (docs/HYPOTHESES.md, 2026-11-06): updates only (the base point's 150,000 updates and deletes a write, clustered by region, no inserts), with every update reading its old rows (updateRead row): MoR, MoR compacted every 10 writes, MoR reading every column in its locate (Spark's plan), RMoR, RMoW-external, RMoW-append and RMoR with deferred merges at two thresholds and two placements; and inserts only (the base point's 350,000 a write, sorted by event time, lateness p99 1, 5 and 20 writes): MoR, MoR compacted, RMoR and RMoW-append. Payload checks off, requests and held memory logged.",
+  "flags": ["--log-requests", "--log-held"],
+  "cores_per_job": 3,
+  "jobs": [
+    {"config": "configs/upd-base.json", "heap": "16g", "store_gib": 40},
+    {"config": "configs/upd-base-compact.json", "heap": "16g", "store_gib": 20},
+    {"config": "configs/upd-base-scan.json", "heap": "16g", "store_gib": 20},
+    {"config": "configs/upd-density-p25.json", "heap": "16g", "store_gib": 20},
+    {"config": "configs/upd-density-write.json", "heap": "16g", "store_gib": 20},
+    {"config": "configs/ing-base.json", "heap": "16g", "store_gib": 30},
+    {"config": "configs/ing-base-compact.json", "heap": "16g", "store_gib": 20},
+    {"config": "configs/ing-late99-1.json", "heap": "16g", "store_gib": 30},
+    {"config": "configs/ing-late99-20.json", "heap": "16g", "store_gib": 30}
+  ]
+}

@@ -1,15 +1,18 @@
 package org.rmow.bench.arms;
 
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.function.Consumer;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DeleteFile;
@@ -65,6 +68,13 @@ public abstract class MorArm implements Arm {
   protected final int[] posOfId;
   private final List<Integer> removedRows = new ArrayList<>(); // per file: rows deleted or moved
   private int lastBatch = -1;
+  // the data files whose deletes this batch's locate loaded and checked against their row groups
+  private final Set<String> locatedDeletes = new HashSet<>();
+  private boolean locating;
+  /** The files of at most 1 MiB fetched whole to plan this batch, by file. */
+  protected final Map<Integer, byte[]> planned = new HashMap<>();
+  // the row groups of the file versions whose footers this batch parsed (a version's never change)
+  private final Map<String, List<long[]>> parsedGroups = new HashMap<>();
   /** The footers this arm's writer has read in the current transaction (a batch, a compaction). */
   protected final WriterFooters footers;
   /**
@@ -75,6 +85,10 @@ public abstract class MorArm implements Arm {
 
   protected MorArm(ArmContext ctx) {
     this.ctx = ctx;
+    String updateRead = ctx.layout().updateReadOrDefault();
+    if (!List.of("id", "row", "scan").contains(updateRead)) {
+      throw new IllegalArgumentException("Unknown updateRead: " + updateRead);
+    }
     this.footers = new WriterFooters(ctx);
     this.fileOfId = new int[(int) ctx.log().totalIds()];
     this.posOfId = new int[(int) ctx.log().totalIds()];
@@ -135,17 +149,198 @@ public abstract class MorArm implements Arm {
 
   /** Runs the locate phase when the layout asks writers to find their rows by scanning. */
   protected void locate(OpLog.Batch b) throws IOException {
+    locate(b, false);
+  }
+
+  /**
+   * Runs the locate phase when the layout asks writers to find their rows by scanning.
+   *
+   * @param rows whether the scan reads every column of the row groups it reads, when the batch
+   *     updates rows (MoR under {@code updateRead} {@code scan}), and not {@code id} alone
+   */
+  protected void locate(OpLog.Batch b, boolean rows) throws IOException {
+    locatedDeletes.clear();
     if ("scan".equals(ctx.layout().locate)) {
-      ctx.phases().run("locate", () -> locateByScan(b));
+      locating = true;
+      try {
+        ctx.phases().run("locate", () -> locateByScan(b, rows && b.updateIds().length > 0));
+      } finally {
+        locating = false;
+      }
     }
+  }
+
+  /** Whether writes read every column of the row groups holding the rows they update. */
+  protected boolean readsUpdatedRows() {
+    return !"id".equals(ctx.layout().updateReadOrDefault());
+  }
+
+  /**
+   * Reads whole, deletes applied, each row group that holds a row the batch updates, as phase
+   * {@code update-read} ({@code updateRead} {@code row}): a new version is its old row with some
+   * columns set. Row groups the write reads whole anyway are left out: {@code readWhole} maps a
+   * data file to the first rows of those row groups, or to null when the write reads the whole
+   * file. Runs before the batch moves any row, so the index is exact; checks that every updated
+   * row was read.
+   */
+  protected void readUpdated(OpLog.Batch b, Map<Integer, Set<Long>> readWhole) throws IOException {
+    if (b.updateIds().length == 0) {
+      return;
+    }
+    ctx.phases().run("update-read", () -> readUpdatedRows(b, readWhole));
+  }
+
+  /** {@link #readUpdated}, as a part of the phase, for a writer that runs its phases in parts. */
+  protected void readUpdatedPart(OpLog.Batch b, Map<Integer, Set<Long>> readWhole)
+      throws IOException {
+    if (b.updateIds().length == 0) {
+      return;
+    }
+    ctx.phases().part("update-read", () -> readUpdatedRows(b, readWhole));
+  }
+
+  private void readUpdatedRows(OpLog.Batch b, Map<Integer, Set<Long>> readWhole)
+      throws IOException {
+    Map<Integer, Map<Long, long[]>> toRead = new TreeMap<>(); // file -> first row -> row group
+    Set<Long> wanted = new HashSet<>();
+    for (long id : b.updateIds()) {
+      int k = fileOfId[(int) id];
+      if (readWhole.containsKey(k) && readWhole.get(k) == null) {
+        continue;
+      }
+      long[] g = rowGroupOf(k, posOfId[(int) id]);
+      if (readWhole.getOrDefault(k, Set.of()).contains(g[0])) {
+        continue;
+      }
+      toRead.computeIfAbsent(k, x -> new TreeMap<>()).put(g[0], g);
+      wanted.add(id);
+    }
+    int[] found = {0};
+    Reader writer = Reader.writer(ctx.layout());
+    for (Map.Entry<Integer, Map<Long, long[]>> e : toRead.entrySet()) {
+      int k = e.getKey();
+      DataFile df = files.get(k);
+      DeleteFile[] ds = deletesOf(k);
+      byte[] tail = tailOf(k);
+      InputFile held = held(k);
+      InputFile stored =
+          held != null ? held : ctx.io().newInputFile(df.location(), df.fileSizeInBytes() - tail.length);
+      try (DeleteCache loaded = new DeleteCache()) { // the file's deletes, once
+        for (long[] g : e.getValue().values()) {
+          Scans.scan(
+              ctx, writer, df, ds, Rows.SCHEMA, Expressions.alwaysTrue(), stored, tail, g[2], g[3],
+              loaded,
+              rows -> {
+                for (int r = 0; r < rows.size(); r++) {
+                  if (wanted.contains(rows.id(r))) {
+                    found[0]++;
+                  }
+                }
+              });
+        }
+      }
+    }
+    if (found[0] != wanted.size()) {
+      throw new IllegalStateException(
+          "Read " + found[0] + " of the " + wanted.size() + " updated rows to read");
+    }
+  }
+
+  /** The row group of data file {@code k} that holds position {@code pos}, as {@link #rowGroups}. */
+  protected long[] rowGroupOf(int k, long pos) throws IOException {
+    List<long[]> groups = rowGroups(k);
+    int lo = 0;
+    int hi = groups.size() - 1;
+    while (lo < hi) {
+      int mid = (lo + hi + 1) >>> 1;
+      if (groups.get(mid)[0] <= pos) {
+        lo = mid;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    return groups.get(lo);
+  }
+
+  /**
+   * Data file {@code k}'s row groups, each {first row, rows, start, length}; one covering the whole
+   * file (start -1) if it has one row group. The footer of a file of several is read once per
+   * batch.
+   */
+  protected List<long[]> rowGroups(int k) throws IOException {
+    DataFile df = files.get(k);
+    if (df.splitOffsets() == null || df.splitOffsets().size() <= 1) {
+      return List.of(new long[] {0, df.recordCount(), -1, -1});
+    }
+    String version = df.location() + "@" + df.fileSizeInBytes();
+    List<long[]> groups = parsedGroups.get(version);
+    if (groups == null) {
+      groups = Scans.rowGroups(tailOf(k));
+      parsedGroups.put(version, groups);
+    }
+    return groups;
+  }
+
+  /**
+   * Data file {@code k}'s tail, as the writer holds it this batch: read once ({@link
+   * WriterFooters}), or, for a file of at most 1 MiB, which every open fetches whole, from the file
+   * fetched whole once to plan.
+   */
+  protected byte[] tailOf(int k) throws IOException {
+    DataFile df = files.get(k);
+    byte[] tail = footers.tail(df.location(), df.fileSizeInBytes());
+    if (tail != null) {
+      return tail;
+    }
+    byte[] whole = planned.get(k);
+    if (whole == null) {
+      whole = Scans.readWhole(ctx, df.location(), df.fileSizeInBytes());
+      planned.put(k, whole);
+    }
+    return Scans.tailOf(whole);
+  }
+
+  /** Starts a batch's planning: what it fetched whole and parsed is dropped. */
+  protected void beginPlanning() {
+    planned.clear();
+    parsedGroups.clear();
+  }
+
+  /** Data file {@code k} as fetched whole to plan this batch, in memory; null if it was not. */
+  protected InputFile held(int k) throws IOException {
+    byte[] whole = planned.get(k);
+    if (whole == null) {
+      return null;
+    }
+    MemFileIO mem = new MemFileIO();
+    String location = files.get(k).location();
+    try (OutputStream out = mem.newOutputFile(location).create()) {
+      out.write(whole);
+    }
+    return mem.newInputFile(location, whole.length);
+  }
+
+  /**
+   * Whether this batch's locate loaded data file {@code k}'s current deletes and checked them
+   * against its footer, row group by row group ({@code writerSkipsDeadRowGroups}), so the writer
+   * knows how many rows of each row group they cover without loading them again.
+   */
+  protected boolean locateLoadedDeletes(int k) {
+    return locatedDeletes.contains(files.get(k).location());
+  }
+
+  /** The delete files a scan of data file {@code k} applies, as Iceberg plans them. */
+  protected DeleteFile[] deletesOf(int k) {
+    return deletesFor(files.get(k), fileSeqs.get(k), deletes);
   }
 
   /**
    * Finds the batch's updated and deleted rows as a MERGE would: reads {@code id} and {@code _pos}
    * (deletes applied) of every live data file whose {@code id} bounds may hold one of them, with
-   * row groups pruned to the targets' id range. Checks every position found against the index.
+   * row groups pruned to the targets' id range; with {@code wholeRows}, every column. Checks every
+   * position found against the index.
    */
-  private void locateByScan(OpLog.Batch b) throws IOException {
+  private void locateByScan(OpLog.Batch b, boolean wholeRows) throws IOException {
     long[] targets = new long[b.updateIds().length + b.deleteIds().length];
     System.arraycopy(b.updateIds(), 0, targets, 0, b.updateIds().length);
     System.arraycopy(b.deleteIds(), 0, targets, b.updateIds().length, b.deleteIds().length);
@@ -153,7 +348,10 @@ public abstract class MorArm implements Arm {
       return;
     }
     Arrays.sort(targets);
-    Schema projection = new Schema(Rows.SCHEMA.findField("id"), MetadataColumns.ROW_POSITION);
+    Schema projection =
+        wholeRows
+            ? new Schema(withPosition(Rows.SCHEMA.columns()))
+            : new Schema(Rows.SCHEMA.findField("id"), MetadataColumns.ROW_POSITION);
     Expression range =
         Expressions.and(
             Expressions.greaterThanOrEqual("id", targets[0]),
@@ -194,6 +392,12 @@ public abstract class MorArm implements Arm {
     }
   }
 
+  private static List<Types.NestedField> withPosition(List<Types.NestedField> columns) {
+    List<Types.NestedField> out = new ArrayList<>(columns);
+    out.add(MetadataColumns.ROW_POSITION);
+    return out;
+  }
+
   /** Whether a file's {@code id} bounds contain any of the sorted {@code targets}. */
   private static boolean mayHoldAny(DataFile df, long[] targets) {
     ByteBuffer lo = df.lowerBounds() == null ? null : df.lowerBounds().get(ID_FIELD);
@@ -221,8 +425,13 @@ public abstract class MorArm implements Arm {
   @Override
   public void apply(OpLog.Batch b) throws IOException {
     footers.begin();
+    beginPlanning();
     long seq = batchSeq(b);
-    locate(b);
+    String updateRead = ctx.layout().updateReadOrDefault();
+    locate(b, "scan".equals(updateRead));
+    if ("row".equals(updateRead)) {
+      readUpdated(b, Map.of());
+    }
     // the old locations of updated and deleted rows, before the updates move them
     Map<Integer, List<Integer>> deleted = new HashMap<>();
     for (long id : b.updateIds()) {
@@ -585,6 +794,9 @@ public abstract class MorArm implements Arm {
         try (DeleteCache loaded = new DeleteCache()) { // the deletes, once per scan
           Set<Long> dead =
               Scans.deadRowGroups(ctx, writer.footerPrefetchBytes(), df, ds, tail, loaded);
+          if (locating) {
+            locatedDeletes.add(df.location());
+          }
           if (dead.isEmpty()) {
             Scans.scan(ctx, writer, df, ds, projection, filter, tail, -1, -1, loaded, rows);
             return;

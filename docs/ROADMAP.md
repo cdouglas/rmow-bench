@@ -311,6 +311,27 @@ reads.
   161–292 MB. Arms `rmor-c-kept` and `rmor-c-footer-kept` will write each rewritten row group as
   one of its own, and the inserts apart, as RMoW-append does. Registered 2026-11-04
   (docs/HYPOTHESES.md, W1–W3): four laptop runs, `configs/kept-*.json`. Not built.
+- [x] **What an update reads** (`layout.updateRead`, built 2026-11-05; found 2026-11-05). The
+  MoR family's new versions were made from an id and a version (`MadeRows`), so MoR, TailCoW and
+  RMoR below θ never read the old row's other columns: MoR-v3's locate read 36.7 MB a write at
+  the base point (the `id` column, 5.9% of a row group), against RMoW-append's 224 MB merge read.
+  A real update reads every column of the rows it rewrites. `row` makes every arm read whole each
+  row group holding a row it updates, once (phase `update-read`, after the locate, for the row
+  groups it does not rewrite); `scan` makes MoR read every column in its locate scan, as Spark's
+  MERGE on a merge-on-read table does. Absent (the default), as before, so earlier
+  configurations keep their hashes. Every campaign before it under-charges the MoR family's
+  writes. The cloud runs are not run again (the user, 2026-11-06): MoR alone reruns on havoc at
+  the eleven settings of RMoR's rerun, to price them (`configs/mor-row-*.json`, campaign
+  `docker/campaigns/mor-row.json`). `DensityTest`.
+- [x] **RMoR with deferred merges** (`rmor-density`, built 2026-11-05, `layout.defer`). RMoR with
+  row groups kept, merging a region's row group once its dead rows and the write's changes reach
+  θ of its rows, folding in the region's rows that wait in delta row groups; below θ, DVs, the new
+  versions waiting in a delta row group per region (or per write). A region is numbered when first
+  needed and keeps its number through merges, and a row waits for the region of the row group it
+  left. A first version grouped the waiting rows by the row group they left; in the model that
+  fragmented without bound (1,559 row groups after 30 writes at θ = 0.06), since rows updated
+  again leave many small deltas. No cleaner; delta row groups never merge on their own.
+  `DensityTest`. Registered with the split campaign (HYPOTHESES.md, 2026-11-06).
 
 ## Workload generator
 
@@ -425,6 +446,22 @@ lower.
   and RMoR-C's block-uploaded write files read slowly
   ([lab/pages/cloud-sweep.md](../lab/pages/cloud-sweep.md); the model and the verdicts in
   [lab/pages/cloud-sweep-model.md](../lab/pages/cloud-sweep-model.md)).
+- [ ] **The two workloads apart** (decided 2026-11-05; HYPOTHESES.md, 2026-11-06). Updates
+  only (the base point's 150,000 changes a write, clustered by region, no inserts) and inserts
+  only (its 350,000 a write, sorted by event time, lateness p99 1, 5 and 20 writes), with
+  `updateRead` `row`: `configs/upd-*.json` and `configs/ing-*.json`, campaign
+  `docker/campaigns/split.json` on havoc (the user's runs). The ingest arms append alike at the
+  base point (a write's inserts are sealed at once, so no tail merge happens); a writer that
+  merges late rows into their row group is not built.
+- [ ] **Inserts merged by the writer** (hypothesis (b), open 2026-11-06). Two ways, not yet
+  chosen:
+  - **tiered, by arrival:** a tail seal above the row-group size (`tailSealBytes`, 16 MiB in
+    every configuration so far, tied to the row-group size), so tail policy C merges consecutive
+    writes' inserts into longer runs sorted by event time, in RMoR and RMoW-append. A
+    configuration, no code;
+  - **leveled, by event time:** a writer that merges each late row into the row group its event
+    time falls in, so no two row groups overlap and a sorted read concatenates. Not built; the
+    model puts it at 746 MB a write at p99 5.
 - [ ] **Hot-region isolation** (a micro-benchmark question, not a Parquet benchmark). Can RMoW
   isolate frequently updated regions as row groups of their own, and so cut its amplification?
   - RMoW sets row-group boundaries on every rewrite, so it can cut a hot range out as its own row

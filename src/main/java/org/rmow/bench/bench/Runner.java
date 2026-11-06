@@ -314,6 +314,10 @@ public final class Runner {
         LayoutSpec.Clean clean = ctx.layout().cleanOrDefault();
         yield new TailCowArm(ctx, TailPolicy.Kind.C, clean.rewriteShare, false, true, clean);
       }
+      case "rmor-density" -> {
+        LayoutSpec.Defer defer = ctx.layout().deferOrDefault();
+        yield new TailCowArm(ctx, TailPolicy.Kind.C, defer.share, false, true, null, defer);
+      }
       case "cow" -> new CowArm(ctx);
       default -> throw new IllegalArgumentException("Unknown arm: " + name);
     };

@@ -74,6 +74,29 @@ public final class LayoutSpec {
    */
   public String locate = "oracle";
 
+  /**
+   * What a write reads of the rows it updates (docs/HYPOTHESES.md, 2026-11-06). A new version is
+   * the old row with some columns set, so a writer reads every column of it.
+   *
+   * <ul>
+   *   <li>null or {@code id}: nothing beyond the locate's {@code id} and {@code _pos}; the new
+   *       version is made from its id and version alone (blind), as before. RMoW and the region
+   *       rewrites read the row groups they rewrite whole either way.
+   *   <li>{@code row}: every column of each row group that holds a row the write updates, deletes
+   *       applied, once. Row groups and files the write rewrites are read whole anyway (its
+   *       merge-read); the others are read in phase {@code update-read}, after the locate. This is
+   *       a plan in two passes, as Spark plans a copy-on-write MERGE: find the rows by key, then
+   *       read what the write needs.
+   *   <li>{@code scan}: MoR (v2 and v3) reads every column in its locate scan, one pass, as Spark
+   *       plans a MERGE on a merge-on-read table. The arms that rewrite regions plan as under
+   *       {@code row}.
+   * </ul>
+   *
+   * Left out of the configuration's hash when null, so configurations from before it keep theirs.
+   */
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  public String updateRead = null;
+
   /** Compact every this many batches (0: never), with the triggers below. */
   public int compactEvery = 0;
   /** MoR family: rewrite files with at least this fraction of their rows deleted. */
@@ -108,7 +131,7 @@ public final class LayoutSpec {
   public boolean writerSkipsDeadRowGroups = false;
 
   /**
-   * RMoR with a cleaner ({@code rmor-c-clean}; docs/HYPOTHESES.md, 2026-11-04): its settings, or
+   * RMoR with a cleaner ({@code rmor-c-clean}; docs/drafts/strides-and-cleaner-2026-11-04.md): its settings, or
    * null for the defaults. Left out of the configuration's hash when null, so configurations from
    * before it keep theirs.
    */
@@ -134,6 +157,38 @@ public final class LayoutSpec {
   /** The cleaner's settings in effect. */
   public Clean cleanOrDefault() {
     return clean != null ? clean : new Clean();
+  }
+
+  /**
+   * RMoR with deferred merges ({@code rmor-density}; docs/HYPOTHESES.md, 2026-11-06): its
+   * settings, or null for the defaults. Left out of the configuration's hash when null.
+   */
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  public Defer defer = null;
+
+  /** Deferred merges: when a row group is merged, and where the rows waiting for it go. */
+  public static final class Defer {
+    /**
+     * θ: a write merges a row group it changes once the row group's dead rows and the write's
+     * changes to it reach this share of its rows.
+     */
+    public double share = 0.06;
+    /**
+     * Where the new versions of the rows a DV hides wait for their region's merge: {@code region},
+     * a row group per region (the base row group they left, which keeps its region through its
+     * merges); {@code write}, one row group of the write's.
+     */
+    public String deltas = "region";
+  }
+
+  /** The deferred merges' settings in effect. */
+  public Defer deferOrDefault() {
+    return defer != null ? defer : new Defer();
+  }
+
+  /** {@link #updateRead}, with null as {@code id}. */
+  public String updateReadOrDefault() {
+    return updateRead != null ? updateRead : "id";
   }
 
   /** The Parquet writer properties for data files. */

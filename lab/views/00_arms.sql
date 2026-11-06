@@ -12,6 +12,8 @@ SELECT * FROM (VALUES
     (11, 'rmor-c-footer', 'rmor', 'square', 'RMoR-C footer', true),
     (16, 'rmor-c-kept', 'rmor', 'diamond', 'RMoR-C kept', false),
     (17, 'rmor-c-footer-kept', 'rmor', 'cross', 'RMoR-C footer kept', false),
+    (18, 'rmor-c-clean', 'rmor', 'triangle-down', 'RMoR-C clean', false),
+    (19, 'rmor-density', 'rmor', 'wedge', 'RMoR density', false),
     (7, 'rmow-a', 'rmow', 'circle', 'RMoW-A', false),
     (8, 'rmow-b', 'rmow', 'square', 'RMoW-B', true),
     (9, 'rmow-c', 'rmow', 'triangle-up', 'RMoW-C', true),

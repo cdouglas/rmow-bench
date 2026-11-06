@@ -241,6 +241,42 @@ class RmorTest {
    */
   @Test
   void theCleanerDrainsSparseFiles(@TempDir Path dir) throws IOException {
+    BenchConfig cfg = churn();
+    cfg.arms = List.of("mor-v3", "rmor-c-clean");
+    List<JsonNode> steps = run(cfg, dir);
+    assertThat(sum(steps, "rmor-c-clean", "clean", null, "bytes_read"))
+        .as("rows carried forward")
+        .isPositive();
+    long morFiles = lastState(steps, "mor-v3", "data_files");
+    assertThat(lastState(steps, "rmor-c-clean", "data_files"))
+        .as("live data files at the end, against MoR's %d", morFiles)
+        .isLessThan(morFiles);
+  }
+
+  /**
+   * The cleaner pays for what it judges by: a file's dead rows come from its manifest entry, but
+   * its row groups' from its DV, loaded in the clean phase unless the batch's locate loaded it. A
+   * cleaner that never carries anything (no row group is sparse below 0, no file drains below 0)
+   * still loads the DVs of the files it examines.
+   */
+  @Test
+  void theCleanerLoadsTheDvsItJudgesBy(@TempDir Path dir) throws IOException {
+    BenchConfig cfg = churn();
+    cfg.layout.clean = new org.rmow.bench.arms.LayoutSpec.Clean();
+    cfg.layout.clean.low = 0;
+    cfg.layout.clean.drain = 0;
+    cfg.arms = List.of("rmor-c-clean");
+    List<JsonNode> steps = run(cfg, dir);
+    assertThat(max(steps, "rmor-c-clean", "clean", "held_deletes"))
+        .as("DVs the cleaner loaded to judge row groups")
+        .isPositive();
+    assertThat(max(steps, "rmor-c-clean", "clean", "held_rows"))
+        .as("rows it carried")
+        .isZero();
+  }
+
+  /** A small churn workload (inserts, updates and deletes of the newest rows): MoR goes sparse. */
+  private static BenchConfig churn() {
     BenchConfig cfg = config(0);
     cfg.layout.compactEvery = 0;
     cfg.layout.tailSealBytes = 1;
@@ -251,15 +287,7 @@ class RmorTest {
     cfg.workload.deleteFrac = 0.1;
     cfg.workload.opsPerBatch = 6_000;
     cfg.workload.batches = 12;
-    cfg.arms = List.of("mor-v3", "rmor-c-clean");
-    List<JsonNode> steps = run(cfg, dir);
-    assertThat(sum(steps, "rmor-c-clean", "clean", null, "bytes_read"))
-        .as("rows carried forward")
-        .isPositive();
-    long morFiles = lastState(steps, "mor-v3", "data_files");
-    assertThat(lastState(steps, "rmor-c-clean", "data_files"))
-        .as("live data files at the end, against MoR's %d", morFiles)
-        .isLessThan(morFiles);
+    return cfg;
   }
 
   /** A field of an arm's last state record. */

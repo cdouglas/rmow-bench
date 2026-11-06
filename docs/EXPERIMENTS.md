@@ -36,6 +36,8 @@ All arms replay the same op log from the same initial-load file. The ids are the
 | `tailcow-b`, `tailcow-c` | copy-on-write tail | merged into open tail **data files** by policy B or C | deletion vectors, except in tail files being merged |
 | `rmor-c` | regional merge-on-read | as `tailcow-c` | every row group (of a sealed file) or open tail file a batch changes enough of (`rmorRewriteShare`, θ) rewritten: a row group's rows go into the batch's new data file, sorted by event time together with the batch's inserts and the other rewritten rows and cut into new row groups, so a row group no longer keeps its rows (docs/HYPOTHESES.md, 2026-11-04), and a DV covers the old row group; an open tail file is rewritten whole and takes its place. Below θ, deletion vectors. |
 | `rmor-c-footer` | regional merge-on-read, footers | as `tailcow-c`, in files the store can extend | as `rmor-c` at θ = 0, each old row group hidden by a footer appended to its file instead of a DV (built 2026-10-27) |
+| `rmor-c-kept`, `rmor-c-footer-kept` | regional merge-on-read, row groups kept | as `tailcow-c` | as `rmor-c` and `rmor-c-footer` at θ = 0, each rewritten row group one row group of its own, the inserts apart (W1–W3, 2026-11-04) |
+| `rmor-density` | regional merge-on-read, deferred | as `rmor-c-kept` | DVs until a region's row group has θ of its rows dead or changed (`layout.defer`), then merged with the region's rows that wait in delta row groups (one per region, or per write) (2026-11-05) |
 | `rmow-a`, `rmow-b`, `rmow-c` | RMoW, appendable | a row group appended to the tail **object**, merged with open tail row groups by policy A, B or C | every touched row group rewritten as a new region of its object |
 | `rmow-b-split`, `rmow-c-split` | RMoW, split | as `rmow-*`, but each version's regions go to a new object and its footer to a footer-only object | the same |
 | `rmow-*-dv` | RMoW with DVs (ablation, removed) | as `rmow-*` | deletion vectors on each object's stable prefix (its sealed row groups); open tail row groups were still rewritten. Removed after the dv ablation ([DESIGN.md](DESIGN.md#deletion-vectors-on-an-appendable-file-an-ablation-removed)). |
@@ -665,6 +667,12 @@ would need its own arms and reader checks.
   ([base-point](../lab/pages/base-point.md), [cloud-sweep](../lab/pages/cloud-sweep.md)) take
   RMoR's times from its runs, each over the MoR of its own run, and the model's pages keep the
   earlier runs they price.
+- **Next: the two workloads apart** (registered 2026-11-06): updates only and inserts only, with
+  every update reading the rows it rewrites (`updateRead` `row`; until then the MoR family's
+  updates were blind, under-charging its writes in every campaign). Campaign
+  `docker/campaigns/split.json` on havoc, nine jobs (HYPOTHESES.md, U1–U4 and I1–I3). Beside
+  it, campaign `docker/campaigns/mor-row.json`: MoR alone with `updateRead` `row` at the eleven
+  settings of RMoR's cloud rerun, to price the cloud runs' MoR without running them again.
 - **Both calibrations run the five arms new campaigns run** (MoR-v3, TailCoW-C, RMoR-C, RMoR-C
   with footers, RMoW-C) since 2026-10-27, RMoR-C with the writer that skips dead row groups and a `cached-skip` reader beside
   the others, and their spikes time GETs by size for the read rate per MiB.
