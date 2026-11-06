@@ -849,3 +849,131 @@ rewritten, encoded and its rows dropped before the next is read, and the inserts
 RMoR's file streams to the store as it is encoded. RMoW-external's is held for its single create,
 as now. Measured, not judged: the rows their writes hold at once against RMoR's and
 RMoW-external's as built, which hold every row of a write's file to sort it (M4).
+
+## The two workloads apart: updates only, and inserts only (registered 2026-11-06)
+
+**What it decides:** the two claims for region merges, each on a workload of its own. Every
+campaign so far ran both at once: the base point's writes are 70% inserts (some late), 25% updates
+and 5% deletes, so a read's cost mixed the two.
+- **(a) Updates:** statements update rows clustered in a key region, on a table laid out by key,
+  with no order to keep. An update reads every column of the rows it rewrites, so copying the rest
+  of their row group into the write costs only write bytes, and spares readers the deletion
+  vectors and the dead rows.
+- **(b) Inserts:** inserts only, sorted by event time, some late. A writer that merges late rows
+  into the row groups they belong in spares readers from interleaving row groups.
+
+**A fix first: what an update reads.** Until now the MoR family's updates were blind. The locate
+read only `id` and `_pos` (`MorArm.locateByScan`), and the new versions were made from an id and
+a version (`MadeRows`), never from the old row. So MoR, TailCoW and RMoR below θ never read the old
+rows' other columns: at the base point MoR-v3's locate read 36.7 MB a write (the `id` column is
+5.9% of a row group's bytes), against RMoW-append's 224 MB merge read.
+- **The knob:** `layout.updateRead` `row` makes every arm read whole each row group that holds a
+  row it updates, once. The region designs read those row groups whole anyway (their merge read),
+  so only the MoR family's writes change: phase `update-read`, after the locate.
+- **What it does to earlier runs:** every campaign before this one under-charges the MoR family's
+  writes. Their configurations keep their hashes and stay as they ran; which to rerun is open.
+
+**Setup:**
+- **Workloads**, from the base point (`kept-base`), with its seed, its table (25.7M rows laid out
+  by id, 16 MiB row groups) and 30 writes:
+  - **updates only** (`upd-*`): 150,000 changes a write (125,000 updates and 25,000 deletes) as
+    statements of 3% of a region's rows (regions of 513,700 rows, skew 1), and no inserts;
+  - **inserts only** (`ing-*`): 350,000 a write, sorted by event time, with lateness median 0.05
+    writes and p99 5 writes (`ing-base`), 1 write (`ing-late99-1`) or 20 (`ing-late99-20`).
+- **Arms, updates:**
+  - `upd-base` runs MoR (`mor-v3`), RMoR (`rmor-c-kept`), RMoW-external (`rmor-c-footer-kept`),
+    RMoW-append (`rmow-c`), and RMoR with deferred merges (`rmor-density`, θ = 0.06, a delta row
+    group per region);
+  - **twins of one arm each:** MoR compacted every 10 writes (`upd-base-compact`); MoR with
+    Spark's one-pass plan (`upd-base-scan`, `updateRead` `scan`); and the deferred merges at
+    θ = 0.25 (`upd-density-p25`) and with one delta row group per write (`upd-density-write`).
+- **The deferred merges** (`rmor-density`): DVs until a region's row group has θ of its rows dead
+  or changed by the write; then the row group is merged, with the region's rows that wait in
+  delta row groups folded in. Below θ, the new versions wait in the write's file: a row group per
+  region, or one per write. A delta row group never merges on its own, and there is no cleaner.
+- **Arms, inserts:**
+  - `ing-base` and `ing-late99-*` run MoR, RMoR and RMoW-append, and `ing-base-compact` runs MoR
+    compacted every 10 writes;
+  - **they append alike:** at the base point a write's 10 MB of inserts is sealed at once
+    (merging four would pass 16 MiB), so tail policy C never merges them. The three arms differ
+    only in objects: a file a write, or RMoW's tail object;
+  - **(b)'s writer is not built:** no arm merges a late row into the row group it belongs in.
+- **The rest as `kept-base`:** locate by scan, writers that skip dead row groups, five readers
+  (one-footer, cached with the sorted read, cached-skip, cached-p8, stock), probes every 5
+  writes, payload checks off, `--log-requests --log-held`. Campaign `docker/campaigns/split.json`
+  on havoc, the user's runs.
+- **The model:** `analysis/hybrid_model.py` replays each configuration's op log through each
+  policy at 28.6 bytes a row. Against measured runs it reads 5–16% low on bytes (the note of
+  2026-11-04), and it says nothing about time. Every prediction below is the model's mean over the
+  30 writes, or its state after the 30th.
+- **A check at a fifth of the scale** (a scratch run, not in `results/`: 5.1M rows, 4 MiB row
+  groups, 30,000 changes a write, 10 writes):
+  - every arm's reads matched the oracle;
+  - the ratios track the model's: the deferred merges wrote 0.21 of RMoR's bytes (model 0.22);
+  - MoR's update read 1.16 times RMoR's after 10 writes (model 1.27 over 30).
+
+**Predicted, updates only:**
+- **U1 (what an update reads): MoR's update reads at least as many bytes a write as RMoR's and
+  RMoW-append's**, its locate and update read against their locate and merge read (model: 286
+  against 225 MB). Its updated rows sit in the base row groups and in the row groups of earlier
+  writes' new versions, and it reads both whole. The three region designs read within 5% of one
+  another, and the deferred merges within 10% of RMoR (model 232).
+- **U2 (writes): RMoR, RMoW-external and RMoW-append each write at least 40 times MoR's bytes a
+  write** (model 212 against 3.6 MB). The deferred merges write at most 0.3 of RMoR's at θ = 0.06
+  (model 47 MB, 0.22), with either placement, and at most 0.1 at θ = 0.25 (model 9.5 MB, 0.045).
+- **U3 (reads): after the 30th write, the region designs' full reads read at most 1.02 times their
+  live bytes, and MoR's at least 1.05 times** (model 1.00 against 1.09). **MoR's sorted read holds
+  at least 5 times RMoR's bytes at its peak** (model: 17% of the table, 31 row groups open at
+  once, against 2% and 1 row group).
+- **U4 (where the deltas wait): with a delta row group per region, the deferred merges' sorted
+  read holds at most 0.05 of the table at its peak, against at least 0.08 with one per write**
+  (model 0.02 against 0.11). **The full read takes at least 1.3 times the requests** after the
+  30th write (model 273 against 149; MoR 155, RMoR 69). This is the LSM trade: deltas kept by
+  region spare range reads and cost full reads.
+
+**Predicted, inserts only:**
+- **I1 (writes): MoR, RMoR and RMoW-append write within 5% of one another's bytes a write**, at
+  every lateness (model: 10 MB each).
+- **I2 (the newest rows): their reads of the newest 1% of event time are within 1.5 times of one
+  another's requests and bytes** at every lateness (model: 2.5 to 3.8 requests, 1.7 to 2.1 times
+  live).
+- **I3 (what lateness costs readers): after the 30th write, the appending arms' sorted read holds
+  at least 0.15 of the table at its peak at every lateness, and MoR compacted every 10 writes at
+  most 0.1** (model: 0.21 at p99 1, with 22 row groups open at once; 0.30 at p99 5 and 20, with
+  31; compacted, 0.06 at each). Every appended row group spans back to the latest of its late
+  rows.
+
+**Measured, not judged:**
+- MoR under Spark's one-pass plan: the model puts it at 271 MB a write, but our locate prunes a
+  file's row groups by a single id range, so it may read more;
+- requests by object layout (a file a write against RMoW's tail object);
+- what writes hold.
+
+Work is not judged: havoc has no instruction counters (`perf_event_paranoid` 4), and its jobs
+share their cores' siblings with other users' work.
+
+**A calibration of earlier runs (campaign `docker/campaigns/mor-row.json`, measured, not
+judged).** Every earlier campaign under-charges the MoR family's writes, and the cloud runs are
+not run again. Instead MoR (`mor-v3`) runs alone with `updateRead` `row` on havoc at the eleven
+settings of RMoR's rerun in the cloud (`configs/mor-row-*.json`: `configs/rmor-*.json` with MoR
+alone and `updateRead` `row`, so the same op logs). Requests and bytes are deterministic, so the
+cloud runs' MoR can be priced with what its updates read, from each store's model
+(lab/pages/store-latency.md). A control: every record of these runs but the `update-read` phase's
+equals the MoR record of the `rmor-*` run on the laptop (2026-11-03); a difference is a change to
+MoR's path since then, or a bug.
+
+**Limits:**
+- **The runs:** one seed and 30 writes, and the model reads low.
+- **The reads probed:** the newest 1% and the whole table. A 1% range elsewhere is extrapolated
+  from the model, not measured:
+  - updates, by key: MoR 38 requests and 9.0 times live against RMoR's 2.8 and 3.0;
+  - appended inserts, by event time at p99 5: 18 requests and 17 times live.
+- **(b) is not tested:** the inserts runs measure what lateness costs appending designs and what
+  compaction recovers. A writer that merges late rows at once would write 746 MB a write at
+  p99 5 in the model, and 148 at p99 1.
+- **No tiered merging of the inserts:** the tail's seal is 16 MiB, the row-group size, as in every
+  configuration so far (the row-group sweep moved both together). A larger seal would let tail
+  policy C merge consecutive writes' inserts into longer runs sorted by event time, in RMoR and
+  RMoW-append alike. These runs do not try one.
+- **Whole row groups:** `updateRead` `row` reads whole row groups, as Iceberg's reader does. A
+  reader of pages would read less (model: MoR 171 MB, RMoR 225).
