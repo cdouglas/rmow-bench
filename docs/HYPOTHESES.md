@@ -977,3 +977,72 @@ MoR's path since then, or a bug.
   RMoW-append alike. These runs do not try one.
 - **Whole row groups:** `updateRead` `row` reads whole row groups, as Iceberg's reader does. A
   reader of pages would read less (model: MoR 171 MB, RMoR 225).
+
+## Inserts merged by arrival: a larger tail seal (registered 2026-11-06)
+
+**What it decides:** whether merging consecutive writes' inserts as they are written spares a
+sorted read most of what lateness costs it, at about twice the write bytes; and whether the
+merged runs must be cut into row groups for that.
+
+**Why:** in the inserts-only runs of the split campaign (I1-I3, above), no arm merges inserts. The
+tail's seal (`tailSealBytes`) has been the row-group size, 16 MiB, in every configuration so far,
+and four writes of 10 MB would pass it, so tail policy C seals each write's inserts at once. Every
+appended row group spans back to its latest late row, so the sorted read holds nearly all of them
+at once (model: 0.30 of the table at p99 5 and 20, 0.21 at p99 1, after 30 writes).
+
+**Setup:**
+- **Configurations:** `ing-seal160`, `ing-seal160-late99-1` and `ing-seal160-late99-20` are
+  `ing-base` and its two lateness twins with the seal at 160 MiB (fanout 4). Four writes' units
+  of 10 MB merge into one of about 38 MiB, and four of those into one of about 153 MiB, which is
+  sealed. Each row is written about three times, and every 16th write rewrites about 150 MB; in
+  30 writes there is one unit of the top level.
+- **Arms:**
+  - **RMoR (`rmor-c`).** Its tail units are data files, and its Parquet writer cuts a merged file
+    into row groups at the row-group size. On inserts only, at the 16 MiB seal, it lays out as the
+    split campaign's `rmor-c-kept` (a write's inserts are one row group either way), so the
+    `ing-*` runs are its baseline.
+  - **RMoW-append (`rmow-c`).** A merged unit is one region, so one row group. Its tail file
+    also rolls over at the target file size (128 MiB), sealing every open unit, about every 14
+    writes, so its units stop at the middle level (about 38 MiB).
+  - MoR is left out: the seal does not touch it, and `ing-*` ran it.
+- **The rest** as `ing-base`. Campaign `docker/campaigns/seal.json` on havoc, beside the split
+  campaign.
+- **The model:** `analysis/hybrid_model.py` policies `tier:160` (units cut into row groups) and
+  `tier:160:one` (a unit one row group, in a tail file that rolls over), on the configurations'
+  op logs. Every prediction below is its mean over the 30 writes, or its state after the 30th.
+- **A check at a fifth of the scale** (a scratch run, not in `results/`: 5.1M rows, 4 MiB row
+  groups, a seal of 40 MiB and a target file of 32 MiB, 70,000 inserts a write, 20 writes, with
+  MoR):
+  - every read matched the oracle;
+  - RMoR wrote 2.4 times MoR's bytes a write, its largest write 16 times (model 2.1 and 16);
+  - RMoW-append wrote 1.6 times, its largest write 4 times (model 1.6 and 4);
+  - after the 20th write, the sorted read held 0.05 of the table in RMoR, against 0.25 in MoR and
+    in RMoW-append.
+
+**Predicted:**
+- **J1 (writes): RMoR writes 1.6 to 2.6 times the appending arms' mean bytes a write in the
+  `ing-*` run of the same lateness, and its largest write at least 10 times** (model: 21 against
+  10 MB, and 160 MB). **RMoW-append writes 1.3 to 2 times, and its largest write at most 5 times**
+  (model: 16 MB, and 40 MB).
+- **J2 (RMoR, cut): after the 30th write, RMoR's sorted read holds at most half the share of the
+  table that the appending arms' hold in the `ing-*` run of the same lateness** (model: 0.09
+  against 0.30 at p99 5 and 20, with 7 row groups open against 31; 0.07 against 0.21 at p99 1),
+  **and at p99 5 at most twice the share MoR compacted every 10 writes holds** (model 0.06, with
+  4 open).
+- **J3 (RMoW-append, one row group a unit): its sorted read holds at least 0.9 times the
+  appending arms' share in the `ing-*` run of the same lateness** (model 0.27 against 0.21 at
+  p99 1, 0.30 against 0.30 at p99 5 and 20). Each merged unit's one row group spans back to its
+  oldest late row, as a write's did.
+
+**Measured, not judged:** the read of the newest 1% of event time, which depends on where the
+merge cycle stands at the probe (model after the 30th write: RMoW-append 2.5 to 3.3 times live,
+RMoR 1.7 to 2.1; at a fifth of the scale after the 20th, RMoW-append read less than RMoR);
+requests; what the merges hold; the full read, all of whose bytes are live in both arms.
+
+**Limits:**
+- **The runs:** one seed and 30 writes, so one unit of the top level. A longer run adds a
+  sealed unit every 16 writes, and each holds its late rows in its first row group.
+- **Not tested:** a merge of each late row into the row group its event time falls in (the model:
+  746 MB a write at p99 5); RMoW-append with its merged units cut into row groups and its tail
+  kept open past the target file size, which is not built; re-cutting a row group at a late row's
+  place.

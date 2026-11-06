@@ -457,8 +457,12 @@ lower.
   chosen:
   - **tiered, by arrival:** a tail seal above the row-group size (`tailSealBytes`, 16 MiB in
     every configuration so far, tied to the row-group size), so tail policy C merges consecutive
-    writes' inserts into longer runs sorted by event time, in RMoR and RMoW-append. A
-    configuration, no code;
+    writes' inserts into longer runs sorted by event time. A configuration, no code: registered
+    2026-11-06 (HYPOTHESES.md, J1-J3), `configs/ing-seal160*.json`, campaign
+    `docker/campaigns/seal.json` on havoc. RMoR's writer cuts a merged file into row groups;
+    RMoW-append's merged unit is one region, so one row group, and its tail file rolls over at
+    the target file size, sealing its units at about 38 MiB; the model says that spares no sorted
+    read. Cutting RMoW's tail units into row groups is not built;
   - **leveled, by event time:** a writer that merges each late row into the row group its event
     time falls in, so no two row groups overlap and a sorted read concatenates. Not built; the
     model puts it at 746 MB a write at p99 5.

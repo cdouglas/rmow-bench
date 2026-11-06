@@ -672,7 +672,9 @@ would need its own arms and reader checks.
   updates were blind, under-charging its writes in every campaign). Campaign
   `docker/campaigns/split.json` on havoc, nine jobs (HYPOTHESES.md, U1–U4 and I1–I3). Beside
   it, campaign `docker/campaigns/mor-row.json`: MoR alone with `updateRead` `row` at the eleven
-  settings of RMoR's cloud rerun, to price the cloud runs' MoR without running them again.
+  settings of RMoR's cloud rerun, to price the cloud runs' MoR without running them again. And
+  campaign `docker/campaigns/seal.json` (J1-J3): the inserts-only runs with the tail's seal at
+  160 MiB, so RMoR and RMoW-append merge consecutive writes' inserts.
 - **Both calibrations run the five arms new campaigns run** (MoR-v3, TailCoW-C, RMoR-C, RMoR-C
   with footers, RMoW-C) since 2026-10-27, RMoR-C with the writer that skips dead row groups and a `cached-skip` reader beside
   the others, and their spikes time GETs by size for the read rate per MiB.

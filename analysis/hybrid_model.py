@@ -34,6 +34,15 @@ Ingest policies:
                  holds TARGET rows (RMoW-append); readers merge late rows.
   mor            the same, a new object a write (MoR, and RMoR: at the base point a write's
                  inserts are sealed at once, so tail policy C never merges them).
+  tier:S[:F][:one] tail policy C with a seal of S MiB (fanout F, default 4): a write's inserts
+                 are a unit of level 0; whenever the newest F units share a level they merge into
+                 one a level up (rewritten, sorted by event time), unless the result would pass
+                 the seal, and a unit too large to merge again is sealed with the open units before
+                 it. A unit is an object cut into row groups of RG rows (RMoR, whose Parquet writer
+                 cuts them), or with `one` a single row group of a tail object that rolls over
+                 at TARGET rows, sealing every open unit (RMoW-append: a region is one row
+                 group). At S = 16 (the configurations' seal) a write's 10 MB is sealed at once, as
+                 mor.
   compact:K      mor, with Iceberg's bin-packing every K writes: objects under 0.75 of the target
                  packed in order into groups of up to TARGET rows, each sorted by event time.
   merge          a late row merged into the row group its event time falls in (rewritten whole).
@@ -321,6 +330,13 @@ def run_ingest(data, policy, args, watermark=float("inf")):
     mode = args[1] if policy == "defer" else policy
     horizon = float(args[2]) if policy == "defer" and len(args) > 2 else 0.0
     pending_obj = None
+    if policy == "tier":
+        seal = float(args[0]) * 2**20 / B  # rows
+        fan = int(args[1]) if len(args) > 1 and args[1].isdigit() else 4
+        one = "one" in args[1:]
+        stack = []  # open units: [object, or with `one` its row group, level, rows]
+        last = max(t.objects)  # RMoW's tail: the last file, while under the target size
+        rtail = last if sum(len(t.rows[p]) for p in t.objects[last]) < TARGET else None
     out = []
     for w, (ins, upd, dele) in enumerate(writes):
         assert len(upd) == 0 and len(dele) == 0, "the ingest workload has only inserts"
@@ -333,7 +349,45 @@ def run_ingest(data, policy, args, watermark=float("inf")):
         if policy == "defer":
             soon = ts[now_rows] >= newest - horizon * span
             now_rows, later = now_rows[soon], now_rows[~soon]
-        if policy in ("tail", "mor", "compact"):
+        if policy == "tier":
+            on_time = np.array([], np.int64)
+            rows, level, end, merged = len(ins), 0, len(stack), []
+            while end >= fan - 1:
+                run = stack[end - fan + 1:end]
+                run_rows = sum(u[2] for u in run)
+                if any(u[1] != level for u in run) or rows + run_rows > seal:
+                    break
+                merged = run + merged
+                rows += run_rows
+                end -= fan - 1
+                level += 1
+            old = ([t.rows[u[0]] for u in merged] if one else
+                   [t.rows[p] for u in merged for p in t.objects[u[0]]])
+            ids = np.concatenate(old + [ins])
+            ids = ids[np.lexsort((ids, ts[ids]))]
+            if one:  # RMoW-append: the unit is one row group of the tail file
+                for u in merged:
+                    t.remove(u[0])
+                o = t.new(ids)
+                if rtail is None:
+                    rtail = t.new_object()
+                t.add(rtail, [o])
+            else:
+                for u in merged:
+                    del t.objects[u[0]]
+                o = t.new_object([t.new(c) for c in chunks(ids)])
+            del stack[end:]
+            if rows * fan > seal:
+                stack.clear()
+            else:
+                stack.append([o, level, rows])
+            if one and sum(t.live(q) for q in t.objects[rtail]) >= TARGET:
+                stack.clear()  # the tail file rolls over at the target size, sealing its units
+                rtail = None
+            written += rows
+            read_back += rows - len(ins)
+            merged_units += len(merged)
+        elif policy in ("tail", "mor", "compact"):
             on_time = ins
         else:
             on_time = ins[~late]

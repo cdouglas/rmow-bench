@@ -1,0 +1,10 @@
+{
+  "description": "Inserts merged by arrival (docs/HYPOTHESES.md, 2026-11-06, J1-J3): the inserts-only workload at lateness p99 1, 5 and 20 writes with the tail's seal at 160 MiB instead of the row-group size, so tail policy C merges consecutive writes' inserts; RMoR (rmor-c, whose writer cuts a merged file into row groups) and RMoW-append (rmow-c, whose merged unit is one row group). Payload checks off, requests and held memory logged.",
+  "flags": ["--log-requests", "--log-held"],
+  "cores_per_job": 3,
+  "jobs": [
+    {"config": "configs/ing-seal160.json", "heap": "16g", "store_gib": 30},
+    {"config": "configs/ing-seal160-late99-1.json", "heap": "16g", "store_gib": 30},
+    {"config": "configs/ing-seal160-late99-20.json", "heap": "16g", "store_gib": 30}
+  ]
+}
