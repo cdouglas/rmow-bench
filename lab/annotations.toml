@@ -72,6 +72,14 @@ select = ["where:label LIKE 'rmor-%' AND host = 'bearyak'", "sweep-base-f9701497
 
 [campaigns.kept]
 select = ["kept-*"]
+
+[campaigns.split]
+title = "The two workloads apart (docs/HYPOTHESES.md, 2026-11-06, U1-U4 and I1-I3): updates only (upd-*) and inserts only (ing-base*, ing-late99-*) on havoc at aeee8e3. The runner gave upd-base's and ing-base's load samples to upd-base-scan's and ing-base-compact's runs (docker/campaign.py matched labels by prefix); the right samples are results/campaigns/split/<job>.load.jsonl"
+select = ["where:regexp_matches(label, '^(upd-(base|base-compact|base-scan|density-p25|density-write)|ing-(base|base-compact|late99-1|late99-20))$') AND git_sha LIKE 'aeee8e3%'"]
+
+[campaigns.mor-row]
+title = "MoR alone with updateRead row at the eleven rmor-* settings, on havoc at aeee8e3: the calibration of the cloud runs' MoR (docs/HYPOTHESES.md, 2026-11-06)"
+select = ["where:label LIKE 'mor-row-%' AND git_sha LIKE 'aeee8e3%'"]
 [[annotate]]
 select = "smoke-*"
 mark = "excluded"

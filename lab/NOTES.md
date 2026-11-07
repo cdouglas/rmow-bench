@@ -24,7 +24,9 @@ What anyone (or Claude) reading these results must know. Keep it short and curre
   (`run_clock`; since 2026-10-27, which cut every laptop run's `work_ms` by 10.0%).
 - Held: runs from 2026-10-29 carry each phase's peak of what its readers and writers hold
   (`held_rows`, `held_bytes`, `held_<kind>`; README, What is held), as exact as requests and
-  bytes. With `--log-held` a run also writes every change to `held.jsonl`, which is not yet a lab
+  bytes on one thread. A parallel reader's peak (`cached-p8`) depends on how its tasks
+  interleave: two laptop runs of `rmor-rg32m`, `rmor-s0` and `rmor-s2` differ in 3 to 9 of 19
+  of its probes, and the `mor-row` runs differ from the `rmor-*` runs' MoR there and nowhere else. With `--log-held` a run also writes every change to `held.jsonl`, which is not yet a lab
   source.
 - Builds: runs from 2026-10-26 are on the atomicio fork (README, Appends). They send the same
   requests and bytes as the release build, but MoR-v3's and TailCoW-C's DV files are 18 bytes

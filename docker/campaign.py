@@ -44,6 +44,7 @@ as it is, without `finished`; `status` lists it so it can be deleted.
 
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -223,7 +224,12 @@ def finished(run_dir):
 
 
 def run_dirs(results, label):
-    return set(glob(f"{results}/{label}-*/*/manifest.json"))
+    """The manifests of a label's runs, `<label>-<config hash>/<UTC start>/`. A label that extends
+    this one (`upd-base-scan` for `upd-base`) is another job's: matching it by prefix gave a job
+    the newest run of a job started beside it (campaigns split and seal, 2026-11-06)."""
+    own = re.compile(re.escape(label) + r"-[0-9a-f]{12}")
+    return {m for m in glob(f"{results}/{label}-*/*/manifest.json")
+            if own.fullmatch(Path(m).parent.parent.name)}
 
 
 class Job:
