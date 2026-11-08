@@ -68,11 +68,13 @@ the rest start over. To rerun finished jobs, give the rerun a campaign of its ow
 `docker/run.sh fuzz <name> [args]` runs the fuzzer (`bin/fuzz.sh`, README's Fuzzing) from the
 image, detached: `FUZZ_WORKERS` workers (default 16), each a JVM of `FUZZ_HEAP` (default 3g),
 under a hard memory limit of their heaps plus 1.5 GB each. Nothing is measured, so the workers
-need no cores of their own; `CPUSET` still confines them. Results go to `RESULTS/fuzz/<name>/`:
+need no cores of their own; `CPUSET` still confines them (`bin/fuzz.sh` sets it itself, since
+rootless Docker drops `--cpuset-cpus`). Results go to `RESULTS/fuzz/<name>/`:
 a `summary-<worker>.jsonl` line per seed, and a `fail-<seed>/` per failure. A name is one run.
 
 ```sh
 CPUSET=... FUZZ_WORKERS=32 docker/run.sh fuzz pre-cloud --minutes 180
+CPUSET=... docker/run.sh fuzz pre-cloud-heavy --minutes 180 --profile heavy
 docker/run.sh fuzz-status pre-cloud          # seeds run, and each failure
 ```
 

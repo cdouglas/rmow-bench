@@ -225,6 +225,36 @@ reads.
   contract passed there; rmow-bench's `S3ExpressTest` failed on two faults of its own, since fixed
   (an append at 0, which the fork takes for an unknown length, and a client its throwaway
   S3FileIOs closed when finalized).
+- [x] **A fuzzer** (built 2026-11-08, before the cloud run of the tuner's picks; README,
+  Fuzzing). `bin/fuzz.sh` draws a whole configuration from a seed (the workload, every layout
+  knob, a subset of the 18 arms, readers of random flags, the store) and runs it through the
+  runner, whose every read is checked against the reference model, payloads included. It checks
+  besides that each arm's objects and bytes on a local store are what its `state` records say,
+  that a share of seeds give the same records on the other store, and that every dumped version
+  reads as the model. Tables are small (2,000 to 60,000 rows). Four rounds on havoc, 16 workers
+  each:
+  - round 1 (2673c7d): 725 seeds, 14 failed: RMoR's cleaner above a share of 1 put no DVs over
+    the rows it carried (fixed in 1721299), and the fuzzer's own warmup outran its rows;
+  - round 2 (1721299): 3,597 seeds, 2 failed (450 and 1592): a tail file whose every row died
+    stayed among the tail policy's open units, so its next merge read it back whole and wrote
+    its rows twice (fixed in f64508b);
+  - round 3 (0572d48, draws that reach nearly dead row groups and packable tails): 2,700 seeds,
+    none failed;
+  - round 4 (c2e1e66, two hours): 6,721 seeds of the default draws and 3,657 of the `heavy`
+    profile, none wrong; one (5727: 11 arms, 17 KB row groups, run on both stores) passed the
+    20-minute limit, as the slowest passing seeds nearly do (19 minutes), and passes on the
+    laptop in 7.7 minutes.
+
+  Neither bug touched a run: no configuration ran the cleaner above a share of 1, and none held
+  DVs on open tail files (RMoR above a share of 0, the deferred merges or the cleaner, on a
+  workload that inserts). The four cloud picks reach neither. Each fix has a regression test.
+  **Calibration** (`bin/fuzz-mutants.py`, 10 planted bugs, 60 seeds each on the laptop and on
+  both profiles): the 8 it requires are caught by the check each names (a row group dead but for
+  interior rows by the heavy profile only: 5 of 60 seeds, and 39 of 520 on havoc), and the code
+  unmutated stays clean. Two are rarer: RMoW's packing taking row groups the tail policy holds
+  open, 1 seed in 502 on havoc (no cloud pick compacts RMoW); and a row group dead but for its
+  second row, in none of 461 heavy seeds on havoc. The cloud stores' clients are not fuzzed;
+  their contract suites and the spikes cover them.
 
 ## Arms
 

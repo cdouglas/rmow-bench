@@ -7,7 +7,15 @@ it names; `none` (no mutant) must stay clean. Run from the repository root, afte
     bin/fuzz-mutants.py [--seeds 60] [--workers 6] [--profile mixed|heavy] [--out DIR] [NAME ...]
 
 A check named with a leading `?` is measured, not required: the mutant is subtler than random
-draws can be expected to reach at this budget, and is reported either way.
+draws can be expected to reach at this budget, and is reported either way. A mutant's check may
+differ by profile (a dict); a mutant may run a multiple of the budget (its sixth field), when its
+catches are random (a nondeterministic mutant) rather than fixed by the seeds.
+
+The budgets each mutant needs, as found on 2026-11-08 (c2e1e66): at 60 seeds of the default draws
+every required mutant is caught; RMoW packing open row groups is caught by about one seed in 250
+to 500 (a round on havoc, not 60 seeds); a row group dead but for interior rows (ends-only) needs
+the heavy profile, which catches it in about one seed in 12; one dead but for its second row has
+not been caught in about 1,000 heavy seeds.
 
 Each mutant is an exact-text replacement anchored in the code as this file's last commit left it;
 a replacement that no longer matches is reported, not skipped. Results: DIR/<mutant>/summary-*.jsonl
@@ -23,7 +31,8 @@ from pathlib import Path
 
 ARMS = "src/main/java/org/rmow/bench/arms/"
 
-# name: (file, old, new, the check expected to catch it, what the bug is)
+# name: (file, old, new, the check expected to catch it (or a dict of them by profile), what the
+#        bug is[, a multiple of the budget of seeds])
 MUTANTS = {
     "none": (None, None, None, "-", "no mutant: must stay clean"),
     "rmor-drops-version-0": (
@@ -51,8 +60,9 @@ MUTANTS = {
         ARMS + "RmowArm.java",
         "      boolean packable = !policy.isOpen(rg) && size < target / 2;",
         "      boolean packable = size < target / 2;",
-        "run",
-        "RMoW's packing takes row groups the tail policy still holds open",
+        "?run",
+        "RMoW's packing takes row groups the tail policy still holds open (measured: about one"
+        " seed in 250 to 500 of the default draws, on havoc)",
     ),
     "mor-compaction-keeps-old-file": (
         ARMS + "MorArm.java",
@@ -72,7 +82,7 @@ MUTANTS = {
         ARMS + "DeletedRanges.java",
         "      long lo = key == first >>> 32 ? first & 0xFFFFFFFFL : 0;",
         "      long lo = key == first >>> 32 ? last & 0xFFFFFFFFL : 0;",
-        "run",
+        {"mixed": "?run", "heavy": "run"},
         "a row group whose first and last rows are dead counts as dead whole",
     ),
     "ranges-skip-second-row": (
@@ -88,7 +98,9 @@ MUTANTS = {
         "groupBytes + liveSize > layout.targetFileBytes)",
         "groupBytes + liveSize > layout.targetFileBytes * (0.5 + Math.random()))",
         "twin",
-        "compaction's bin-packing depends on a random draw: results right, counts not repeatable",
+        "compaction's bin-packing depends on a random draw: results right, counts not repeatable"
+        " (about one seed in 60 shows it, at random: four times the budget)",
+        4,
     ),
     "mor-stats-miss-deletes": (
         ARMS + "MorArm.java",
@@ -119,6 +131,28 @@ def build(name, out):
     if r.returncode != 0:
         return "build failed:\n" + r.stdout[-2000:] + r.stderr[-2000:]
     return None
+
+
+def expected(name, profile):
+    """The check expected to catch the mutant under the profile ('-' for none)."""
+    expect = MUTANTS[name][3]
+    return expect.get(profile, "-") if isinstance(expect, dict) else expect
+
+
+def budget(name, seeds):
+    return seeds * (MUTANTS[name][5] if len(MUTANTS[name]) > 5 else 1)
+
+
+def verdict(name, expect, failed):
+    """The calibration's verdict on a mutant from its failed seeds' outcomes."""
+    kinds = sorted({r["kind"] for r in failed})
+    optional = expect.startswith("?")
+    wanted = set(expect.lstrip("?").split("|"))
+    if name == "none":
+        return "clean" if not failed else "NOT CLEAN"
+    if not failed:
+        return "not caught (measured only)" if optional else "NOT CAUGHT"
+    return "caught" if wanted & set(kinds) else f"caught, by {kinds} not {sorted(wanted)}"
 
 
 def fuzz(name, out, seeds, workers, heap, profile):
@@ -156,25 +190,16 @@ def main():
     shutil.copytree("target/lib", out / "lib")
     lines = []
     for name in a.names or MUTANTS:
-        expect = MUTANTS[name][3]
+        expect = expected(name, a.profile)
         err = build(name, out)
         if err:
             line = f"{name}: NOT BUILT: {err}"
         else:
-            rows = fuzz(name, out, a.seeds, a.workers, a.heap, a.profile)
+            rows = fuzz(name, out, budget(name, a.seeds), a.workers, a.heap, a.profile)
             failed = sorted((r for r in rows if not r["ok"]), key=lambda r: r["seed"])
             kinds = sorted({r["kind"] for r in failed})
-            optional = expect.startswith("?")
-            expected = set(expect.lstrip("?").split("|"))
-            if name == "none":
-                verdict = "clean" if not failed else "NOT CLEAN"
-            elif not failed:
-                verdict = "not caught (measured only)" if optional else "NOT CAUGHT"
-            else:
-                verdict = ("caught" if expected & set(kinds)
-                           else f"caught, by {kinds} not {sorted(expected)}")
             first = failed[0] if failed else None
-            line = (f"{name}: {verdict}: {len(failed)} of {len(rows)} seeds failed"
+            line = (f"{name}: {verdict(name, expect, failed)}: {len(failed)} of {len(rows)} seeds failed"
                     + (f" ({', '.join(kinds)}); first seed {first['seed']}: "
                        f"{(first['message'] or '')[:160]}" if first else ""))
         print(line, flush=True)

@@ -10,8 +10,12 @@
 #                                             W workers at once, each restarted with --resume
 #                                             after a timeout (exit 3) or an Error (exit 4)
 #
-# Each worker's heap: FUZZ_HEAP (default 3g).
+# Each worker's heap: FUZZ_HEAP (default 3g). CPUSET, if set, confines this script and its workers
+# (docker/run.sh passes it: rootless Docker drops --cpuset-cpus silently).
 set -euo pipefail
+if [ -n "${CPUSET:-}" ]; then
+  taskset -cp "$CPUSET" $$ >/dev/null
+fi
 here="$(cd "$(dirname "$0")/.." && pwd)"
 jar="$(ls "$here"/target/rmow-bench-*.jar | grep -v -- '-tests' | head -1)"
 java_run() {

@@ -99,15 +99,24 @@ request and every change of what the phases hold, as the cloud runs do.
 bin/fuzz.sh --parallel 8 --out results/fuzz/<name> --minutes 60   # 8 workers, seeds 1, 2, ...
 bin/fuzz.sh --seed 1234                                            # one seed again
 bin/fuzz.sh --print 1234                                           # the configuration it draws
+bin/fuzz.sh --parallel 8 --out results/fuzz/<name> --profile heavy  # nearly dead row groups
 bin/fuzz-mutants.py --seeds 60 --workers 8                         # calibration: planted bugs
+bin/fuzz-mutants.py --seeds 60 --workers 8 --profile heavy         # and on the heavy draws
 docker/run.sh fuzz <name> --minutes 180                            # on havoc (docker/README.md)
 ```
 
+The `heavy` profile makes every seed change rows in heavy statements (most of a region's rows),
+with regions of about a row group and a reader that skips dead row groups, so row groups go dead
+but for a few rows, where skipping them is easiest to get wrong; the default profile draws such
+seeds now and then.
+
 A failing seed writes `fail-<seed>/`: its configuration (runnable with `bin/run.sh`), the error, and
 the run's records. `bin/fuzz-mutants.py` plants each of a set of known bugs in a copy of the
-source and fuzzes it with a fixed budget of seeds: each must be caught by the check it names, and
-the unmutated code must stay clean. The fuzzer covers the arms and readers on the in-memory and
-local stores, not the cloud stores' clients.
+source and fuzzes it with a fixed budget of seeds: each must be caught by the check it names, under
+the profiles that reach it, and the unmutated code must stay clean. The bugs too rare for that
+budget are measured, not required; the script's header says what budget catches them, and
+docs/ROADMAP.md (Harness, the fuzzer) what the rounds on havoc found. The fuzzer covers the arms
+and readers on the in-memory and local stores, not the cloud stores' clients.
 
 Python tools live in a project venv:
 
