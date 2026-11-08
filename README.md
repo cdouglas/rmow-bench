@@ -83,6 +83,32 @@ object in `<run>/versions/`, checked against the reference model at every step, 
 `analysis/interop_check.py <run>/versions` to read with pyarrow and DuckDB (see
 [Compatibility](#compatibility)).
 
+### Fuzzing
+
+`bin/fuzz.sh` runs random small configurations through the runner (`fuzz.Fuzz`). A seed draws the
+whole configuration: the workload's mix, key distribution, regions and lateness, every layout knob,
+a subset of the arms, and readers of random flags, on the in-memory or the local store. Every read
+of every arm under every reader is checked against the reference model, payloads included, as a
+run checks itself. Beyond that, each arm's objects and bytes on a local store must be what its
+`state` records say, and a share of seeds run twice, once on each store, and must match record for
+record in requests, bytes, rows, memory held (readers on one thread) and state. Another share dump
+every version of the appendable objects and check each against the model, and another log every
+request and every change of what the phases hold, as the cloud runs do.
+
+```bash
+bin/fuzz.sh --parallel 8 --out results/fuzz/<name> --minutes 60   # 8 workers, seeds 1, 2, ...
+bin/fuzz.sh --seed 1234                                            # one seed again
+bin/fuzz.sh --print 1234                                           # the configuration it draws
+bin/fuzz-mutants.py --seeds 60 --workers 8                         # calibration: planted bugs
+docker/run.sh fuzz <name> --minutes 180                            # on havoc (docker/README.md)
+```
+
+A failing seed writes `fail-<seed>/`: its configuration (runnable with `bin/run.sh`), the error, and
+the run's records. `bin/fuzz-mutants.py` plants each of a set of known bugs in a copy of the
+source and fuzzes it with a fixed budget of seeds: each must be caught by the check it names, and
+the unmutated code must stay clean. The fuzzer covers the arms and readers on the in-memory and
+local stores, not the cloud stores' clients.
+
 Python tools live in a project venv:
 
 ```bash
@@ -500,6 +526,7 @@ were before regions existed (`OpLogGeneratorTest` pins three runs' hashes).
 | `io` | `MemFileIO` and `PreadFileIO` (with the fork's atomic operations, `LocalCas`), `TracingFileIO`, `IoTrace`, `RelocatedFileIO` (a run's logical paths on its own prefix), `Spans` (where the time went), `Held` (what is held), `StoreLatency` (injected latency), the SDK recorders (`SdkRecorder`: `S3Recorder`, `AzureRecorder`), and for Azure `AdlsClients`. |
 | `append` | `RegionAppender`, `AtomicAppender` (every store's, through the fork's `SupportsAtomicOperations`) and `EmulatorAppenders` (the emulators' stand-ins). |
 | `bench` | `Runner`, `Phases`, `BenchConfig`, `ThreadCounters` (instructions and cycles), `Store` (mem, local, S3 or Azure) and `Main`; `arms.VersionDump` and `rmow.VersionDigest` dump every version for the interop check. |
+| `fuzz` | `Fuzz`: random configurations through the runner, with the checks beyond a run's own (`bin/fuzz.sh`, [Fuzzing](#fuzzing)). |
 | `micro` | JMH micro-benchmarks (`FooterBench`), and the cloud spikes (`S3ExpressSpike`, `AzureSpike`). |
 | `analysis/` | `interop_check.py` (pyarrow and DuckDB), `summary.py`, `consolidate.py` (every finished run's records in one Parquet file), `plots.py` (figures and a table twin of each), `sweep.py` (runs that differ in row-group size), `layouts.py` (appendable against split files), `compaction.py` (runs that differ in compaction policy: each arm's cheapest policy per read rate and price model), and `compare_runs.py` (exact repeatability). |
 

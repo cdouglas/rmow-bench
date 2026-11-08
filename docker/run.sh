@@ -9,6 +9,10 @@
 #   docker/run.sh stop   CAMPAIGN      # stop it; finished jobs are kept, and `start` resumes
 #   docker/run.sh run    CAMPAIGN      # the same as start, in the foreground
 #   docker/run.sh shell                # a shell in the image
+#   docker/run.sh fuzz NAME [ARGS]     # the fuzzer (bin/fuzz.sh), detached: FUZZ_WORKERS workers
+#                                      # (default 16) of FUZZ_HEAP (3g), ARGS such as --minutes 180;
+#                                      # results in RESULTS/fuzz/NAME/
+#   docker/run.sh fuzz-status NAME     # seeds run, and each failure
 #
 # Env (all optional):
 #   RESULTS=<dir>        where runs go (default: <repo>/results); bind-mounted at /results
@@ -33,7 +37,7 @@ VERB="${1:-}"
 CAMPAIGN="${2:-}"
 CONTAINER="rmow-bench-${CAMPAIGN}"
 
-usage() { sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 
 need_campaign() {
   [ -n "$CAMPAIGN" ] || usage
@@ -183,6 +187,49 @@ case "$VERB" in
     need_campaign
     docker stop "$CONTAINER" >/dev/null
     echo "stopped $CONTAINER: finished jobs are kept, and start resumes"
+    ;;
+  fuzz)
+    # Correctness only: no CPU is measured, so the workers need no cores of their own. Each
+    # worker's JVM gets FUZZ_HEAP; the container's hard limit is the workers' heaps and a gigabyte
+    # and a half each, so a run that outgrows it loses its own JVMs, never another user's.
+    [ -n "$CAMPAIGN" ] || usage
+    check_image
+    shift 2
+    c="rmow-bench-fuzz-$CAMPAIGN"
+    if docker ps -a --format '{{.Names}}' | grep -qx "$c"; then
+      echo "$c exists (a name is one run): docker rm $c, or another name" >&2; exit 1
+    fi
+    run_args
+    workers="${FUZZ_WORKERS:-16}"
+    heap="${FUZZ_HEAP:-3g}"
+    mem_mib=$(( workers * (${heap%g} * 1024 + 1536) ))
+    mkdir -p "$RESULTS/fuzz/$CAMPAIGN"
+    docker run -d --name "$c" --memory "${mem_mib}m" --memory-swap "${mem_mib}m" \
+      "${RUN_ARGS[@]}" -e FUZZ_HEAP="$heap" --entrypoint /app/bin/fuzz.sh "$IMAGE" \
+      --parallel "$workers" --out "/results/fuzz/$CAMPAIGN" "$@" >/dev/null
+    echo "started $c: $workers workers of $heap, limit ${mem_mib} MiB"
+    echo "  progress: docker/run.sh fuzz-status $CAMPAIGN"
+    hazard="$(logout_hazard)"
+    [ -z "$hazard" ] || echo "NOT safe to disconnect: $hazard"
+    ;;
+  fuzz-status)
+    [ -n "$CAMPAIGN" ] || usage
+    dirs
+    c="rmow-bench-fuzz-$CAMPAIGN"
+    docker ps -a --filter "name=^${c}\$" --format '{{.Names}}: {{.Status}}'
+    python3 - "$RESULTS/fuzz/$CAMPAIGN" <<'PY'
+import json, sys, pathlib
+d = pathlib.Path(sys.argv[1])
+rows = [json.loads(l) for f in sorted(d.glob("summary-*.jsonl")) for l in f.read_text().splitlines()]
+bad = sorted((r for r in rows if not r["ok"]), key=lambda r: r["seed"])
+secs = sum(r["seconds"] for r in rows)
+print(f"{len(rows)} seeds, {len(bad)} failed, {secs / 3600:.1f} h of trials;"
+      f" twins {sum(r['twin'] for r in rows)}, version dumps {sum(r['dump'] for r in rows)},"
+      f" logs {sum(r.get('logs', False) for r in rows)},"
+      f" local store {sum(r['store'] == 'local' for r in rows)}")
+for r in bad:
+    print(f"  seed {r['seed']} {r['kind']}: {(r['message'] or '')[:200]}")
+PY
     ;;
   shell)
     run_args

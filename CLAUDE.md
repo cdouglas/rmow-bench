@@ -63,6 +63,10 @@ bin/matrix.sh --build configs/local-compact-*.json   # several, from a build sna
   (`elapsed_s` in each manifest). The README's S3 section says what
   `S3StoreTest` needs (versitygw in Docker; skipped without it), and its Azure section what
   `AzureStoreTest` needs (Azurite in Docker).
+- **Fuzzing:** `bin/fuzz.sh` runs random small configurations of every arm and reader through
+  the runner, with checks beyond a run's own (README, Fuzzing); `bin/fuzz-mutants.py` checks it
+  catches a set of planted bugs. Rerun both after changing an arm, a reader or the I/O layer, and
+  keep the mutants' anchors current. On havoc: `docker/run.sh fuzz <name>`.
 - **Tests that pin results:** `RunnerSmokeTest` asserts H2 for both layouts.
   `AppendableParquetTest`, `SplitFileTest` and `VersionDumpTest` cover reader compatibility.
 

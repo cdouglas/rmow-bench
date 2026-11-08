@@ -63,6 +63,19 @@ the rest start over. To rerun finished jobs, give the rerun a campaign of its ow
 | `DIRTY_OK=1` | `build` only: build the working tree instead of `HEAD`; the runs' manifests say dirty |
 | `FORK_M2` | `build` only: the fork's artifacts (`fork-m2.sh`; default `~/rmow-fork-m2.tar`) |
 
+## Fuzzing
+
+`docker/run.sh fuzz <name> [args]` runs the fuzzer (`bin/fuzz.sh`, README's Fuzzing) from the
+image, detached: `FUZZ_WORKERS` workers (default 16), each a JVM of `FUZZ_HEAP` (default 3g),
+under a hard memory limit of their heaps plus 1.5 GB each. Nothing is measured, so the workers
+need no cores of their own; `CPUSET` still confines them. Results go to `RESULTS/fuzz/<name>/`:
+a `summary-<worker>.jsonl` line per seed, and a `fail-<seed>/` per failure. A name is one run.
+
+```sh
+CPUSET=... FUZZ_WORKERS=32 docker/run.sh fuzz pre-cloud --minutes 180
+docker/run.sh fuzz-status pre-cloud          # seeds run, and each failure
+```
+
 ## What a run records
 
 Runs go where `bin/run.sh` puts them, `RESULTS/<label>-<config hash>/<UTC start>/`. A run's
