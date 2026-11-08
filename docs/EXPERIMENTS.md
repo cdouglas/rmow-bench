@@ -694,7 +694,8 @@ would need its own arms and reader checks.
   ranks policies per read mix and store from havoc's counts and a formula for the work; a grid
   of 17 configurations (`configs/tune-*`, campaign `docker/campaigns/tune.json`), then the
   finalists on the laptop for instructions, then one cloud run of the picks. Judged 2026-11-08
-  (T2 held, T1 in part, T3 and T4 but one part each); the cloud run awaits a decision. Before
+  (T2 held, T1 in part, T3 and T4 but one part each). The cloud run of the picks was registered
+  the same day (K1–K3) and runs at be8d6f1. Before
   it, the implementation was fuzzed on havoc (ROADMAP, Harness, the fuzzer): two bugs found and
   fixed, in settings no run used and the picks do not reach.
 - **Both calibrations run the five arms new campaigns run** (MoR-v3, TailCoW-C, RMoR-C, RMoR-C

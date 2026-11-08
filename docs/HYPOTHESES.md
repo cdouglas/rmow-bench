@@ -1227,3 +1227,90 @@ mixes; requests; MoR's compaction intervals.
 - **Azure Blob's** block blobs past 256 MiB read slower than their price (RMoR's full reads, 0.66
   of the measured at the base point); no policy here writes a file that large (RMoR's 256 MiB
   seal makes units of about 190 MB).
+
+## The tuner's picks in the cloud (registered 2026-11-08)
+
+**What it decides:** whether the tuner's picks hold on the stores' measured time. T2 held on the
+laptop's measured work, but every price so far is the laptop's work at the laptop's pace plus
+requests priced by the base point's spikes; no cloud run has timed these policies. And how well
+a policy's time per write is priced on S3 Express when the VM's own work and spike price it.
+
+**Setup:** the four configurations of ROADMAP's "The picks in the cloud", seven policies:
+- updates: MoR compacted every 12 writes (`tune-upd-mor-c12`, 16 MiB row groups); RMoW-append and
+  the deferred merges (θ 0.06) with 4 MiB row groups (`tune-upd-rg4m`);
+- inserts: MoR, RMoR with row groups kept and RMoW-append with 4 MiB row groups
+  (`tune-ing-rg4m`); RMoR sealed at 256 MiB with 4 MiB row groups (`tune-ing-rg4m-seal256`).
+
+On S3 Express they hold every pick of T2's mixes, or a policy within 0.4% of it (MoR compacted
+every 6 writes is the updates' pick under `writes` and `sorted`, at 5.82 s and 13.14 s). On Azure
+Blob they hold only the inserts' pick under `windows` (and the updates' within 2.1%: RMoW-append
+with 8 MiB row groups); elsewhere the run judges the order of these seven.
+Each runs once at be8d6f1, in a 16 GB heap, with requests and held memory logged. Since havoc's
+runs (7cabf65), the code has changed only by the fuzzer and its two fixes (RMoR's cleaner above a
+share of 1; a dead open tail file leaving the tail policy), neither in these configurations'
+settings.
+- **S3 Express:** one `c7a.4xlarge` per configuration in usw2-az3, the four at once on one
+  bucket. Each VM runs its twin (the configuration on its own disk, with instruction counts),
+  then its spike, then its run.
+- **Azure Blob:** one `D8as_v6` in westus: a spike, then the four in turn. Azure's VMs count no
+  instructions, so it runs no twin.
+
+**Measured time per write:** the tuner's cost with each phase's measured wall time in place of its
+price: the mean write over the 30, plus the compactions over the 30 writes, plus each read's mean
+over the probes of steps 5 to 30 (the full read, a window as its probe's mean of five, and the
+newest 1% under `cached-skip`; the sorted read under `cached`) times the mix's reads a write.
+
+**Predicted** by the tuner (`analysis/tune.py --measured`: the laptop's work at its pace, requests
+priced by the base point's spikes), time per write in seconds, the pick among the seven in bold:
+
+S3 Express:
+
+| Workload | Policy (configuration, arm) | writes | windows | scans | sorted |
+|---|---|---|---|---|---|
+| updates | MoR compacted every 12 writes (`tune-upd-mor-c12`, `mor-v3`) | **5.84** | 10.11 | 20.49 | 13.47 |
+| updates | RMoW-append, 4 MiB row groups (`tune-upd-rg4m`, `rmow-c`) | 6.97 | **7.34** | **19.50** | **13.15** |
+| updates | the deferred merges, 4 MiB row groups (`tune-upd-rg4m`, `rmor-density`) | 7.56 | 10.44 | 23.31 | 22.93 |
+| updates | *runner-up over the pick* | *1.194* | *1.378* | *1.051* | *1.024* |
+| inserts | MoR, 4 MiB row groups (`tune-ing-rg4m`, `mor-v3`) | **2.03** | 6.97 | **17.91** | 11.10 |
+| inserts | RMoR sealed at 256 MiB, 4 MiB row groups (`tune-ing-rg4m-seal256`, `rmor-c`) | 2.22 | **3.89** | 17.94 | **10.61** |
+| inserts | RMoW-append, 4 MiB row groups (`tune-ing-rg4m`, `rmow-c`) | 3.23 | 18.62 | 18.01 | 11.16 |
+| inserts | RMoR with row groups kept, 4 MiB (`tune-ing-rg4m`, `rmor-c-kept`) | 3.22 | 19.02 | 18.09 | 11.16 |
+| inserts | *runner-up over the pick* | *1.092* | *1.789* | *1.002* | *1.046* |
+
+Azure Blob:
+
+| Workload | Policy (configuration, arm) | writes | windows | scans | sorted |
+|---|---|---|---|---|---|
+| updates | MoR compacted every 12 writes (`tune-upd-mor-c12`, `mor-v3`) | **8.78** | 16.59 | **27.77** | **18.25** |
+| updates | RMoW-append, 4 MiB row groups (`tune-upd-rg4m`, `rmow-c`) | 10.82 | **11.53** | 46.35 | 27.81 |
+| updates | the deferred merges, 4 MiB row groups (`tune-upd-rg4m`, `rmor-density`) | 14.20 | 18.98 | 55.89 | 54.36 |
+| updates | *runner-up over the pick* | *1.232* | *1.439* | *1.669* | *1.524* |
+| inserts | MoR, 4 MiB row groups (`tune-ing-rg4m`, `mor-v3`) | 4.75 | 18.16 | 49.68 | 26.99 |
+| inserts | RMoR sealed at 256 MiB, 4 MiB row groups (`tune-ing-rg4m-seal256`, `rmor-c`) | **4.46** | **8.42** | 49.54 | 26.53 |
+| inserts | RMoW-append, 4 MiB row groups (`tune-ing-rg4m`, `rmow-c`) | 5.56 | 28.21 | **44.32** | **24.35** |
+| inserts | RMoR with row groups kept, 4 MiB (`tune-ing-rg4m`, `rmor-c-kept`) | 5.60 | 29.40 | 44.54 | 24.39 |
+| inserts | *runner-up over the pick* | *1.065* | *2.156* | *1.005* | *1.002* |
+
+- **K1: each cloud run sends what havoc's run of its configuration counts** (a control): every
+  record's requests, bytes and table state, and every one-thread phase's held peaks; each S3
+  Express twin likewise.
+- **K2: the picks hold.** On each store, under each workload and mix where the tuner prices the
+  runner-up among these policies more than 5% above its pick, the pick's measured time per write is
+  at most 5% above the cheapest measured. Judged: on S3 Express the updates under `writes`,
+  `windows` and `scans` and the inserts under `writes` and `windows`; on Azure Blob the updates
+  under every mix and the inserts under `writes` and `windows`.
+- **K3: on S3 Express each policy's time per write under each mix is priced within 20%** by its
+  twin's work (on the VM's own cores, at its arm's pace there) and its VM's spike.
+
+**Measured, not judged:** the near ties (on S3 Express the updates under `sorted` and the inserts
+under `scans` and `sorted`; on Azure the inserts under `scans` and `sorted`); each phase's measured
+time against its price; Azure's prices, from the S3 Express twins' work (both VMs Zen 4) and its
+spike; the VMs' pace against the laptop's; the spikes under the fleet's load against the base
+point's alone; the laptop-priced predictions above against the twin-priced ones.
+
+**Limits:** one run of each configuration, one seed, 30 writes. The S3 Express runs share one
+bucket, each measured under the others' load; the Azure runs come one after another over some
+hours, and Azure's read waits moved by seconds between runs before (lab/pages/rmor-rerun.md). The
+predictions price CPU at the laptop's pace, and the base point's S3 Express VM did the same work in
+1.3–1.6 times the laptop's thread time: where a mix's order turns on a write, which is more work,
+against a read, the VMs' pace can move it.

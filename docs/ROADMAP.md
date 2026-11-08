@@ -510,8 +510,9 @@ lower.
   (`sized_latency`, which now covers the windows, the sorted read and compactions). Its picks held
   on the laptop's measured work (T2); its formula misses small reads with row groups no training
   run had (T1 in part).
-- [ ] **The picks in the cloud** (awaits the user). The four configurations that hold every S3
-  Express pick and its runner-up: `tune-upd-rg4m` (RMoW-append with 4 MiB row groups),
+- [ ] **The picks in the cloud** (registered 2026-11-08, HYPOTHESES.md K1–K3; running at
+  be8d6f1). The four configurations that hold every S3 Express pick (or one within 0.4% of it)
+  and its runner-up: `tune-upd-rg4m` (RMoW-append with 4 MiB row groups),
   `tune-upd-mor-c12` (MoR compacted), `tune-ing-rg4m` (MoR with 4 MiB row groups) and
   `tune-ing-rg4m-seal256` (RMoR sealed at 256 MiB with 4 MiB row groups), on S3 Express (a fleet
   of four `c7a.4xlarge`, AWS's limit) and Azure Blob (one `D8as_v6`, in turn), each after its
