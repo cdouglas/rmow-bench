@@ -1,0 +1,95 @@
+{
+  "description": "Tuning policy by simulation (docs/HYPOTHESES.md, 2026-11-08, T1-T4): a grid around the windows campaign's configurations, each varying one policy knob: MoR compacted every 3, 6 and 12 writes on both workloads; on the updates the deferred merges at theta 0.12, 0.5 and 1 and row groups of 4, 8 and 32 MiB (RMoW-append and the deferred merges at theta 0.06); on the inserts RMoR's tail sealed at 256 MiB, and at 160 MiB with fanouts of 2 and 8, and row groups of 4 MiB (the appending arms, and RMoR sealed at 256 MiB). Payload checks off, requests and held memory logged. Counts here; the laptop runs the finalists for instructions.",
+  "flags": [
+    "--log-requests",
+    "--log-held"
+  ],
+  "cores_per_job": 3,
+  "jobs": [
+    {
+      "config": "configs/tune-ing-mor-c12.json",
+      "heap": "16g",
+      "store_gib": 20
+    },
+    {
+      "config": "configs/tune-ing-mor-c3.json",
+      "heap": "16g",
+      "store_gib": 20
+    },
+    {
+      "config": "configs/tune-ing-mor-c6.json",
+      "heap": "16g",
+      "store_gib": 20
+    },
+    {
+      "config": "configs/tune-ing-rg4m-seal256.json",
+      "heap": "16g",
+      "store_gib": 20
+    },
+    {
+      "config": "configs/tune-ing-rg4m.json",
+      "heap": "16g",
+      "store_gib": 30
+    },
+    {
+      "config": "configs/tune-ing-seal160-f2.json",
+      "heap": "16g",
+      "store_gib": 20
+    },
+    {
+      "config": "configs/tune-ing-seal160-f8.json",
+      "heap": "16g",
+      "store_gib": 20
+    },
+    {
+      "config": "configs/tune-ing-seal256.json",
+      "heap": "16g",
+      "store_gib": 20
+    },
+    {
+      "config": "configs/tune-upd-defer-p100.json",
+      "heap": "16g",
+      "store_gib": 20
+    },
+    {
+      "config": "configs/tune-upd-defer-p12.json",
+      "heap": "16g",
+      "store_gib": 20
+    },
+    {
+      "config": "configs/tune-upd-defer-p50.json",
+      "heap": "16g",
+      "store_gib": 20
+    },
+    {
+      "config": "configs/tune-upd-mor-c12.json",
+      "heap": "16g",
+      "store_gib": 20
+    },
+    {
+      "config": "configs/tune-upd-mor-c3.json",
+      "heap": "16g",
+      "store_gib": 20
+    },
+    {
+      "config": "configs/tune-upd-mor-c6.json",
+      "heap": "16g",
+      "store_gib": 20
+    },
+    {
+      "config": "configs/tune-upd-rg32m.json",
+      "heap": "16g",
+      "store_gib": 30
+    },
+    {
+      "config": "configs/tune-upd-rg4m.json",
+      "heap": "16g",
+      "store_gib": 30
+    },
+    {
+      "config": "configs/tune-upd-rg8m.json",
+      "heap": "16g",
+      "store_gib": 30
+    }
+  ]
+}

@@ -1139,3 +1139,91 @@ appending arms' bytes).
   work there is not RMoR's.
 - **Time is simulated** from the laptop's instructions at each arm's pace and the requests priced
   by size, as before (C6 and V5 held within 1–14% on S3 Express).
+
+## Tuning write policy by simulation (registered 2026-11-08)
+
+**What it decides:** whether counts from havoc, priced with a formula for the work, can pick a
+write policy for a read mix as well as the laptop's measured work would, so a grid of policies
+needs instructions only for its finalists. The windows campaign (Q1–Q4, held) gave the simulated
+times of the base policies: on the updates a write takes MoR 4.7 s, the deferred merges 6.2 and
+RMoW-append 9.2, and a 1% window 1.40, 0.54 and 0.23 s (S3 Express, the laptop's work). Which
+policy wins turns on the read mix, and on knobs no run has varied: the merge threshold, the row
+group's size, the seal and how often MoR compacts.
+
+**The tuner** (`analysis/tune.py`): a policy is a configuration and an arm on one workload, the
+updates (`win-upd-*`, `tune-upd-*`) or the inserts at lateness p99 5 (`win-ing-base*`,
+`win-ing-seal160`, `tune-ing-*`). Its time per write under a mix is its write, plus its
+compactions over the writes, plus each read's time times the reads a write; a phase's time is its
+work plus its requests priced by size with a spike (the lab's `sized_latency`, which now prices
+the windows, as their probe's mean, the sorted read and compactions). The reads are the probes'
+of steps 5 to 30: the full read, a window and the newest 1% under `cached-skip`, the sorted read
+under `cached`. Requests and bytes come from havoc's runs. The work is predicted from the counts
+by a linear formula fitted on the laptop's `windows` runs (each kind of phase: the write's parts,
+the compaction and each read; per arm where that predicted better; bytes read and written,
+requests, and for the sorted read rows times log2 of the row groups it holds open), at the arm's
+pace on the laptop for that phase. Held out one configuration at a time on those runs, its error
+on a configuration's and arm's mean is 2.4% for the write (median; at most 12%), 3–5% for the
+full, window and newest reads (at most 27–34%, where an arm's only updates configuration is held
+out) and 17% for the sorted read (at most 28%).
+
+**The mixes** (reads a write): `writes` (1 window and 0.1 full read), `windows` (10 windows),
+`scans` (2 full reads), `sorted` (1 sorted read). **The stores:** the base point's spikes on S3
+Express (`spike/s3x-spike-20261031T163533Z`) and Azure Blob (`spike/azure-spike-20261031T234510Z`).
+
+**The grid** (`configs/tune-*.json`, campaign `docker/campaigns/tune.json` on havoc), each a
+`win-*` configuration with one knob moved, the windows and readers as in `windows`:
+- updates: MoR compacted every 3, 6 and 12 writes (probes every 5 writes fall at every point of
+  those cycles; `win-upd-base-compact`'s 10 probes half its reads just after a compaction); the
+  deferred merges (deltas by region) at θ 0.12, 0.5 and 1 (θ 1 never merges a row group whose rows
+  are not all gone); RMoW-append and the deferred merges at θ 0.06 with row groups of 4, 8 and 32
+  MiB;
+- inserts: MoR compacted every 3, 6 and 12 writes; RMoR's tail sealed at 256 MiB (fanout 4:
+  16-write units, each row rewritten twice), and at 160 MiB with fanouts of 2 (8-write units,
+  three times) and 8 (8-write units, once); row groups of 4 MiB for the appending arms (MoR, RMoR,
+  RMoW-append) and for RMoR sealed at 256 MiB. A seal of 1024 MiB would do what 256 does in 30
+  writes (a 64-write unit cannot form), so it is not run.
+
+**The finalists:** under each workload, store and mix, the tuner's two cheapest policies. Those
+the laptop has not run (`tune-*`) run there with the same configurations, for instructions.
+
+**Predicted:**
+- **T1 (the formula, held out): on each finalist the laptop runs, the predicted work of each arm's
+  write and of its full, window and newest reads is within 15% of the measured (median within
+  8%), and of its sorted read within 30%. Its time per write under each mix is within 10%.**
+- **T2 (the picks): under each of the 16 workloads, stores and mixes, the tuner's first policy,
+  priced with the measured work, costs at most 5% more than the cheapest finalist priced the same
+  way.**
+- **T3 (the updates' knobs, counts on havoc):**
+  - the deferred merges write at most 0.6 of θ 0.06's bytes at θ 0.12 and at most 0.2 at θ 0.5
+    and 1 (model 0.47, 0.095, 0.076), and their windows read at most 1.5 times θ 0.06's bytes at
+    every θ (model 1.01, 1.24, 1.34): deltas kept by region keep a window cheap without merging;
+  - RMoW-append's windows read at most 0.6 of its bytes at 16 MiB with row groups of 4 MiB, and at
+    most 0.85 at 8 MiB. A statement changes rows across its whole region, so every row group of
+    the region is rewritten at any size: its writes are at most 1.1 times 16 MiB's bytes at 4 and
+    8 MiB, and at least 1.5 times at 32 MiB, where a row group holds two regions.
+- **T4 (the inserts' knobs, counts on havoc):**
+  - RMoR sealed at 256 MiB writes at most 1.5 times its bytes sealed at 160 MiB, and its windows
+    read at most 0.85 of theirs (model 1.24 and 0.74); at 160 MiB a fanout of 2 writes at most 1.6
+    times and reads at most 0.8 (model 1.41 and 0.65), and a fanout of 8 is within 15% of the
+    fanout of 4 on both (model 1.00 and 0.92);
+  - with row groups of 4 MiB the appending arms' windows read at most half their bytes at 16 MiB,
+    and their sorted read holds at most half: a write's late rows sort first, into its first row
+    group, so only that one spans back across the table.
+
+Bytes are judged under `cached-skip`: a write's as the mean of the 30, a window's as the mean of
+the five after the 30th write, the sorted read's held bytes after the 30th.
+
+**Measured, not judged:** each mix's ranking and the picks; the time per write over a sweep of
+mixes; requests; MoR's compaction intervals.
+
+**Limits:**
+- **The runs:** one seed, 30 writes, one table size. The policies that never compact (RMoW-append,
+  the deferred merges) keep dead bytes the 30 writes do not price: storage is not in the cost.
+- **Time is simulated** at the laptop's pace. The base point's S3 Express VM did the same work in
+  1.3–1.6 times the laptop's thread time, alike across designs; writes, which are more work than
+  reads, would weigh a little more there.
+- **The sorted read** on the updates runs under `cached`, which reads RMoR's and the deferred
+  merges' dead row groups.
+- **Azure Blob's** block blobs past 256 MiB read slower than their price (RMoR's full reads, 0.66
+  of the measured at the base point); no policy here writes a file that large (RMoR's 256 MiB
+  seal makes units of about 190 MB).
