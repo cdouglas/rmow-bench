@@ -253,9 +253,16 @@ public final class TailCowArm extends MorArm {
     return k;
   }
 
-  /** A file that leaves the table takes what this arm keeps of it along. */
+  /**
+   * A file that leaves the table takes what this arm keeps of it along, its place in the tail
+   * policy's open units included: an open file whose every row went dead under DVs leaves the
+   * table without the policy merging or replacing it, and a later merge would read it back whole,
+   * its DV gone (found by the fuzzer, seed 1592, 2026-11-08). Merged and replaced files are out of
+   * the policy already, and compaction takes no open file.
+   */
   @Override
   protected void retire(int k) {
+    policy.replace(k, -1, 0);
     super.retire(k);
     born.remove(k);
     changedAt.remove(k);

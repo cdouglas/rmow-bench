@@ -175,6 +175,47 @@ class DensityTest {
     assertThat(sum(steps, "rmor-density", "merge-read", "bytes_read")).isPositive();
   }
 
+  /**
+   * A tail file every row of which goes dead under DVs leaves the table, and must leave the tail
+   * policy's open units too: the fuzzer's seed 1592 (its configuration, cut to this arm and nine
+   * batches) found the policy merging such a file, read back whole with its DV gone, so its rows
+   * came back beside their newer versions. A seal size above the whole table keeps every file
+   * open, and the newest rows are changed again and again.
+   */
+  @Test
+  void aTailFileThatDiesLeavesTheTail(@TempDir Path dir) throws IOException {
+    BenchConfig cfg = new BenchConfig();
+    cfg.store.type = "mem";
+    cfg.store.root = "mem://test";
+    WorkloadSpec w = cfg.workload;
+    w.seed = 471179891185L;
+    w.initialRows = 3795;
+    w.batches = 9;
+    w.opsPerBatch = 73;
+    w.insertFrac = 1 / 73.0;
+    w.updateFrac = 53 / 73.0;
+    w.deleteFrac = 19 / 73.0;
+    w.keyDist = WorkloadSpec.KeyDist.RECENCY_EXP;
+    w.recencyMeanBatches = 0.2851650271847598;
+    w.tsStepMicros = 1;
+    w.initialJitterRows = 276.8677388183578;
+    w.lateMedianBatches = 0.02759587100326767;
+    w.lateP99Batches = 0.19581047863234427;
+    w.regionRows = 2074;
+    cfg.layout.codec = "uncompressed";
+    cfg.layout.rowGroupBytes = 84696;
+    cfg.layout.targetFileBytes = 169392;
+    cfg.layout.tailSealBytes = 4127091;
+    cfg.layout.tierFanout = 3;
+    cfg.layout.maxRowGroupsPerFile = 26;
+    cfg.layout.defer = new LayoutSpec.Defer();
+    cfg.layout.defer.share = 0.09412906274394002;
+    cfg.reads.every = 3;
+    cfg.reads.readers = List.of(BenchConfig.ReaderSpec.cached());
+    cfg.arms = List.of("rmor-density");
+    run(cfg, dir);
+  }
+
   @Test
   void anUnknownDeltaPlacementIsRefused(@TempDir Path dir) {
     BenchConfig cfg = updates();
