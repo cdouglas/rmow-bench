@@ -274,8 +274,12 @@ public final class Fuzz {
     reads.readers = readers;
 
     if (chance(r, 0.1)) {
+      // the warmup replays the mix on its own initial load, which must outlast its changes
       cfg.warmup.batches = r.nextInt(1, 3);
-      cfg.warmup.initialRows = logUniform(r, 1_000, 5_000);
+      cfg.warmup.initialRows =
+          Math.max(
+              logUniform(r, 1_000, 5_000),
+              Math.max(4L * (upd + del), 2L * del * cfg.warmup.batches));
     }
     return new Trial(seed, cfg, chance(r, 0.2), chance(r, 0.15), chance(r, 0.3));
   }

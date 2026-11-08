@@ -254,6 +254,25 @@ class RmorTest {
   }
 
   /**
+   * With a rewrite share above 1, no write rewrites a region and only the cleaner carries rows
+   * forward; its carried row groups still take DVs, and the arm still knows its dead rows. It did
+   * neither (the fuzzer, seed 46): the arm's dead rows were tracked only at shares up to 1, so the
+   * cleaner's check of them against the manifest failed, and its carries would have duplicated
+   * rows.
+   */
+  @Test
+  void aCleanerAboveOneStillHidesWhatItCarries(@TempDir Path dir) throws IOException {
+    BenchConfig cfg = churn();
+    cfg.arms = List.of("rmor-c-clean");
+    cfg.layout.clean = new org.rmow.bench.arms.LayoutSpec.Clean();
+    cfg.layout.clean.rewriteShare = 2;
+    List<JsonNode> steps = run(cfg, dir);
+    assertThat(sum(steps, "rmor-c-clean", "clean", null, "bytes_read"))
+        .as("rows carried forward")
+        .isPositive();
+  }
+
+  /**
    * The cleaner pays for what it judges by: a file's dead rows come from its manifest entry, but
    * its row groups' from its DV, loaded in the clean phase unless the batch's locate loaded it. A
    * cleaner that never carries anything (no row group is sparse below 0, no file drains below 0)

@@ -2,7 +2,7 @@
 """Calibrates the fuzzer (bin/fuzz.sh): plants each known bug in a copy of the source, builds it,
 and fuzzes it with a fixed budget of seeds. Each mutant must be caught (a seed fails) by the check
 it names; `none` (no mutant) must stay clean. Run from the repository root, after `mvn package`
-(the copies use target/lib/ for their dependencies):
+(the copies run on a copy of target/lib/, taken at the start):
 
     bin/fuzz-mutants.py [--seeds 60] [--workers 6] [--out DIR] [NAME ...]
 
@@ -112,7 +112,7 @@ def build(name, out):
 
 def fuzz(name, out, seeds, workers, heap):
     classes = out / name / "src-tree/target/classes"
-    cp = f"{classes}:{os.getcwd()}/target/lib/*"
+    cp = f"{classes}:{(out / 'lib').resolve()}/*"
     procs = []
     for k in range(workers):
         cmd = ["java", f"-Xmx{heap}", "--add-opens=java.base/java.nio=ALL-UNNAMED", "-cp", cp,
@@ -137,6 +137,10 @@ def main():
     a = ap.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
+    # the dependencies, copied: a `mvn package` meanwhile rewrites target/lib under running JVMs
+    if (out / "lib").exists():
+        shutil.rmtree(out / "lib")
+    shutil.copytree("target/lib", out / "lib")
     lines = []
     for name in a.names or MUTANTS:
         expect = MUTANTS[name][3]

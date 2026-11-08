@@ -53,6 +53,13 @@ class FuzzTest {
           .isLessThanOrEqualTo((int) Math.max(1, c.workload.initialRows / 4));
       assertThat((long) c.workload.deletes() * c.workload.batches)
           .isLessThanOrEqualTo(c.workload.initialRows / 2);
+      if (c.warmup.batches > 0) {
+        // likewise for the warmup, which replays the mix on its own initial load
+        assertThat(c.workload.updates() + c.workload.deletes())
+            .isLessThanOrEqualTo((int) (c.warmup.initialRows / 4));
+        assertThat((long) c.workload.deletes() * c.warmup.batches)
+            .isLessThanOrEqualTo(c.warmup.initialRows / 2);
+      }
       twins += t.twin() ? 1 : 0;
     }
     assertThat(armsSeen).containsExactlyInAnyOrderElementsOf(Fuzz.ARMS);

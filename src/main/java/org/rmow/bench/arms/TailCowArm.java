@@ -332,7 +332,9 @@ public final class TailCowArm extends MorArm {
       endBatch();
       return;
     }
-    if (regional()) {
+    // Kept row groups take DVs over the regions they rewrite, at any share: with a share above 1
+    // the cleaner's carries are still rewrites (found by the fuzzer, seed 46, 2026-11-08)
+    if (keep || regional()) {
       deadAfter(rewrites, dvPositions);
     }
     if (!dvPositions.isEmpty()) {
