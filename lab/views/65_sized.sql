@@ -134,28 +134,45 @@ FROM r JOIN sized_segments s
   ON s.profile = spike_name AND s.op = r.op AND r.rest >= s.lo AND r.rest < s.hi
 LEFT JOIN cap_ms ON true;
 
--- The sized model per one-thread outermost phase of a run (batch, read_*), priced with a spike:
--- its CPU plus its requests' prices. cpu_ms is thread CPU on the wall clock (run_clock), work_ms
--- the phase's work at its arm's pace where the run counted instructions (phase_work); a cloud
--- run's own check uses cpu_ms, a prediction from a local twin work_ms. measured_ms is the phase's
--- wall time, and logged_ms the time its logged requests took (a cloud run's; a local run's are
--- the local store's).
+-- The sized model per one-thread outermost phase of a run (batch, compact, read_*), priced with a
+-- spike: its CPU plus its requests' prices. cpu_ms is thread CPU on the wall clock (run_clock),
+-- work_ms the phase's work at its arm's pace where the run counted instructions (phase_work); a
+-- cloud run's own check uses cpu_ms, a prediction from a local twin work_ms. measured_ms is the
+-- phase's wall time, and logged_ms the time its logged requests took (a cloud run's; a local
+-- run's are the local store's). A probe reads several windows (read_window, `records` of them),
+-- whose records and requests the log does not tell apart: a window's row is their mean, so its
+-- `requests` may be fractional.
 CREATE MACRO sized_latency(run_name, spike_name) AS TABLE
 WITH q AS (
     SELECT arm, step, phase, reader, count(*) AS requests, sum(price_ms) AS request_ms,
            sum(measured_ms) AS logged_ms
     FROM sized_requests(run_name, spike_name) GROUP BY ALL
+),
+s AS (
+    SELECT s.run_id, s.arm, s.step, s.phase, s.reader, count(*) AS records,
+           sum(s.wall_ns) AS wall_ns, sum(s.cpu_ns) AS cpu_ns
+    FROM steps s
+    WHERE s.run_id = run_name
+      AND s.phase IN ('batch', 'compact', 'read_full', 'read_recent', 'read_old', 'read_window',
+                      'read_sorted')
+    GROUP BY ALL
+),
+w AS (
+    SELECT arm, step, phase, reader, sum(work_ms) AS work_ms
+    FROM phase_work WHERE run_id = run_name GROUP BY ALL
 )
 SELECT s.run_id, s.arm, s.step, s.phase, s.reader, spike_name AS profile,
-       s.wall_ns / 1e6 AS measured_ms, s.cpu_ns / c.cpu_per_wall / 1e6 AS cpu_ms, w.work_ms,
-       coalesce(q.requests, 0) AS requests, coalesce(q.request_ms, 0) AS request_ms,
-       coalesce(q.logged_ms, 0) AS logged_ms
-FROM steps s
+       s.wall_ns / s.records / 1e6 AS measured_ms, s.cpu_ns / s.records / c.cpu_per_wall / 1e6 AS cpu_ms,
+       w.work_ms / s.records AS work_ms,
+       CASE WHEN s.records = 1 THEN coalesce(q.requests, 0)
+            ELSE coalesce(q.requests, 0) / s.records END AS requests,
+       coalesce(q.request_ms, 0) / s.records AS request_ms,
+       coalesce(q.logged_ms, 0) / s.records AS logged_ms, s.records
+FROM s
 JOIN run_clock c USING (run_id)
 LEFT JOIN run_readers rr ON rr.run_id = s.run_id AND rr.reader = s.reader
-LEFT JOIN phase_work w ON w.run_id = s.run_id AND w.arm = s.arm AND w.step = s.step
-                      AND w.phase = s.phase AND w.reader IS NOT DISTINCT FROM s.reader
+LEFT JOIN w ON w.arm = s.arm AND w.step = s.step AND w.phase = s.phase
+           AND w.reader IS NOT DISTINCT FROM s.reader
 LEFT JOIN q ON q.arm = s.arm AND q.step = s.step AND q.phase = s.phase
            AND q.reader IS NOT DISTINCT FROM s.reader
-WHERE s.run_id = run_name AND s.phase IN ('batch', 'read_full', 'read_recent', 'read_old')
-  AND coalesce(rr.parallelism, 1) = 1;
+WHERE coalesce(rr.parallelism, 1) = 1;

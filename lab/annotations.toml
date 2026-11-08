@@ -85,6 +85,10 @@ select = ["where:label LIKE 'ing-seal160%' AND git_sha LIKE 'dcb16a1%'"]
 title = "Reads of a range across the table (docs/HYPOTHESES.md, 2026-11-07, Q1-Q4): the split and seal campaigns' configurations but upd-base-scan, labelled win-*, with five windows of 1% read at each probe under every reader (by id on the updates, by event time on the inserts). On havoc at 479edb1 for requests, bytes and held memory, and on the laptop (bearyak, the same build) for instructions; the two must agree on every request and byte"
 select = ["where:label LIKE 'win-%' AND git_sha LIKE '479edb1%'"]
 
+[campaigns.tune]
+title = "Tuning write policy by simulation (docs/HYPOTHESES.md, 2026-11-08, T1-T4): a grid around the windows campaign's configurations, one knob each (MoR's compaction interval, the deferred merges' threshold, row-group size, RMoR's seal and fanout), on havoc at 7cabf65 for requests and bytes; the finalists on the laptop for instructions (analysis/tune.py)"
+select = ["where:label LIKE 'tune-%'"]
+
 [campaigns.mor-row]
 title = "MoR alone with updateRead row at the eleven rmor-* settings, on havoc at aeee8e3: the calibration of the cloud runs' MoR (docs/HYPOTHESES.md, 2026-11-06)"
 select = ["where:label LIKE 'mor-row-%' AND git_sha LIKE 'aeee8e3%'"]
