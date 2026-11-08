@@ -4,7 +4,7 @@ and fuzzes it with a fixed budget of seeds. Each mutant must be caught (a seed f
 it names; `none` (no mutant) must stay clean. Run from the repository root, after `mvn package`
 (the copies run on a copy of target/lib/, taken at the start):
 
-    bin/fuzz-mutants.py [--seeds 60] [--workers 6] [--out DIR] [NAME ...]
+    bin/fuzz-mutants.py [--seeds 60] [--workers 6] [--profile mixed|heavy] [--out DIR] [NAME ...]
 
 A check named with a leading `?` is measured, not required: the mutant is subtler than random
 draws can be expected to reach at this budget, and is reported either way.
@@ -121,14 +121,15 @@ def build(name, out):
     return None
 
 
-def fuzz(name, out, seeds, workers, heap):
+def fuzz(name, out, seeds, workers, heap, profile):
     classes = out / name / "src-tree/target/classes"
     cp = f"{classes}:{(out / 'lib').resolve()}/*"
     procs = []
     for k in range(workers):
         cmd = ["java", f"-Xmx{heap}", "--add-opens=java.base/java.nio=ALL-UNNAMED", "-cp", cp,
                "org.rmow.bench.fuzz.Fuzz", "--out", str(out / name), "--from", "1",
-               "--count", str(seeds), "--worker", str(k), "--workers", str(workers)]
+               "--count", str(seeds), "--worker", str(k), "--workers", str(workers),
+               "--profile", profile]
         procs.append(subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL))
     for p in procs:
         p.wait()
@@ -143,6 +144,7 @@ def main():
     ap.add_argument("--seeds", type=int, default=60)
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--heap", default="3g")
+    ap.add_argument("--profile", default="mixed", help="the fuzzer's draws: mixed or heavy")
     ap.add_argument("--out", default="results/fuzz/calibration")
     ap.add_argument("names", nargs="*")
     a = ap.parse_args()
@@ -159,7 +161,7 @@ def main():
         if err:
             line = f"{name}: NOT BUILT: {err}"
         else:
-            rows = fuzz(name, out, a.seeds, a.workers, a.heap)
+            rows = fuzz(name, out, a.seeds, a.workers, a.heap, a.profile)
             failed = sorted((r for r in rows if not r["ok"]), key=lambda r: r["seed"])
             kinds = sorted({r["kind"] for r in failed})
             optional = expect.startswith("?")

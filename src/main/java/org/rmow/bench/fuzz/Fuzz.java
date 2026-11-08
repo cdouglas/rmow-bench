@@ -54,6 +54,7 @@ import org.rmow.bench.workload.WorkloadSpec;
  *       [--worker K --workers W] [--resume]
  *   bin/fuzz.sh --seed S [--out DIR]       # one seed, its outcome on stdout
  *   bin/fuzz.sh --print S                  # the configuration seed S draws
+ *   ... --profile heavy                    # draws that favour nearly dead row groups
  * </pre>
  *
  * Worker K of W runs seeds S + K, S + K + W, ... Each outcome is a line of {@code
@@ -95,6 +96,17 @@ public final class Fuzz {
   static final Set<String> SHARE_ZERO = Set.of("rmor-c-footer", "rmor-c-kept", "rmor-c-footer-kept");
 
   /**
+   * What the draws favour. {@code mixed}: everything, a share of each. {@code heavy}: every seed
+   * changes rows in heavy statements (a share of 0.8 to 1 of a region's rows), with regions about
+   * a row group or a few and a reader that skips dead row groups, so row groups go dead but for a
+   * few rows, where skipping them is easiest to get wrong.
+   */
+  enum Profile {
+    MIXED,
+    HEAVY
+  }
+
+  /**
    * A seed's draw: the configuration, the checks beyond the run's own, and whether the run logs
    * every request and every change of what it holds, as the cloud runs do.
    */
@@ -109,6 +121,11 @@ public final class Fuzz {
   // ------------------------------------------------------------------------------------------
 
   static Trial draw(long seed) {
+    return draw(seed, Profile.MIXED);
+  }
+
+  static Trial draw(long seed, Profile profile) {
+    boolean heavy = profile == Profile.HEAVY;
     // not seed times SplittableRandom's own gamma: consecutive seeds would draw shifted copies
     SplittableRandom r = new SplittableRandom(seed ^ 0x632BE59BD9B4E019L);
     BenchConfig cfg = new BenchConfig();
@@ -127,7 +144,7 @@ public final class Fuzz {
     int ins;
     int upd;
     int del;
-    switch (r.nextInt(3)) {
+    switch (heavy ? 2 * r.nextInt(2) : r.nextInt(3)) {
       case 0 -> { // updates and deletes
         ins = 0;
         del = (int) (ops * r.nextDouble(0, 0.4));
@@ -153,8 +170,9 @@ public final class Fuzz {
       del = (int) (del * k);
     }
     del = (int) Math.min(del, w.initialRows / (2L * w.batches));
-    if (ins + upd + del == 0) {
-      upd = 1;
+    if (ins + upd + del == 0 || heavy && upd + del == 0) {
+      upd = (int) Math.max(1, Math.min(ins / 2, cap));
+      ins -= Math.min(ins, upd);
     }
     ops = ins + upd + del;
     w.opsPerBatch = ops;
@@ -171,7 +189,10 @@ public final class Fuzz {
     w.regionSkew = r.nextDouble(0, 2);
     // heavy statements nearly empty a region, so row groups and files go (nearly) dead whole
     double share = r.nextDouble();
-    w.updateShare = share < 0.45 ? 0 : share < 0.85 ? logUniform(r, 0.001, 0.5) : r.nextDouble(0.8, 1);
+    w.updateShare =
+        heavy || share >= 0.85
+            ? r.nextDouble(0.8, 1)
+            : share < 0.45 ? 0 : logUniform(r, 0.001, 0.5);
 
     LayoutSpec l = cfg.layout;
     l.codec = chance(r, 0.7) ? "zstd" : pick(r, "snappy", "gzip", "uncompressed");
@@ -214,6 +235,25 @@ public final class Fuzz {
       d.share = logUniform(r, 0.005, 1.2);
       d.deltas = pick(r, "region", "write");
       l.defer = d;
+    }
+    // A heavy statement empties most of a region only if the batch changes that many rows, and
+    // leaves a row group dead but for a few rows only if its region spans the row group: regions
+    // of about a row group or a few, and batches that change at least a region's rows.
+    if (w.updateShare >= 0.8 && upd + del > 0) {
+      long rgRows = Math.max(100, l.rowGroupBytes / 60);
+      w.regionRows =
+          Math.max(50, Math.min(w.initialRows / 4, (long) (rgRows * r.nextDouble(0.5, 3))));
+      long want = Math.min(w.initialRows / 4, w.regionRows);
+      if (upd + del < want) {
+        double k = (double) want / (upd + del);
+        upd = (int) (upd * k);
+        del = (int) Math.min(del * k, w.initialRows / (2L * w.batches));
+        ops = ins + upd + del;
+        w.opsPerBatch = ops;
+        w.insertFrac = (double) ins / ops;
+        w.updateFrac = (double) upd / ops;
+        w.deleteFrac = (double) del / ops;
+      }
     }
 
     List<String> arms = new ArrayList<>();
@@ -269,6 +309,11 @@ public final class Fuzz {
       }
       s.splitTargetBytes = chance(r, 0.5) ? s.splitTargetBytes : logUniform(r, 16 << 10, 128 << 20);
       s.parallelism = pick(r, 1, 1, 2, 4);
+      readers.add(s);
+    }
+    if (heavy && readers.stream().noneMatch(x -> x.skipDeadRowGroups)) {
+      BenchConfig.ReaderSpec s = BenchConfig.ReaderSpec.skipping();
+      s.name = "skip";
       readers.add(s);
     }
     if (sorted) {
@@ -341,7 +386,11 @@ public final class Fuzz {
 
   /** Runs one seed in {@code scratch}; a failure's records go to {@code out/fail-<seed>/}. */
   static Outcome trial(long seed, Path scratch, Path out) throws IOException {
-    Trial t = draw(seed);
+    return trial(seed, Profile.MIXED, scratch, out);
+  }
+
+  static Outcome trial(long seed, Profile profile, Path scratch, Path out) throws IOException {
+    Trial t = draw(seed, profile);
     long t0 = System.nanoTime();
     trialSeed = seed;
     trialStart = System.currentTimeMillis();
@@ -605,6 +654,7 @@ public final class Fuzz {
     boolean resume = false;
     Long one = null;
     Long print = null;
+    Profile profile = Profile.MIXED;
     for (int i = 0; i < args.length; i++) {
       switch (args[i]) {
         case "--out" -> out = Path.of(args[++i]);
@@ -618,11 +668,12 @@ public final class Fuzz {
         case "--resume" -> resume = true;
         case "--seed" -> one = Long.parseLong(args[++i]);
         case "--print" -> print = Long.parseLong(args[++i]);
+        case "--profile" -> profile = Profile.valueOf(args[++i].toUpperCase(java.util.Locale.ROOT));
         default -> throw new IllegalArgumentException("Unknown argument: " + args[i]);
       }
     }
     if (print != null) {
-      Trial t = draw(print);
+      Trial t = draw(print, profile);
       System.out.println(JSON.writerWithDefaultPrettyPrinter().writeValueAsString(t.cfg()));
       System.out.println("twin " + t.twin() + ", dump " + t.dump() + ", logs " + t.logs());
       return;
@@ -630,10 +681,11 @@ public final class Fuzz {
     Files.createDirectories(out);
     workerId = worker;
     Path scratch = out.resolve("scratch-" + worker);
+    Fuzz.profile = profile;
     watchdog(out, (long) (timeoutMinutes * 60_000));
     if (one != null) {
-      Outcome o = trial(one, scratch, out);
-      System.out.println(line(o, draw(one)));
+      Outcome o = trial(one, profile, scratch, out);
+      System.out.println(line(o, draw(one, profile)));
       System.exit(o.ok() ? 0 : 1);
     }
     Path summary = out.resolve("summary-" + worker + ".jsonl");
@@ -656,16 +708,16 @@ public final class Fuzz {
       }
       Outcome o;
       try {
-        o = trial(seed, scratch, out);
+        o = trial(seed, profile, scratch, out);
       } catch (Error e) {
         Outcome err = new Outcome(seed, "error", firstLine(e), 0);
-        recordFailure(out, draw(seed), err, e, null);
-        append(summary, line(err, draw(seed)));
+        recordFailure(out, draw(seed, profile), err, e, null);
+        append(summary, line(err, draw(seed, profile)));
         System.err.println("seed " + seed + ": " + firstLine(e) + "; the worker restarts");
         Runtime.getRuntime().halt(4);
         return;
       }
-      append(summary, line(o, draw(seed)));
+      append(summary, line(o, draw(seed, profile)));
       ran++;
       if (!o.ok()) {
         System.err.println("seed " + seed + " FAILED (" + o.kind() + "): " + o.message());
@@ -684,6 +736,7 @@ public final class Fuzz {
     m.put("message", o.message());
     m.put("seconds", o.seconds());
     BenchConfig c = t.cfg();
+    m.put("profile", profile.name().toLowerCase(java.util.Locale.ROOT));
     m.put("store", c.store.type);
     m.put("twin", t.twin());
     m.put("dump", t.dump());
@@ -726,7 +779,7 @@ public final class Fuzz {
                 long seed = trialSeed;
                 if (start != 0 && System.currentTimeMillis() - start > timeoutMs) {
                   try {
-                    Trial t = draw(seed);
+                    Trial t = draw(seed, profile);
                     Outcome o =
                         new Outcome(seed, "timeout", "over " + timeoutMs / 60_000 + " minutes", 0);
                     recordFailure(out, t, o, null, null);
@@ -752,4 +805,7 @@ public final class Fuzz {
 
   /** This worker's number, for the watchdog's summary line. */
   private static volatile int workerId = 0;
+
+  /** This worker's profile, for its summary lines. */
+  private static volatile Profile profile = Profile.MIXED;
 }

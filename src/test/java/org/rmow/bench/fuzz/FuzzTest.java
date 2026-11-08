@@ -18,11 +18,26 @@ class FuzzTest {
 
   @Test
   void drawsAreValidConfigurations() {
+    drawsAreValid(Fuzz.Profile.MIXED);
+  }
+
+  @Test
+  void heavyDrawsAreValidAndHeavy() {
+    drawsAreValid(Fuzz.Profile.HEAVY);
+    for (long seed = 1; seed <= 2_000; seed++) {
+      BenchConfig c = Fuzz.draw(seed, Fuzz.Profile.HEAVY).cfg();
+      assertThat(c.workload.updateShare).isGreaterThanOrEqualTo(0.8);
+      assertThat(c.workload.updates() + c.workload.deletes()).isPositive();
+      assertThat(c.reads.readers).anyMatch(r -> r.skipDeadRowGroups);
+    }
+  }
+
+  private static void drawsAreValid(Fuzz.Profile profile) {
     Set<String> armsSeen = new HashSet<>();
     int twins = 0;
     int sorted = 0;
     for (long seed = 1; seed <= 2_000; seed++) {
-      Fuzz.Trial t = Fuzz.draw(seed);
+      Fuzz.Trial t = Fuzz.draw(seed, profile);
       BenchConfig c = t.cfg();
       c.workload.validate();
       assertThat(c.arms).isNotEmpty();
