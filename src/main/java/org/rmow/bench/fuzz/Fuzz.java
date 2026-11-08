@@ -120,8 +120,10 @@ public final class Fuzz {
     WorkloadSpec w = cfg.workload;
     w.seed = r.nextLong(1, 1L << 40);
     w.initialRows = logUniform(r, 2_000, 60_000);
-    w.batches = r.nextInt(2, 17);
-    int ops = (int) logUniform(r, 20, 3_000);
+    // some runs are long and of small batches, so tails go through many merges and seals
+    boolean longRun = chance(r, 0.2);
+    w.batches = longRun ? r.nextInt(17, 31) : r.nextInt(2, 17);
+    int ops = (int) (longRun ? logUniform(r, 20, 300) : logUniform(r, 20, 3_000));
     int ins;
     int upd;
     int del;
@@ -167,7 +169,9 @@ public final class Fuzz {
     w.lateP99Batches = w.lateMedianBatches * logUniform(r, 1.0, 100.0);
     w.regionRows = logUniform(r, 50, 50_000);
     w.regionSkew = r.nextDouble(0, 2);
-    w.updateShare = chance(r, 0.5) ? 0 : logUniform(r, 0.001, 0.5);
+    // heavy statements nearly empty a region, so row groups and files go (nearly) dead whole
+    double share = r.nextDouble();
+    w.updateShare = share < 0.45 ? 0 : share < 0.85 ? logUniform(r, 0.001, 0.5) : r.nextDouble(0.8, 1);
 
     LayoutSpec l = cfg.layout;
     l.codec = chance(r, 0.7) ? "zstd" : pick(r, "snappy", "gzip", "uncompressed");
@@ -175,18 +179,24 @@ public final class Fuzz {
     l.targetFileBytes = Math.max(64 << 10, l.rowGroupBytes * logUniform(r, 1, 32));
     l.sortWrites = chance(r, 0.85);
     l.writerFooters = chance(r, 0.8) ? "transaction" : "open";
-    l.tailSealBytes = logUniform(r, 16 << 10, 4 << 20);
+    // a seal size under the row-group size makes sealed tail units small enough to pack
+    l.tailSealBytes =
+        chance(r, 0.3)
+            ? (long) (l.rowGroupBytes * r.nextDouble(0.05, 0.6))
+            : logUniform(r, 16 << 10, 4 << 20);
     l.tierFanout = r.nextInt(2, 9);
     l.maxRowGroupsPerFile = (int) logUniform(r, 2, 128);
     l.footerOrder = pick(r, "logical", "offset");
     l.footerPrefetchBytes = prefetch(r);
     l.locate = pick(r, "oracle", "scan");
     l.updateRead = pick(r, null, "id", "row", "scan");
-    l.compactEvery = chance(r, 0.3) ? 0 : r.nextInt(1, 9);
+    double every = r.nextDouble();
+    l.compactEvery = every < 0.25 ? 0 : every < 0.65 ? r.nextInt(1, 4) : r.nextInt(4, 9);
     l.compactDeleteRatio = r.nextDouble(0.02, 0.9);
     l.compactSmallFileFraction = r.nextDouble(0.05, 1.0);
     l.compactGarbageRatio = r.nextDouble(0.05, 1.5);
-    l.compactSmallRowGroups = chance(r, 0.3) ? 0 : r.nextInt(2, 11);
+    double small = r.nextDouble();
+    l.compactSmallRowGroups = small < 0.3 ? 0 : small < 0.65 ? 2 : r.nextInt(3, 11);
     l.rmorRewriteShare = chance(r, 0.6) ? 0 : r.nextDouble(0.01, 1.5);
     l.writerSkipsDeadRowGroups = r.nextBoolean();
     if (chance(r, 0.5)) {
