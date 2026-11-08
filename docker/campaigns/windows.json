@@ -1,0 +1,18 @@
+{
+  "description": "Reads of a range across the table (docs/HYPOTHESES.md, 2026-11-07, Q1-Q4): the split and seal campaigns' configurations, but upd-base-scan, with five windows of 1% read at each probe under every reader, by id on the updates and by event time on the inserts. Payload checks off, requests and held memory logged. The laptop runs the same configurations for instructions.",
+  "flags": ["--log-requests", "--log-held"],
+  "cores_per_job": 3,
+  "jobs": [
+    {"config": "configs/win-upd-base.json", "heap": "16g", "store_gib": 40},
+    {"config": "configs/win-upd-base-compact.json", "heap": "16g", "store_gib": 20},
+    {"config": "configs/win-upd-density-p25.json", "heap": "16g", "store_gib": 20},
+    {"config": "configs/win-upd-density-write.json", "heap": "16g", "store_gib": 20},
+    {"config": "configs/win-ing-base.json", "heap": "16g", "store_gib": 30},
+    {"config": "configs/win-ing-base-compact.json", "heap": "16g", "store_gib": 20},
+    {"config": "configs/win-ing-late99-1.json", "heap": "16g", "store_gib": 30},
+    {"config": "configs/win-ing-late99-20.json", "heap": "16g", "store_gib": 30},
+    {"config": "configs/win-ing-seal160.json", "heap": "16g", "store_gib": 30},
+    {"config": "configs/win-ing-seal160-late99-1.json", "heap": "16g", "store_gib": 30},
+    {"config": "configs/win-ing-seal160-late99-20.json", "heap": "16g", "store_gib": 30}
+  ]
+}

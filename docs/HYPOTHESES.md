@@ -1046,3 +1046,96 @@ requests; what the merges hold; the full read, all of whose bytes are live in bo
   746 MB a write at p99 5); RMoW-append with its merged units cut into row groups and its tail
   kept open past the target file size, which is not built; re-cutting a row group at a late row's
   place.
+
+## Reads of a range across the table, and the work they take (registered 2026-11-07)
+
+**What it decides:** what a read of a narrow range costs where it is not the newest rows. The
+reads probed so far are the whole table, its newest 1% of event time and its sorted order. The
+newest 1% costs every design alike (0.021 of the table in every `upd-*`, `ing-*` and seal run),
+while the model put a 1% range elsewhere at 9 times its live bytes for MoR's updates and 17 times
+for appended inserts (2026-11-06, limits). On the laptop the same runs count instructions, which
+havoc cannot, so they also give each phase's work for simulated time, write against read.
+
+**The verdicts that led here (judged 2026-11-07, on havoc, campaigns `split` and `seal`):**
+- U1–U4 and I1–I3 held, but for two parts. U1's "the region designs within 5% of one another" is
+  contradicted: RMoW-append's update reads 220.6 MB a write, RMoR's 240.0 (its locate reads 0.1 MB
+  against 19.5). U2's "at least 40 times MoR's bytes" is contradicted at 38.9 times: MoR writes
+  5.7 MB a write, 1.7 of them deletion vectors (model 3.6). U3 and U4 are judged on the live
+  rows' bytes (754 MB, RMoW-append's full read) and under the reader that skips dead row groups.
+- J3 held. J1 and J2 are contradicted in part: RMoR's largest write is 4.0 times the appending
+  arms' (47 MB), not 10, and its sorted read holds 0.52 of theirs at p99 1 (not at most half) and
+  2.4 times compacted MoR's at p99 5 (not at most twice). Inserts take 33.7 bytes a row, not the
+  model's 28.6, so four 4-write units (189 MB) passed the 160 MiB seal and never merged. With
+  `--insert-row-bytes 33.7` the model puts the largest write at 40 MB and the held share at 0.12
+  (measured 0.135). At p99 5 and 20 RMoR's share is 0.41 of the appending arms'.
+- Measured: the sorted read sends the full read's requests and bytes, but on havoc took 1.85–2.2
+  times its thread CPU in the appending arms after the 30th write (1.4 at the 5th), 1.43 compacted.
+
+**Setup:**
+- **The reads:** `reads.windows` (README), at each probe and under every reader: five windows of
+  1% of a column's span, centred at 0.1, 0.3, 0.5, 0.7 and 0.9 of it, each a read of its own
+  (`read_window`, with `window_by` and `window_at`), checked against the oracle. Updates read
+  windows by `id`, inserts by `ts`: on the updates, event time follows the key; on the inserts,
+  ids follow arrival, which a write's files hold together.
+- **Configurations:** `configs/win-*.json`, the `split` and `seal` campaigns' with the windows
+  added, so the same op logs: `win-upd-base` (MoR, RMoR, RMoW-external, RMoW-append, the deferred
+  merges), `win-upd-base-compact`, `win-upd-density-p25`, `win-upd-density-write`, `win-ing-base`,
+  `win-ing-base-compact`, `win-ing-late99-1`, `win-ing-late99-20`, and the three `win-ing-seal160*`.
+  `upd-base-scan` is left out: its table is MoR's in `upd-base`.
+- **Where:** on havoc (campaign `docker/campaigns/windows.json`: requests, bytes, held memory) and
+  on the laptop (`bin/matrix.sh`, the same configurations, one at a time: instructions).
+- **The model:** `analysis/hybrid_model.py` cuts the runs' five windows (`span_windows`) and prices
+  each as its full read: a request per row group and object it touches and per object with a DV,
+  bytes of every row group whose statistics overlap the window, against the window's live rows.
+  The ingest policies take `--insert-row-bytes 33.7`. It does not count the footers of files
+  whose metrics overlap a window but none of whose row groups do.
+- **A check at a fifth of the scale** (scratch runs, not in `results/`): every window read matched
+  the oracle. On the updates after 10 writes, MoR's windows read 9.9–14.8 MB and 12–23 requests,
+  RMoW-append's 3.4–6.8 MB and 2–3. On the inserts at p99 5 after 20 writes, with the seal 40 MiB,
+  the appending arm's windows read 23–53 MB, RMoR's 9.8–13.4, RMoW-append's 28–53.
+
+A window's live bytes are its rows times the bytes a live row takes in the arm's full read under
+the same reader. Windows are judged under `cached-skip` after the 30th write, as the mean of the
+five.
+
+**Predicted:**
+- **Q1 (updates, a key range): MoR's windows read at least 3 times the bytes of RMoR's,
+  RMoW-external's and RMoW-append's, and at least 10 times RMoW-append's requests** (model: 17
+  against 3.3 times the windows' live bytes; 81 requests against 3). Each write's new versions
+  span the key range, so every window reads every write's file. **MoR compacted every 10 writes,
+  just compacted, reads at most half of MoR's bytes** (model 5.5).
+- **Q2 (where the deferred merges' deltas wait): with a delta row group per region, their windows
+  read at most 1.3 times RMoR's bytes, at θ = 0.06 and 0.25; with one per write, at least twice**
+  (model 3.4 and 3.9 against 3.3; 11). U4's full reads paid for keeping deltas by region; a range
+  read is what it buys.
+- **Q3 (inserts, an event-time range): at p99 5 and 20 the appending arms' windows read at least
+  10 times their live bytes** (model 27): a few rows of every write arrive later than p99, so
+  every appended row group spans back over most of the table. **MoR compacted every 10 writes
+  reads at most 0.4 of that, RMoR with the 160 MiB seal at most 0.7, and RMoW-append with it at
+  least 0.9** (model 6.1, 12 and 28 against 27). **At p99 1 the appending arms read at most half
+  of what they read at p99 5** (model 8.6).
+- **Q4 (the sorted read's work, the laptop only): after the 30th write, at p99 5 and 20, the
+  appending arms' sorted read takes at least 1.5 times the instructions of their full read, and
+  MoR compacted every 10 writes less than that ratio** (havoc's thread time: 1.85–2.2 and 1.43).
+
+**Controls:**
+- In every record but `read_window`'s, each `win-*` run sends the requests and bytes, and holds
+  the one-thread peaks, of its `split` or `seal` run.
+- The laptop's run of each configuration and havoc's send the same requests and bytes in every
+  record.
+
+**Measured, not judged:** each window apart; requests beyond Q1; the windows under the other
+readers (Iceberg's stock reader reads RMoR's dead row groups); every phase's instructions, for the
+breakdown of write and read time on S3 Express and Azure Blob (lab/pages/store-latency.md);
+RMoR's sorted read with the seal (on havoc 1.89 times its full read, holding 0.41 of the
+appending arms' bytes).
+
+**Limits:**
+- **The runs:** one seed and 30 writes; five windows of one width.
+- **Windows by span:** each window is 1% of the column's span, not of the rows. Ids and event
+  times are near uniform here (a write's inserts span a write's event time), so the two differ
+  little.
+- **The sorted read on the updates** runs under `cached`, which reads RMoR's dead row groups; its
+  work there is not RMoR's.
+- **Time is simulated** from the laptop's instructions at each arm's pace and the requests priced
+  by size, as before (C6 and V5 held within 1–14% on S3 Express).

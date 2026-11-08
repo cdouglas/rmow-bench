@@ -210,6 +210,47 @@ class RunnerSmokeTest {
     }
   }
 
+  @Test
+  void windowReadsAddRecordsAndChangeNoOther(@TempDir Path dir) throws IOException {
+    // each window is a read of its own, checked against the model; the other records stay as a
+    // run without windows sends them, and a configuration without windows keeps its hash
+    BenchConfig cfg = config("mem", dir);
+    cfg.arms = List.of("mor-v3", "rmor-c-kept", "rmow-c");
+    cfg.workload.batches = 6;
+    cfg.reads.every = 3;
+    cfg.reads.travelBack = 3;
+    cfg.reads.readers = List.of(BenchConfig.ReaderSpec.oneFooter(), BenchConfig.ReaderSpec.cached());
+    ObjectMapper json = new ObjectMapper();
+    String plain = json.writeValueAsString(json.valueToTree(cfg));
+    assertThat(plain).doesNotContain("windows");
+    List<JsonNode> without = run(cfg, Files.createDirectories(dir.resolve("plain")));
+    cfg.reads.windows = new BenchConfig.WindowSpec();
+    cfg.reads.windows.by = List.of("id", "ts");
+    cfg.reads.windows.count = 3;
+    List<JsonNode> with = run(cfg, Files.createDirectories(dir.resolve("windows")));
+
+    List<JsonNode> windows =
+        with.stream().filter(r -> r.get("phase").asText().equals("read_window")).toList();
+    // probes after the load and batches 3 and 6: 3 arms x 2 readers x 2 columns x 3 windows
+    assertThat(windows).hasSize(3 * 3 * 2 * 2 * 3);
+    assertThat(windows.stream().map(r -> r.get("window_at").asDouble()).distinct())
+        .containsExactlyInAnyOrder(1 / 6.0, 0.5, 5 / 6.0);
+    assertThat(windows).allMatch(r -> r.get("rows").asLong() > 0);
+    List<JsonNode> rest =
+        with.stream().filter(r -> !r.get("phase").asText().equals("read_window")).toList();
+    assertThat(rest).hasSameSizeAs(without);
+    for (int i = 0; i < without.size(); i++) {
+      JsonNode a = without.get(i);
+      JsonNode b = rest.get(i);
+      String at = a.get("arm").asText() + " step " + a.get("step") + " " + a.get("phase").asText();
+      for (String col :
+          List.of("arm", "step", "phase", "reader", "requests", "bytes_read", "bytes_written",
+              "rows", "stored_bytes", "live_bytes", "held_bytes")) {
+        assertThat(String.valueOf(b.get(col))).as(at + " " + col).isEqualTo(String.valueOf(a.get(col)));
+      }
+    }
+  }
+
   private static String key(JsonNode r, int step) {
     return r.get("arm").asText() + "/" + r.get("reader").asText() + "/" + step;
   }

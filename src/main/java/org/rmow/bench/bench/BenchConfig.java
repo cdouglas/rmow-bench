@@ -76,10 +76,33 @@ public final class BenchConfig {
     /** {@code read_old} reads the table as it was this many batches earlier. */
     public int travelBack = 10;
     /**
+     * Reads of windows across the table ({@code read_window}), or null for none. Left out of the
+     * configuration's hash when null, so configurations from before it keep theirs.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public WindowSpec windows = null;
+    /**
      * The reader models every probe runs under (see {@link org.rmow.bench.arms.Reader}); the
      * first is the primary one.
      */
     public List<ReaderSpec> readers = List.of(ReaderSpec.oneFooter(), ReaderSpec.stock());
+  }
+
+  /**
+   * Windows read at each probe, under every reader model (docs/HYPOTHESES.md, 2026-11-07): for
+   * each column in {@code by}, {@code count} windows of {@code fraction} of the column's span at
+   * the probe, centred at (i + 1/2) / {@code count} of it, each a read of its own ({@code
+   * read_window}, with {@code window_by} and {@code window_at}). The newest-rows read covers the
+   * end of the event time; these cover the rest, where late rows and scattered new versions
+   * widen what a range must read.
+   */
+  public static final class WindowSpec {
+    /** The columns to read windows of: {@code id} (the key) or {@code ts} (the event time). */
+    public List<String> by = List.of("id");
+    /** Windows per column. */
+    public int count = 5;
+    /** Each window's width, as a fraction of the column's span. */
+    public double fraction = 0.01;
   }
 
   /** A reader model, by name. */

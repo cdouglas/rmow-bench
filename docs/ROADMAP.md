@@ -462,10 +462,18 @@ lower.
     `docker/campaigns/seal.json` on havoc. RMoR's writer cuts a merged file into row groups;
     RMoW-append's merged unit is one region, so one row group, and its tail file rolls over at
     the target file size, sealing its units at about 38 MiB; the model says that spares no sorted
-    read. Cutting RMoW's tail units into row groups is not built;
+    read. Cutting RMoW's tail units into row groups is not built. Judged 2026-11-07: J3 held,
+    J1 and J2 in part. Inserts take 33.7 bytes a row, so no 16-write unit formed under 160 MiB;
+    RMoR's 4-write units hold 0.41 of the appending arms' share at p99 5 and 20, RMoW-append's
+    all of it. A larger seal (or fan-out) would reach the top level;
   - **leveled, by event time:** a writer that merges each late row into the row group its event
     time falls in, so no two row groups overlap and a sorted read concatenates. Not built; the
     model puts it at 746 MB a write at p99 5.
+- [ ] **Reads of a range** (registered 2026-11-07, HYPOTHESES.md Q1–Q4). `reads.windows` reads
+  five 1% windows by key or event time at each probe; campaign `docker/campaigns/windows.json`
+  on havoc and the same `configs/win-*` on the laptop, for instructions. Then the write-up of the
+  two workloads (`split`, `seal`, `windows`) as a lab page, with the write and read time
+  breakdown simulated from the laptop's work.
 - [ ] **Hot-region isolation** (a micro-benchmark question, not a Parquet benchmark). Can RMoW
   isolate frequently updated regions as row groups of their own, and so cut its amplification?
   - RMoW sets row-group boundaries on every rewrite, so it can cut a hot range out as its own row

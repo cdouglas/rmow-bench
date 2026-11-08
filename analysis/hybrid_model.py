@@ -67,6 +67,11 @@ from layout_model import B, INITIAL_FILES, RG, STRIDE, TARGET, load
 ID_SHARE = 0.059  # the id column's share of a row group's bytes (lab: rg_meta, row groups > 100k)
 COLUMNS = 11
 WINDOWS = 100
+WINDOW_AT = (0.1, 0.3, 0.5, 0.7, 0.9)  # the runs' read_window: reads.windows, 5 of 1% each
+# Bytes a row of inserts, for a tail seal given in MiB (--insert-row-bytes). B is the initial
+# load's, sorted by id: the ing-* runs' inserts take 33.7 (11.8 MB a write of 350,000 rows), so at
+# B a 160 MiB seal let four 4-write units merge, which the runs' 189 MB did not (2026-11-07).
+INSERT_B = B
 
 
 class Table:
@@ -275,6 +280,7 @@ def run_updates(data, policy, arg, by_region=False):
                  read_rows=(ID_SHARE * cand_rows + read_units + upd_groups) * B / 1e6)
         r.update(full_read(t))
         r.update(window_reads(t, by="id"))
+        r.update(span_windows(t, "id", 0, n0 - 1))
         out.append(r)
     return out
 
@@ -326,12 +332,13 @@ def run_ingest(data, policy, args, watermark=float("inf")):
     span = len(writes[0][0]) * (ts[1] - ts[0])  # a write's event time
     tail = None
     newest = int(ts[:n0].max())
+    oldest = int(ts[:n0].min())
     every = int(args[0]) if policy in ("defer", "compact") else 0
     mode = args[1] if policy == "defer" else policy
     horizon = float(args[2]) if policy == "defer" and len(args) > 2 else 0.0
     pending_obj = None
     if policy == "tier":
-        seal = float(args[0]) * 2**20 / B  # rows
+        seal = float(args[0]) * 2**20 / INSERT_B  # rows
         fan = int(args[1]) if len(args) > 1 and args[1].isdigit() else 4
         one = "one" in args[1:]
         stack = []  # open units: [object, or with `one` its row group, level, rows]
@@ -420,8 +427,10 @@ def run_ingest(data, policy, args, watermark=float("inf")):
         r = dict(written=written * B / 1e6, compacted=compacted * B / 1e6,
                  read_back=read_back * B / 1e6,
                  merged_units=merged_units, late=int(late.sum()), dropped=int(dropped.sum()))
+        oldest = min(oldest, int(ts[ins].min()))
         r.update(full_read(t))
         r.update(window_reads(t, by="ts"))
+        r.update(span_windows(t, "ts", oldest, newest))
         out.append(r)
     return out
 
@@ -569,6 +578,33 @@ def window_reads(t, by):
                 newest_requests=float(reqs[-1]), newest_read_live=float(amps[-1]))
 
 
+def span_windows(t, by, lo_key, hi_key, frac=0.01):
+    """The runs' window reads (`reads.windows`, docs/HYPOTHESES.md 2026-11-07): windows [a, b) of
+    `frac` of the key's span [lo_key, hi_key], centred at WINDOW_AT and cut as the runner cuts
+    them, pruned by row-group statistics: each window's requests (objects, row-group ranges, DVs)
+    and bytes against its live bytes (`w<at>_*`), and their means (`span_*`)."""
+    ps = [p for p in t.pieces() if t.live(p) > 0]
+    lv = np.concatenate([t.live_rows(p) for p in ps])
+    key = lv if by == "id" else t.ts[lv]
+    lo = np.array([t.lo[p] if by == "id" else t.tlo[p] for p in ps])
+    hi = np.array([t.hi[p] if by == "id" else t.thi[p] for p in ps])
+    phys = np.array([len(t.rows[p]) for p in ps], float)
+    rng = np.array([ranges(t, p) for p in ps])
+    obj = np.array([t.obj[p] for p in ps]); dv = np.array([t.ndead[p] > 0 for p in ps])
+    span = hi_key - lo_key
+    out, reqs, amps = {}, [], []
+    for at in WINDOW_AT:
+        a, b = lo_key + int((at - frac / 2) * span), lo_key + int((at + frac / 2) * span)
+        hit = (lo < b) & (hi >= a)
+        rows = max(int(((key >= a) & (key < b)).sum()), 1)
+        req = float(rng[hit].sum() + len(np.unique(obj[hit])) + len(np.unique(obj[hit & dv])))
+        amp = float(phys[hit].sum() / rows)
+        out[f"w{at}_requests"], out[f"w{at}_read_live"] = req, amp
+        reqs.append(req); amps.append(amp)
+    out.update(span_requests=float(np.mean(reqs)), span_read_live=float(np.mean(amps)))
+    return out
+
+
 # ---------------------------------------------------------------------------------------------
 
 def summarize(name, out, keys):
@@ -592,6 +628,8 @@ UPDATE_KEYS = ["written", "max:written", "compacted", "read_blind", "read_rows",
                "requests", "end:requests", "end:objects", "end:pieces", "read_live",
                "page_read_live", "win_requests", "win_read_live", "newest_requests",
                "newest_read_live", "end:sorted_open", "end:sorted_held"]
+SPAN_KEYS = ["end:span_requests", "end:span_read_live"] + [
+    f"end:w{at}_{k}" for at in WINDOW_AT for k in ("requests", "read_live")]
 INGEST_KEYS = ["written", "max:written", "compacted", "read_back", "merged_units", "requests", "end:requests",
                "end:pieces", "end:scattered", "win_requests", "win_read_live", "newest_requests",
                "newest_read_live", "end:sorted_open", "end:sorted_held"]
@@ -602,9 +640,13 @@ def main():
     p.add_argument("workload", choices=["updates", "ingest"])
     p.add_argument("path")
     p.add_argument("--policy")
+    p.add_argument("--insert-row-bytes", type=float, default=B,
+                   help="ingest: bytes a row of inserts, for a seal given in MiB")
     p.add_argument("--watermark", type=float, default=float("inf"),
                    help="ingest: rows later than this many writes are dropped")
     a = p.parse_args()
+    global INSERT_B
+    INSERT_B = a.insert_row_bytes
     data = load(a.path)
     if a.workload == "updates":
         for pol in (a.policy or "mor,morc:10,rmor,rmor-stride,rmow,defer:0.25,defer-stride:0.5"
@@ -613,11 +655,12 @@ def main():
             arg = float(args[0]) if args else 0
             out = run_updates(data, name, int(arg) if name == "morc" else arg,
                               by_region="region" in args)
-            summarize(pol, out, UPDATE_KEYS)
+            summarize(pol, out, UPDATE_KEYS + SPAN_KEYS)
     else:
         for pol in (a.policy or "tail,merge,trunc,defer:10:trunc").split(","):
             name, *args = pol.split(":")
-            summarize(pol, run_ingest(data, name, args, a.watermark), INGEST_KEYS + ["dropped"])
+            summarize(pol, run_ingest(data, name, args, a.watermark),
+                      INGEST_KEYS + ["dropped"] + SPAN_KEYS)
 
 
 if __name__ == "__main__":

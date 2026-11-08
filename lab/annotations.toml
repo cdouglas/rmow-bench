@@ -77,6 +77,10 @@ select = ["kept-*"]
 title = "The two workloads apart (docs/HYPOTHESES.md, 2026-11-06, U1-U4 and I1-I3): updates only (upd-*) and inserts only (ing-base*, ing-late99-*) on havoc at aeee8e3. The runner gave upd-base's and ing-base's load samples to upd-base-scan's and ing-base-compact's runs (docker/campaign.py matched labels by prefix); the right samples are results/campaigns/split/<job>.load.jsonl"
 select = ["where:regexp_matches(label, '^(upd-(base|base-compact|base-scan|density-p25|density-write)|ing-(base|base-compact|late99-1|late99-20))$') AND git_sha LIKE 'aeee8e3%'"]
 
+[campaigns.seal]
+title = "Inserts merged by arrival (docs/HYPOTHESES.md, 2026-11-06, J1-J3): the inserts-only workload at lateness p99 1, 5 and 20 with the tail sealed at 160 MiB, RMoR (rmor-c) and RMoW-append (rmow-c), on havoc at dcb16a1. The runner recorded ing-seal160 as failed and gave its load samples to ing-seal160-late99-20's run (docker/campaign.py, fixed in a14e010); its run finished, and its samples are results/campaigns/seal/ing-seal160.load.jsonl"
+select = ["where:label LIKE 'ing-seal160%' AND git_sha LIKE 'dcb16a1%'"]
+
 [campaigns.mor-row]
 title = "MoR alone with updateRead row at the eleven rmor-* settings, on havoc at aeee8e3: the calibration of the cloud runs' MoR (docs/HYPOTHESES.md, 2026-11-06)"
 select = ["where:label LIKE 'mor-row-%' AND git_sha LIKE 'aeee8e3%'"]

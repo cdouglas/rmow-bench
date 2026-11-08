@@ -67,6 +67,19 @@ public final class ReferenceModel {
     return h;
   }
 
+  /** Rows of the current table with {@code lo <= ts < hi} or, by id, {@code lo <= id < hi}. */
+  public TableHash expectedIn(boolean byTs, long lo, long hi) {
+    TableHash h = new TableHash();
+    int from = byTs ? 0 : (int) Math.max(0, lo);
+    int to = byTs ? version.length : (int) Math.min(version.length, Math.max(0, hi));
+    for (int id = from; id < to; id++) {
+      if (version[id] >= 0 && (!byTs || log.ts(id) >= lo && log.ts(id) < hi)) {
+        h.add(id, version[id]);
+      }
+    }
+    return h;
+  }
+
   public int version(long id) {
     return version[(int) id];
   }

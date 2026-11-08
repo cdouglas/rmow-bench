@@ -178,6 +178,15 @@ public final class Runner {
         }
       }
     }
+    BenchConfig.WindowSpec ws = cfg.reads.windows;
+    if (ws != null
+        && (ws.count < 1
+            || !(ws.fraction > 0 && ws.fraction * ws.count <= 1)
+            || !ws.by.stream().allMatch(c -> c.equals("id") || c.equals("ts")))) {
+      throw new IllegalArgumentException(
+          "reads.windows: by is id or ts, count at least 1, fraction above 0 and at most"
+              + " 1 / count");
+    }
     OpLog log = OpLogGenerator.generate(cfg.workload);
     log.write(runDir.resolve("oplog.bin"));
 
@@ -237,6 +246,7 @@ public final class Runner {
 
     ReferenceModel model = new ReferenceModel(log);
     long[] tsBounds = {Long.MAX_VALUE, Long.MIN_VALUE};
+    long[] idBounds = {0, log.initialRows() - 1};
     for (long id = 0; id < log.initialRows(); id++) {
       widen(tsBounds, log.ts(id));
     }
@@ -251,7 +261,7 @@ public final class Runner {
       requestsOut = requests;
       heldOut = held;
       Held.logEvents(held != null);
-      probe(out, arms, model, 0, tsBounds);
+      probe(out, arms, model, 0, tsBounds, idBounds);
       for (ArmRun a : arms) {
         emitState(out, a, 0);
       }
@@ -268,9 +278,10 @@ public final class Runner {
         model.apply(b);
         for (long id : b.insertIds()) {
           widen(tsBounds, log.ts(id));
+          widen(idBounds, id);
         }
         if (step % cfg.reads.every == 0 || step == log.batches().size()) {
-          probe(out, arms, model, step, tsBounds);
+          probe(out, arms, model, step, tsBounds, idBounds);
         }
         for (ArmRun a : arms) {
           emitState(out, a, step);
@@ -340,9 +351,14 @@ public final class Runner {
     return order;
   }
 
-  /** Full, recent-window, time-travel and sorted reads, each checked against the model. */
+  /** Full, recent-window, window, time-travel and sorted reads, each checked against the model. */
   private void probe(
-      BufferedWriter out, List<ArmRun> arms, ReferenceModel model, int step, long[] tsBounds)
+      BufferedWriter out,
+      List<ArmRun> arms,
+      ReferenceModel model,
+      int step,
+      long[] tsBounds,
+      long[] idBounds)
       throws IOException {
     long lo = tsBounds[1] - (long) (cfg.reads.recentFraction * (tsBounds[1] - tsBounds[0]));
     Expression recent = Expressions.greaterThanOrEqual("ts", lo);
@@ -350,11 +366,15 @@ public final class Runner {
     TableHash wantRecent = model.expectedTsAtLeast(lo);
     int oldSteps = step - cfg.reads.travelBack;
     TableHash wantOld = oldSteps >= 0 ? model.expectedAfter(oldSteps) : null;
+    List<Window> windows = windows(model, tsBounds, idBounds);
 
     for (ArmRun a : shuffled(arms, -step - 1)) {
       for (Reader r : readers) {
         checkedRead(a, r, "read_full", step, () -> a.arm().read(Expressions.alwaysTrue(), r), wantFull);
         checkedRead(a, r, "read_recent", step, () -> a.arm().read(recent, r), wantRecent);
+        for (Window w : windows) {
+          checkedRead(a, r, "read_window", step, () -> a.arm().read(w.filter(), r), w.want(), w);
+        }
         if (wantOld != null) {
           checkedRead(a, r, "read_old", step, () -> a.arm().readAfter(oldSteps, r), wantOld);
         }
@@ -366,6 +386,34 @@ public final class Runner {
     }
   }
 
+  /**
+   * A window of the table to read ({@link BenchConfig.WindowSpec}): rows with {@code by} in
+   * [lo, hi), {@code at} the window's centre as a fraction of the column's span.
+   */
+  private record Window(String by, double at, Expression filter, TableHash want) {}
+
+  private List<Window> windows(ReferenceModel model, long[] tsBounds, long[] idBounds) {
+    BenchConfig.WindowSpec spec = cfg.reads.windows;
+    List<Window> out = new ArrayList<>();
+    if (spec == null) {
+      return out;
+    }
+    for (String by : spec.by) {
+      long[] bounds = by.equals("ts") ? tsBounds : idBounds;
+      double span = bounds[1] - bounds[0];
+      for (int i = 0; i < spec.count; i++) {
+        double at = (i + 0.5) / spec.count;
+        long lo = bounds[0] + (long) ((at - spec.fraction / 2) * span);
+        long hi = bounds[0] + (long) ((at + spec.fraction / 2) * span);
+        Expression filter =
+            Expressions.and(
+                Expressions.greaterThanOrEqual(by, lo), Expressions.lessThan(by, hi));
+        out.add(new Window(by, at, filter, model.expectedIn(by.equals("ts"), lo, hi)));
+      }
+    }
+    return out;
+  }
+
   private static void checkedRead(
       ArmRun a,
       Reader reader,
@@ -374,15 +422,33 @@ public final class Runner {
       Phases.IoSupplier<TableHash> read,
       TableHash want)
       throws IOException {
+    checkedRead(a, reader, phase, step, read, want, null);
+  }
+
+  private static void checkedRead(
+      ArmRun a,
+      Reader reader,
+      String phase,
+      int step,
+      Phases.IoSupplier<TableHash> read,
+      TableHash want,
+      Window window)
+      throws IOException {
     Map<String, Object> extra = new LinkedHashMap<>();
     extra.put("reader", reader.name());
+    if (window != null) {
+      extra.put("window_by", window.by());
+      extra.put("window_at", window.at());
+    }
     TableHash got = a.phases().run(phase, read, extra);
     extra.put("rows", got.count());
     if (!got.equals(want)) {
       throw new IllegalStateException(
           String.format(
-              "%s %s (%s reader) at step %d read %s, the model holds %s",
-              a.arm().name(), phase, reader.name(), step, got, want));
+              "%s %s%s (%s reader) at step %d read %s, the model holds %s",
+              a.arm().name(), phase,
+              window == null ? "" : " by " + window.by() + " at " + window.at(),
+              reader.name(), step, got, want));
     }
   }
 
