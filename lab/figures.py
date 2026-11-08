@@ -186,6 +186,15 @@ def _plots():
     return plots
 
 
+def tuner():
+    """analysis/tune.py, the policy tuner (pages/tune.md); its functions take a connection."""
+    if str(ANALYSIS) not in sys.path:
+        sys.path.insert(0, str(ANALYSIS))
+    import tune
+
+    return tune
+
+
 @figure("sweep", title="Row-group size sweep (one-footer reader)",
         alt="Six panels against row-group and tail-seal size (1 to 8 MiB): bytes written and "
             "requests per batch, GETs of the last full and recent reads, stored over live bytes "
@@ -1615,3 +1624,81 @@ def rmor_spliced(main, rerun):
     skipping) from rerun, the same function's frame over RMoR's runs."""
     return pd.concat([main[main.arm != "rmor-c"], rerun[rerun.arm == "rmor-c"]],
                      ignore_index=True)
+
+
+# The tuner's policy map (pages/tune.md): the cheapest policy at each read mix, its hue the
+# design's (the results pages' colors; the deferred merges, which they do not show, take the
+# palette's red, the one slot that clears the validator's normal-vision floor beside the three),
+# white edges between policies, and each region labelled with what sets its policy apart.
+TUNE_COLORS = {"MoR": "#2a78d6", "RMoR": "#eda100", "RMoW-append": "#1baf7a", "deferred": "#e34948",
+               "RMoW-external": "#008300"}
+
+
+def _short(policy):
+    return (policy.replace("compacted every", "every").replace(" row groups", "")
+            .replace("sealed at ", "seal ").replace("deferred, ", "deferred "))
+
+
+def tune_map(pm, W, F, width=300, height=250, min_cells=6):
+    """pm: analysis/tune.py's policy_map on the grid W x F (windows, full reads a write), with
+    `facet`. The chart, and its regions (each connected run of one policy's cells)."""
+    rw, rf = np.sqrt(W[1] / W[0]), np.sqrt(F[1] / F[0])
+    d = pm.copy()
+    d["i"] = d.windows.map({w: i for i, w in enumerate(W)})
+    d["j"] = d.fulls.map({f: j for j, f in enumerate(F)})
+    d["w0"], d["w1"], d["f0"], d["f1"] = d.windows / rw, d.windows * rw, d.fulls / rf, d.fulls * rf
+    edges, labels, regions = [], [], []
+    for facet, g in d.groupby("facet"):
+        cell = {(r.i, r.j): r for r in g.itertuples()}
+        for (i, j), r in cell.items():
+            right, up = cell.get((i + 1, j)), cell.get((i, j + 1))
+            if right is not None and right.policy != r.policy:
+                edges.append(dict(facet=facet, x=r.w1, x2=r.w1, y=r.f0, y2=r.f1))
+            if up is not None and up.policy != r.policy:
+                edges.append(dict(facet=facet, x=r.w0, x2=r.w1, y=r.f1, y2=r.f1))
+        seen = set()
+        for start in cell:
+            if start in seen:
+                continue
+            comp, stack = [], [start]
+            seen.add(start)
+            while stack:
+                c = stack.pop()
+                comp.append(c)
+                for n in ((c[0] + 1, c[1]), (c[0] - 1, c[1]), (c[0], c[1] + 1), (c[0], c[1] - 1)):
+                    if n in cell and n not in seen and cell[n].policy == cell[start].policy:
+                        seen.add(n)
+                        stack.append(n)
+            ci, cj = np.mean([c[0] for c in comp]), np.mean([c[1] for c in comp])
+            at = min(comp, key=lambda c: (c[0] - ci) ** 2 + (c[1] - cj) ** 2)
+            r = cell[at]
+            regions.append(dict(facet=facet, policy=r.policy, cells=len(comp)))
+            if len(comp) >= min_cells:
+                labels.append(dict(facet=facet, x=r.windows, y=r.fulls, text=_short(r.policy)))
+    dom = [k for k in TUNE_COLORS if k in set(d.design)]
+    xs = alt.Scale(type="log", domain=[W[0] / rw, W[-1] * rw], nice=False)
+    ys = alt.Scale(type="log", domain=[F[0] / rf, F[-1] * rf], nice=False)
+    dscale = alt.Scale(domain=dom, range=[TUNE_COLORS[k] for k in dom])
+    color = alt.Color("design:N", title="design", sort=dom, scale=dscale)
+    edges, labels = pd.DataFrame(edges), pd.DataFrame(labels)
+    panels = []
+    for facet in sorted(d.facet.unique()):
+        cells = alt.Chart(d[d.facet == facet][["design", "policy", "w0", "w1", "f0", "f1", "margin"]]) \
+            .mark_rect(strokeWidth=0.8).encode(
+                x=alt.X("w0:Q", scale=xs, title="windows a write"), x2="w1",
+                y=alt.Y("f0:Q", scale=ys, title="full reads a write"), y2="f1", color=color,
+                stroke=alt.Stroke("design:N", scale=dscale, legend=None),
+                tooltip=["policy", alt.Tooltip("margin:Q", format=".3f", title="runner-up over it")])
+        layers = [cells]
+        e = edges[edges.facet == facet] if len(edges) else edges
+        if len(e):
+            layers.append(alt.Chart(e[["x", "x2", "y", "y2"]]).mark_rule(color="white", strokeWidth=2)
+                          .encode(x=alt.X("x:Q", scale=xs), x2="x2", y=alt.Y("y:Q", scale=ys), y2="y2"))
+        t = labels[labels.facet == facet][["x", "y", "text"]] if len(labels) else labels
+        if len(t):
+            pos = dict(x=alt.X("x:Q", scale=xs), y=alt.Y("y:Q", scale=ys), text="text")
+            layers.append(alt.Chart(t).mark_text(fontSize=10, stroke="white", strokeWidth=3, strokeJoin="round", strokeOpacity=0.9).encode(**pos))
+            layers.append(alt.Chart(t).mark_text(fontSize=10, color="#1f1f1e").encode(**pos))
+        panels.append(alt.layer(*layers).properties(width=width, height=height, title=facet))
+    rows = [alt.hconcat(*panels[k:k + 2]) for k in range(0, len(panels), 2)]
+    return alt.vconcat(*rows), pd.DataFrame(regions)

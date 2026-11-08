@@ -473,14 +473,24 @@ lower.
   `reads.windows` reads five 1% windows by key or event time at each probe; campaign
   `docker/campaigns/windows.json` on havoc and the same `configs/win-*` on the laptop, for
   instructions. Q1–Q4 held, and the laptop sent what havoc did in every record (EXPERIMENTS.md).
-- [ ] **Tuning write policy by simulation** (registered 2026-11-08, HYPOTHESES.md T1–T4).
-  `analysis/tune.py` prices every policy of a workload (a configuration and an arm) per read mix
-  and store: havoc's counts, a formula for the work fitted on the laptop's `windows` runs, and
-  the requests priced by size (`sized_latency`, which now covers the windows, the sorted read
-  and compactions). The grid is campaign `docker/campaigns/tune.json`; the finalists then run
-  on the laptop, and the picks once in the cloud. The same prices could later drive the writer
-  itself: merge a row group when the reads expected before it next changes cost more than
-  rewriting it.
+- [x] **Tuning write policy by simulation** (registered 2026-11-08, HYPOTHESES.md T1–T4; ran
+  2026-11-08, [lab/pages/tune.md](../lab/pages/tune.md)). `analysis/tune.py` prices every policy
+  of a workload (a configuration and an arm) per read mix and store: havoc's counts, a formula for
+  the work fitted on the laptop's `windows` runs, and the requests priced by size
+  (`sized_latency`, which now covers the windows, the sorted read and compactions). Its picks held
+  on the laptop's measured work (T2); its formula misses small reads with row groups no training
+  run had (T1 in part).
+- [ ] **The picks in the cloud** (awaits the user). The four configurations that hold every S3
+  Express pick and its runner-up: `tune-upd-rg4m` (RMoW-append with 4 MiB row groups),
+  `tune-upd-mor-c12` (MoR compacted), `tune-ing-rg4m` (MoR with 4 MiB row groups) and
+  `tune-ing-rg4m-seal256` (RMoR sealed at 256 MiB with 4 MiB row groups), on S3 Express (a fleet
+  of four `c7a.4xlarge`, AWS's limit) and Azure Blob (one `D8as_v6`, in turn), each after its
+  VM's spike, judged as the base point was: the measured time of each phase against its price
+  from the laptop's work (and the VM's pace, from its twin).
+- [ ] **The formula's misses**: a read's work per row group (small reads with 4 and 8 MiB row
+  groups came out 19–44% low). Train on a row-group sweep, or count row groups read per phase.
+- [ ] **A writer that tunes itself**: the same prices could drive the writer, merging a row group
+  when the reads expected before it next changes cost more than rewriting it.
 - [ ] **The write-up of the two workloads** (`split`, `seal`, `windows`) as a lab page, with the
   write and read time breakdown simulated from the laptop's work. `sized_latency`
   (lab/views/65_sized.sql) prices only writes and the full, newest and old reads: it needs

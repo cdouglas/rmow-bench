@@ -90,7 +90,7 @@ def records(con, where):
                s.requests::DOUBLE AS requests, s.bytes_read::DOUBLE AS bytes_read,
                s.bytes_written::DOUBLE AS bytes_written, coalesce(s.rows, 0)::DOUBLE AS rows,
                coalesce(s.held_chunks, 0)::DOUBLE AS held_chunks, s.gets::DOUBLE AS gets
-        FROM steps s JOIN runs r USING (run_id)
+        FROM steps s JOIN canonical_runs r USING (run_id)
         WHERE {where} AND s.step > 0
           AND s.phase IN ({",".join(f"'{p}'" for p in FORMULA)})
           AND coalesce(s.reader, '') <> 'cached-p8'""").df()
@@ -160,7 +160,7 @@ def pace(con):
     d = con.sql(f"""
         SELECT r.label, w.arm, w.phase, coalesce(w.reader, '') AS reader,
                sum(w.work_ms) * 1e6 AS ns, sum(w.instructions) AS instr
-        FROM phase_work w JOIN runs r USING (run_id) WHERE {TRAIN} GROUP BY ALL""").df()
+        FROM phase_work w JOIN canonical_runs r USING (run_id) WHERE {TRAIN} GROUP BY ALL""").df()
     d["wl"] = d.label.map(wl_of)
     keys = ["arm", "phase", "reader"]
     a = d.groupby(["wl"] + keys)[["ns", "instr"]].sum()
@@ -217,7 +217,7 @@ def work(con, runs, formula, ns, measured):
         m = con.sql(f"""
             SELECT r.label, w.arm, w.step, w.phase, coalesce(w.reader, '') AS reader,
                    avg(w.work_ms) AS work_ms
-            FROM phase_work w JOIN runs r USING (run_id)
+            FROM phase_work w JOIN canonical_runs r USING (run_id)
             WHERE r.host <> 'havoc' AND {GRID.replace('campaigns', 'r.campaigns')}
               AND w.phase IN ('batch', 'compact', 'read_full', 'read_recent', 'read_window', 'read_sorted')
             GROUP BY ALL""").df()
@@ -242,7 +242,7 @@ def prices(con, runs):
 
 
 def policies(con, workload, formula, ns, measured):
-    runs = con.sql(f"""SELECT run_id, label FROM runs
+    runs = con.sql(f"""SELECT run_id, label FROM canonical_runs
                        WHERE {GRID} AND host = 'havoc' AND status = 'finished' AND {WORKLOADS[workload]}""").df()
     w = work(con, list(runs.run_id), formula, ns, measured)
     p = prices(con, list(runs.run_id))
@@ -282,49 +282,92 @@ def rank(pol):
     return pd.concat(out)
 
 
+def name_policies(con, pol):
+    """Adds `policy`: the design and what its configuration sets apart from the defaults (16 MiB
+    row groups, no compaction, the tail sealed at once, the deferred merges' θ and deltas)."""
+    p = con.sql("""
+        SELECT r.label, rp.key, any_value(rp.value) AS value FROM run_params rp JOIN canonical_runs r USING (run_id)
+        WHERE r.host = 'havoc' AND rp.key IN ('layout.rowGroupBytes', 'layout.compactEvery',
+              'layout.tailSealBytes', 'layout.tierFanout', 'layout.defer.share', 'layout.defer.deltas')
+        GROUP BY ALL""").df().pivot(index="label", columns="key", values="value")
+
+    def name(label, arm, design):
+        k = p.loc[label] if label in p.index else pd.Series(dtype=object)
+        parts = []
+        if arm == "rmor-density":
+            share = float(k.get("layout.defer.share") or 0.06)
+            parts.append(f"θ {share:g}")
+            if k.get("layout.defer.deltas") == "write":
+                parts.append("deltas by write")
+        if arm == "mor-v3" and int(float(k.get("layout.compactEvery") or 0)):
+            parts.append(f"compacted every {int(float(k['layout.compactEvery']))}")
+        seal = int(float(k.get("layout.tailSealBytes") or 16 * 2**20)) // 2**20
+        if arm in ("rmor-c", "rmow-c") and seal != 16:
+            fan = int(float(k.get("layout.tierFanout") or 4))
+            parts.append(f"sealed at {seal} MiB" + (f", fanout {fan}" if fan != 4 else ""))
+        rg = int(float(k.get("layout.rowGroupBytes") or 16 * 2**20)) // 2**20
+        if rg != 16:
+            parts.append(f"{rg} MiB row groups")
+        return design + (", " + ", ".join(parts) if parts else "")
+
+    return pol.assign(policy=[name(l, a, d) for l, a, d in zip(pol.label, pol.arm, pol.design)])
+
+
+def policy_map(pol, windows=None, fulls=None, sorted_reads=0.0):
+    """The cheapest policy at each mix of windows and full reads a write (and `sorted_reads`), per
+    workload and store: one row per cell, with its cost and the runner-up's over it."""
+    windows = np.geomspace(0.1, 100, 31) if windows is None else windows
+    fulls = np.geomspace(0.01, 10, 31) if fulls is None else fulls
+    rows = []
+    for (workload, store), g in pol.groupby(["workload", "store"]):
+        base = (g.write_ms + g.compact_ms + sorted_reads * g.sorted_ms.fillna(np.inf)).to_numpy()
+        for w in windows:
+            for f in fulls:
+                cost = base + w * g.window_ms.to_numpy() + f * g.full_ms.to_numpy()
+                o = np.argsort(cost)
+                best, second = g.iloc[o[0]], g.iloc[o[1]]
+                rows.append(dict(workload=workload, store=store, windows=w, fulls=f,
+                                 label=best.label, arm=best.arm, design=best.design,
+                                 policy=best.get("policy", best.design), cost_ms=cost[o[0]],
+                                 runner_up=second.get("policy", f"{second.label}/{second.design}"),
+                                 margin=cost[o[1]] / cost[o[0]]))
+    return pd.DataFrame(rows)
+
+
 def finalists(ranks, n=2):
     """Each workload's, store's and mix's n cheapest policies."""
     return ranks[ranks["rank"] <= n]
 
 
 def judge(con, formula, ns):
-    """T1 and T2 (docs/HYPOTHESES.md, 2026-11-08) on the finalists the laptop ran."""
+    """T1 and T2 (docs/HYPOTHESES.md, 2026-11-08) on the finalists the laptop ran: a dict of
+    tables. `missing`: finalists the laptop has not run. `t1`: per new finalist (a tune-*
+    configuration) and arm, each priced phase's predicted and measured work. `t1_cost`: their time
+    per write under each mix they are finalists in, predicted and on measured work. `t2`: per
+    workload, store and mix, the pick and the cheapest finalist on measured work."""
     pred = pd.concat([policies(con, wl, formula, ns, False) for wl in WORKLOADS])
     meas = pd.concat([policies(con, wl, formula, ns, True) for wl in WORKLOADS])
     pr, mr = rank(pred), rank(meas)
     fin = finalists(pr)
     key = ["workload", "store", "label", "arm"]
-    ran = meas[meas.source == "measured"][key]
-    missing = fin.merge(ran, on=key, how="left", indicator=True)
+    measured = meas[meas.source == "measured"]
+    missing = fin.merge(measured[key], on=key, how="left", indicator=True)
     missing = missing[missing._merge == "left_only"][key].drop_duplicates()
-    if len(missing):
-        print("finalists the laptop has not run:")
-        print(missing.to_string(index=False))
-    # T1: the formula against the measured work, on the finalists not in the training runs.
-    new = fin[fin.label.str.startswith("tune-")][key].drop_duplicates()
-    kinds = ["write", "full", "window", "recent", "sorted"]
-    cmp = new.merge(pred, on=key).merge(meas[meas.source == "measured"], on=key, suffixes=("_p", "_m"))
+    # work is the store's alike: each new finalist's (on any store) compared once, on S3 Express's rows
+    new = fin[fin.label.str.startswith("tune-")][["workload", "label", "arm"]].drop_duplicates()
+    cmp = new.assign(store="s3x").merge(pred, on=key).merge(measured, on=key, suffixes=("_p", "_m"))
     rows = []
-    for _, r in cmp[cmp.store == "s3x"].iterrows():
-        for k in kinds:
+    for _, r in cmp.iterrows():
+        for k in ["write", "full", "window", "recent", "sorted"]:
             p, m = r[f"{k}_work_ms_p"], r[f"{k}_work_ms_m"]
             if pd.notna(p) and pd.notna(m) and m > 0:
-                rows.append(dict(label=r.label, arm=r.arm, kind=k, pred_ms=p, meas_ms=m, err=p / m - 1))
+                rows.append(dict(workload=r.workload, label=r.label, arm=r.arm, design=r.design_p,
+                                 kind=k, pred_ms=p, meas_ms=m, err=p / m - 1))
     t1 = pd.DataFrame(rows)
-    if len(t1):
-        print("\nT1, work per phase (predicted against measured, laptop pace):")
-        print(t1.round(3).to_string(index=False))
-        nonsorted = t1[t1.kind != "sorted"].err.abs()
-        print(f"  median |err| {nonsorted.median():.1%} (not sorted), max {nonsorted.max():.1%}; "
-              f"sorted max {t1[t1.kind == 'sorted'].err.abs().max():.1%}")
     c = fin.merge(mr[key + ["mix", "cost_ms"]], on=key + ["mix"], suffixes=("_p", "_m"))
-    c = c[c.label.str.startswith("tune-")]
-    if len(c):
-        c["err"] = c.cost_ms_p / c.cost_ms_m - 1
-        print("\nT1, time per write under each mix (finalists from the grid):")
-        print(c[["workload", "store", "mix", "label", "design", "cost_ms_p", "cost_ms_m", "err"]]
-              .round(3).to_string(index=False))
-    # T2: the tuner's pick priced with measured work, against the cheapest finalist so priced.
+    t1_cost = c[c.label.str.startswith("tune-")].copy()
+    t1_cost["err"] = t1_cost.cost_ms_p / t1_cost.cost_ms_m - 1
+    t1_cost = t1_cost[["workload", "store", "mix", "label", "arm", "design", "cost_ms_p", "cost_ms_m", "err"]]
     rows = []
     for (wl, st, mix), g in fin.groupby(["workload", "store", "mix"]):
         m = g[key + ["rank"]].merge(mr[mr.mix == mix], on=key, suffixes=("", "_m"))
@@ -332,12 +375,12 @@ def judge(con, formula, ns):
             continue
         pick = m[m["rank"] == 1].iloc[0]
         best = m.sort_values("cost_ms").iloc[0]
-        rows.append(dict(workload=wl, store=st, mix=mix, pick=f"{pick.label}/{pick.design}",
-                         best=f"{best.label}/{best.design}", pick_over_best=pick.cost_ms / best.cost_ms))
-    t2 = pd.DataFrame(rows)
-    if len(t2):
-        print("\nT2, the pick on measured work against the cheapest finalist:")
-        print(t2.round(3).to_string(index=False))
+        rows.append(dict(workload=wl, store=st, mix=mix, pick=pick.label, pick_arm=pick.arm,
+                         pick_design=pick.design, best=best.label, best_arm=best.arm,
+                         best_design=best.design, pick_ms=pick.cost_ms,
+                         best_ms=best.cost_ms, pick_over_best=pick.cost_ms / best.cost_ms))
+    return dict(pred=pred, meas=meas, ranks=pr, measured_ranks=mr, finalists=fin, missing=missing,
+                t1=t1, t1_cost=t1_cost, t2=pd.DataFrame(rows))
 
 
 def main():
@@ -366,7 +409,22 @@ def main():
     formula = Formula(train)
     ns = pace(con)
     if a.judge:
-        judge(con, formula, ns)
+        j = judge(con, formula, ns)
+        if len(j["missing"]):
+            print("finalists the laptop has not run:")
+            print(j["missing"].to_string(index=False))
+        t1 = j["t1"]
+        if len(t1):
+            print("\nT1, work per phase (predicted against measured, laptop pace):")
+            print(t1.round(3).to_string(index=False))
+            ns_ = t1[t1.kind != "sorted"].err.abs()
+            print(f"  median |err| {ns_.median():.1%} (not sorted), max {ns_.max():.1%}; "
+                  f"sorted max {t1[t1.kind == 'sorted'].err.abs().max():.1%}")
+            print("\nT1, time per write under each mix (finalists from the grid):")
+            print(j["t1_cost"].round(3).to_string(index=False))
+        if len(j["t2"]):
+            print("\nT2, the pick on measured work against the cheapest finalist:")
+            print(j["t2"].round(3).to_string(index=False))
         return
     pol = pd.concat([policies(con, wl, formula, ns, a.measured) for wl in WORKLOADS])
     ranks = rank(pol)

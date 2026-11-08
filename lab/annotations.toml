@@ -102,3 +102,15 @@ select = "where:host = 'havoc' AND label = 'sim-validate-s3x'"
 mark = "excluded"
 note = "pipeline check of the havoc container (docker/campaigns/pipeline.json): requests and bytes match the laptop's run in 769 of 779 records, the other 10 being the split arm's stock reads, changed by the split planning"
 
+[[annotate]]
+select = "tune-upd-rg32m-a8da05757230/20261108T074406Z"
+mark = "excluded"
+note = "laptop run under the lab's re-ingest (14 cores busy): its clock 2.48 GHz against 4.6, cycles per instruction 1.5 times, so its work's pace is not the laptop's; rerun 2026-11-08"
+[[annotate]]
+select = "tune-ing-seal256-10395a5186fa/20261108T081748Z"
+mark = "excluded"
+note = "laptop run beside a lab build: its clock 4.36-4.40 GHz against 4.6; rerun 2026-11-08"
+[[annotate]]
+select = "tune-ing-seal160-f2-078f133b6441/20261108T082229Z"
+mark = "excluded"
+note = "laptop run beside a lab build: its clock 4.36-4.40 GHz against 4.6; rerun 2026-11-08"

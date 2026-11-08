@@ -602,5 +602,12 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
   RMoW-append's, by ratio over MoR's, everywhere
   ([lab/pages/rmor-rerun.md](lab/pages/rmor-rerun.md)). The results pages take RMoR's times from
   these runs.
-- **Next:** decide what follows the sweeps (θ against p; GCS needs APPEND in the fork first).
-  Split files can also run on standard S3.
+- **Done (2026-11-08):** a tuner (`analysis/tune.py`, [lab/pages/tune.md](lab/pages/tune.md))
+  that ranks write policies per read mix and store from havoc's counts and a formula for their
+  work, checked on the laptop's measured work (T1–T4 in [docs/HYPOTHESES.md](docs/HYPOTHESES.md)).
+  On S3 Express, a table with few reads a write takes MoR (compacted on the updates, with 4 MiB
+  row groups on the inserts); past a few windows or a full read a write, RMoW-append with 4 MiB
+  row groups (updates) or RMoR sealed at 256 MiB with 4 MiB row groups (inserts).
+- **Next:** the tuner's picks in the cloud, and the write-up of the two workloads
+  ([docs/ROADMAP.md](docs/ROADMAP.md)). GCS needs APPEND in the fork first; split files can also
+  run on standard S3.
