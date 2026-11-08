@@ -469,11 +469,14 @@ lower.
   - **leveled, by event time:** a writer that merges each late row into the row group its event
     time falls in, so no two row groups overlap and a sorted read concatenates. Not built; the
     model puts it at 746 MB a write at p99 5.
-- [ ] **Reads of a range** (registered 2026-11-07, HYPOTHESES.md Q1–Q4). `reads.windows` reads
-  five 1% windows by key or event time at each probe; campaign `docker/campaigns/windows.json`
-  on havoc and the same `configs/win-*` on the laptop, for instructions. Then the write-up of the
-  two workloads (`split`, `seal`, `windows`) as a lab page, with the write and read time
-  breakdown simulated from the laptop's work.
+- [x] **Reads of a range** (registered 2026-11-07, HYPOTHESES.md Q1–Q4; ran 2026-11-08).
+  `reads.windows` reads five 1% windows by key or event time at each probe; campaign
+  `docker/campaigns/windows.json` on havoc and the same `configs/win-*` on the laptop, for
+  instructions. Q1–Q4 held, and the laptop sent what havoc did in every record (EXPERIMENTS.md).
+- [ ] **The write-up of the two workloads** (`split`, `seal`, `windows`) as a lab page, with the
+  write and read time breakdown simulated from the laptop's work. `sized_latency`
+  (lab/views/65_sized.sql) prices only writes and the full, newest and old reads: it needs
+  `read_window` and `read_sorted`, whose five or one records a probe it must average.
 - [ ] **Hot-region isolation** (a micro-benchmark question, not a Parquet benchmark). Can RMoW
   isolate frequently updated regions as row groups of their own, and so cut its amplification?
   - RMoW sets row-group boundaries on every rewrite, so it can cut a hot range out as its own row

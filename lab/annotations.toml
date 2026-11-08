@@ -74,12 +74,16 @@ select = ["where:label LIKE 'rmor-%' AND host = 'bearyak'", "sweep-base-f9701497
 select = ["kept-*"]
 
 [campaigns.split]
-title = "The two workloads apart (docs/HYPOTHESES.md, 2026-11-06, U1-U4 and I1-I3): updates only (upd-*) and inserts only (ing-base*, ing-late99-*) on havoc at aeee8e3. The runner gave upd-base's and ing-base's load samples to upd-base-scan's and ing-base-compact's runs (docker/campaign.py matched labels by prefix); the right samples are results/campaigns/split/<job>.load.jsonl"
+title = "The two workloads apart (docs/HYPOTHESES.md, 2026-11-06, U1-U4 and I1-I3): updates only (upd-*) and inserts only (ing-base*, ing-late99-*) on havoc at aeee8e3. The runner gave upd-base's and ing-base's load samples to upd-base-scan's and ing-base-compact's runs (docker/campaign.py matched labels by prefix, fixed in a14e010); each run's load.jsonl was restored from results/campaigns/split/<job>.load.jsonl on 2026-11-08, but the job records of upd-base and ing-base still name the other run"
 select = ["where:regexp_matches(label, '^(upd-(base|base-compact|base-scan|density-p25|density-write)|ing-(base|base-compact|late99-1|late99-20))$') AND git_sha LIKE 'aeee8e3%'"]
 
 [campaigns.seal]
-title = "Inserts merged by arrival (docs/HYPOTHESES.md, 2026-11-06, J1-J3): the inserts-only workload at lateness p99 1, 5 and 20 with the tail sealed at 160 MiB, RMoR (rmor-c) and RMoW-append (rmow-c), on havoc at dcb16a1. The runner recorded ing-seal160 as failed and gave its load samples to ing-seal160-late99-20's run (docker/campaign.py, fixed in a14e010); its run finished, and its samples are results/campaigns/seal/ing-seal160.load.jsonl"
+title = "Inserts merged by arrival (docs/HYPOTHESES.md, 2026-11-06, J1-J3): the inserts-only workload at lateness p99 1, 5 and 20 with the tail sealed at 160 MiB, RMoR (rmor-c) and RMoW-append (rmow-c), on havoc at dcb16a1. The runner recorded ing-seal160 as failed and gave its load samples to ing-seal160-late99-20's run (docker/campaign.py, fixed in a14e010); its run finished, and its load.jsonl was restored from results/campaigns/seal/ing-seal160.load.jsonl on 2026-11-08 (the job record still says failed and names the other run)"
 select = ["where:label LIKE 'ing-seal160%' AND git_sha LIKE 'dcb16a1%'"]
+
+[campaigns.windows]
+title = "Reads of a range across the table (docs/HYPOTHESES.md, 2026-11-07, Q1-Q4): the split and seal campaigns' configurations but upd-base-scan, labelled win-*, with five windows of 1% read at each probe under every reader (by id on the updates, by event time on the inserts). On havoc at 479edb1 for requests, bytes and held memory, and on the laptop (bearyak, the same build) for instructions; the two must agree on every request and byte"
+select = ["where:label LIKE 'win-%' AND git_sha LIKE '479edb1%'"]
 
 [campaigns.mor-row]
 title = "MoR alone with updateRead row at the eleven rmor-* settings, on havoc at aeee8e3: the calibration of the cloud runs' MoR (docs/HYPOTHESES.md, 2026-11-06)"
