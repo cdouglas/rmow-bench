@@ -30,10 +30,11 @@ instructions; a write is its parts, each at its own pace. With `--measured`, con
 for the check.
 
 Usage:
-  .venv/bin/python analysis/tune.py [--measured] [--loo] [--judge] [--out DIR]
+  .venv/bin/python analysis/tune.py [--measured] [--loo] [--judge] [--cloud STORE] [--out DIR]
 
 `--loo` prints the formula's error on the training runs, each configuration held out in turn.
 `--judge` judges T1 and T2 on the finalists (each mix's two cheapest policies) the laptop ran.
+`--cloud s3x|azure` judges K2 and K3 (docs/HYPOTHESES.md, 2026-11-08) on campaign `tune-cloud`.
 `--out` writes policies.csv (every policy's phases) and ranks.csv (every mix's ranking).
 """
 import argparse
@@ -334,6 +335,81 @@ def policy_map(pol, windows=None, fulls=None, sorted_reads=0.0):
     return pd.DataFrame(rows)
 
 
+# The tuner's picks in the cloud (docs/HYPOTHESES.md, 2026-11-08, K1-K3): its seven policies.
+CLOUD_POLICIES = [("upd", "tune-upd-mor-c12", "mor-v3"), ("upd", "tune-upd-rg4m", "rmow-c"),
+                  ("upd", "tune-upd-rg4m", "rmor-density"), ("ing", "tune-ing-rg4m", "mor-v3"),
+                  ("ing", "tune-ing-rg4m-seal256", "rmor-c"), ("ing", "tune-ing-rg4m", "rmow-c"),
+                  ("ing", "tune-ing-rg4m", "rmor-c-kept")]
+CLOUD = "list_contains(campaigns, 'tune-cloud')"
+
+
+def per_write(d, col):
+    """A policy's parts of a write, from its phase rows' column `col` (ms): the mean write, the
+    compactions over the writes, and each priced read's mean over the probes of steps 5 to 30."""
+    writes = d[(d.phase == "batch") & (d.step >= 1)]
+    n = writes.step.nunique()
+    out = dict(write_ms=writes[col].mean(), compact_ms=d[d.phase == "compact"][col].sum() / n)
+    for kind, (phase, reader) in READS.items():
+        r = d[(d.phase == phase) & (d.reader == reader) & (d.step >= 5)]
+        out[f"{kind}_ms"] = r[col].mean() if len(r) else np.nan
+    return out
+
+
+def cloud(con, store):
+    """The seven policies on `store` (s3x or azure), each part of a write in four bases, as
+    policies() gives them (one frame per basis): `measured`, the cloud run's wall time; `priced`,
+    its S3 Express twin's work (the configuration on that VM's disk, at its arm's pace there) plus
+    the cloud run's requests priced by its spike (on S3 Express its own VM's, on Azure the one the
+    VM ran first); and the two parts of the price, `work` and `requests`."""
+    def one(sql):
+        r = con.sql(sql).fetchall()
+        if len(r) != 1:
+            raise ValueError(f"{len(r)} runs for {sql}")
+        return r[0][0]
+    rows = {b: [] for b in ("measured", "priced", "work", "requests")}
+    for workload, label, arm in CLOUD_POLICIES:
+        run = one(f"SELECT run_id FROM canonical_runs WHERE {CLOUD} AND label = '{label}-{store}'")
+        twin = one(f"SELECT run_id FROM canonical_runs WHERE {CLOUD} AND label = '{label}'")
+        spike = one(f"SELECT run_id FROM runs WHERE {CLOUD} AND run_id LIKE 'spike/{store}-spike-%'"
+                    + (f" AND run_id LIKE 'spike/s3x-spike-{label}-2%'" if store == "s3x" else ""))
+        m = con.sql(f"SELECT * FROM sized_latency('{run}', '{spike}') WHERE arm = '{arm}'").df()
+        t = con.sql(f"SELECT arm, step, phase, reader, work_ms FROM sized_latency('{twin}', '{spike}') "
+                    f"WHERE arm = '{arm}'").df()
+        d = m.drop(columns="work_ms").merge(t, on=["arm", "step", "phase", "reader"], how="left")
+        d["reader"] = d.reader.fillna("")
+        d["priced_ms"] = d.work_ms + d.request_ms
+        base = dict(workload=workload, store=store, label=label, arm=arm, design=DESIGN[arm],
+                    run=run, twin=twin, spike=spike)
+        for basis, col in (("measured", "measured_ms"), ("priced", "priced_ms"), ("work", "work_ms"),
+                           ("requests", "request_ms")):
+            rows[basis].append(dict(base, **per_write(d, col)))
+    return {b: pd.DataFrame(r) for b, r in rows.items()}
+
+
+def cloud_judge(con, formula, ns, store):
+    """K2 and K3 on `store`: per workload, mix and policy, its time per write predicted (the
+    registered prices: the laptop's measured work, the base point's spikes), measured and priced
+    (cloud()), with the pick (rank 1 predicted among the seven), whether the mix is judged (the
+    predicted runner-up more than 5% above the pick) and each policy's measured time over the
+    cheapest measured."""
+    key = ["workload", "label", "arm"]
+    seven = pd.DataFrame(CLOUD_POLICIES, columns=key)
+    pred = pd.concat([policies(con, wl, formula, ns, True) for wl in WORKLOADS])
+    pred = rank(pred[pred.store == store].merge(seven, on=key))
+    c = cloud(con, store)
+    out = pred[key + ["design", "mix", "rank", "over_best", "cost_ms"]].rename(
+        columns={"cost_ms": "pred_ms", "over_best": "pred_over_best"})
+    for basis in ("measured", "priced", "work", "requests"):
+        r = rank(c[basis])[key + ["mix", "cost_ms"]].rename(columns={"cost_ms": f"{basis}_ms"})
+        out = out.merge(r, on=key + ["mix"])
+    out["meas_over_best"] = out.measured_ms / out.groupby(["workload", "mix"]).measured_ms.transform("min")
+    second = out[out["rank"] == 2].set_index(["workload", "mix"]).pred_over_best
+    out["judged"] = [second[(w, m)] > 1.05 for w, m in zip(out.workload, out.mix)]
+    out["pick"] = out["rank"] == 1
+    out["priced_over_measured"] = out.priced_ms / out.measured_ms
+    return out.assign(store=store), c
+
+
 def finalists(ranks, n=2):
     """Each workload's, store's and mix's n cheapest policies."""
     return ranks[ranks["rank"] <= n]
@@ -389,6 +465,7 @@ def main():
     ap.add_argument("--loo", action="store_true")
     ap.add_argument("--judge", action="store_true")
     ap.add_argument("--top", type=int, default=4)
+    ap.add_argument("--cloud", choices=["s3x", "azure"])
     ap.add_argument("--out")
     a = ap.parse_args()
     pd.set_option("display.width", 220)
@@ -408,6 +485,19 @@ def main():
         return
     formula = Formula(train)
     ns = pace(con)
+    if a.cloud:
+        j, _ = cloud_judge(con, formula, ns, a.cloud)
+        cols = ["workload", "mix", "rank", "label", "design", "arm", "pred_ms", "measured_ms",
+                "meas_over_best", "priced_ms", "priced_over_measured", "judged"]
+        print(j.sort_values(["workload", "mix", "measured_ms"])[cols].round(3).to_string(index=False))
+        k2 = j[j.pick & j.judged]
+        print(f"\nK2 ({a.cloud}): the judged picks' measured time over the cheapest measured: "
+              f"max {k2.meas_over_best.max():.3f} over {len(k2)}: "
+              f"{'held' if (k2.meas_over_best <= 1.05).all() else 'CONTRADICTED'}")
+        e = (j.priced_over_measured - 1).abs()
+        print(f"priced over measured: {j.priced_over_measured.min():.3f}-{j.priced_over_measured.max():.3f}"
+              + (f"; K3: {'held' if (e <= 0.2).all() else 'CONTRADICTED'} (within 20%)" if a.cloud == "s3x" else ""))
+        return
     if a.judge:
         j = judge(con, formula, ns)
         if len(j["missing"]):

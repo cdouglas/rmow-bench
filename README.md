@@ -644,6 +644,10 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
   On S3 Express, a table with few reads a write takes MoR (compacted on the updates, with 4 MiB
   row groups on the inserts); past a few windows or a full read a write, RMoW-append with 4 MiB
   row groups (updates) or RMoR sealed at 256 MiB with 4 MiB row groups (inserts).
-- **Next:** the tuner's picks in the cloud, and the write-up of the two workloads
+- **Done (2026-11-09):** the tuner's picks in the cloud, on S3 Express and Azure Blob (K1–K3 in
+  [docs/HYPOTHESES.md](docs/HYPOTHESES.md), [lab/pages/tune-cloud.md](lab/pages/tune-cloud.md)):
+  every judged pick was the cheapest of the seven policies on measured time, and on S3 Express the
+  VM's own work and spike priced every policy within 3.3%.
+- **Next:** the write-up of the two workloads
   ([docs/ROADMAP.md](docs/ROADMAP.md)). GCS needs APPEND in the fork first; split files can also
   run on standard S3.

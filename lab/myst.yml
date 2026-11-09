@@ -29,6 +29,7 @@ project:
     - title: Decisions
       children:
         - file: pages/tune.md
+        - file: pages/tune-cloud.md
         - file: pages/vectorized-reader.md
         - file: pages/tradeoffs.md
         - file: pages/summary.md

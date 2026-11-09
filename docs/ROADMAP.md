@@ -510,14 +510,25 @@ lower.
   (`sized_latency`, which now covers the windows, the sorted read and compactions). Its picks held
   on the laptop's measured work (T2); its formula misses small reads with row groups no training
   run had (T1 in part).
-- [ ] **The picks in the cloud** (registered 2026-11-08, HYPOTHESES.md K1–K3; running at
-  be8d6f1). The four configurations that hold every S3 Express pick (or one within 0.4% of it)
-  and its runner-up: `tune-upd-rg4m` (RMoW-append with 4 MiB row groups),
-  `tune-upd-mor-c12` (MoR compacted), `tune-ing-rg4m` (MoR with 4 MiB row groups) and
-  `tune-ing-rg4m-seal256` (RMoR sealed at 256 MiB with 4 MiB row groups), on S3 Express (a fleet
-  of four `c7a.4xlarge`, AWS's limit) and Azure Blob (one `D8as_v6`, in turn), each after its
-  VM's spike, judged as the base point was: the measured time of each phase against its price
-  from the laptop's work (and the VM's pace, from its twin).
+- [x] **The picks in the cloud** (registered 2026-11-08, HYPOTHESES.md K1–K3; ran 2026-11-08/09
+  at be8d6f1, [lab/pages/tune-cloud.md](../lab/pages/tune-cloud.md)). The four configurations that
+  hold every S3 Express pick (or one within 0.4% of it) and its runner-up: `tune-upd-rg4m`,
+  `tune-upd-mor-c12`, `tune-ing-rg4m` and `tune-ing-rg4m-seal256`, on S3 Express (a fleet of four
+  `c7a.4xlarge`, each with its twin and spike) and Azure Blob (one `D8as_v6`, in turn). K1–K3 held:
+  the runs sent what havoc counted; every judged pick was the cheapest measured on both stores;
+  the twin's work and the VM's spike priced S3 Express within 3.3%. The laptop-priced predictions
+  ran 4–12% low there, the VM's pace against the laptop's (1.08–1.19 times its time for the same
+  instructions), alike across policies, so the order held. The picks rest on a narrow table (11
+  columns); see the next item.
+- [ ] **Row-group size on a wide table**: the 4 MiB picks come from an 11-column table, whose
+  4 MiB row groups still have column chunks of a few hundred KB. A wide table (100+ columns, read
+  a few at a time) at 4, 16 and 128 MiB would show whether they carry over; on the laptop and
+  havoc, no cloud run.
+- [ ] **The deferred merges at their own best settings**: the cloud run timed them only at 4 MiB
+  row groups, with RMoW-append's configuration, where the tuner prices them 1.09–1.47 times their
+  best on S3 Express and 1.23–2.22 on Azure (lab/pages/tune-cloud.md, Limits). On Azure Blob under
+  `scans` the tuner's pick on the whole grid is the deferred merges with 32 MiB row groups
+  (`tune-upd-rg32m`, 27.1 s a write against compacted MoR's 27.8), which no cloud run has timed.
 - [ ] **The formula's misses**: a read's work per row group (small reads with 4 and 8 MiB row
   groups came out 19–44% low). Train on a row-group sweep, or count row groups read per phase.
 - [ ] **A writer that tunes itself**: the same prices could drive the writer, merging a row group
