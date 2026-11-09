@@ -1,18 +1,24 @@
 -- analysis/compare_runs.py: requests and bytes are a deterministic function of the op log, the
 -- configuration and the code, so two runs of one configuration must match exactly in these
--- columns (wall and CPU time may not). A record is keyed by arm, step, phase and reader: probes
--- run every read phase once per reader model (runs before reader models have no reader). No run
--- has two records with one key; if one did, its records are flagged 'duplicate key'. Runs before
--- 2026-10-27 have no append_splits, which is compared only where both runs have it.
+-- columns (wall and CPU time may not). A record is keyed by arm, step, phase, reader and
+-- window: probes run every read phase once per reader model (runs before reader models have no
+-- reader), and a probe of a run with `reads.windows` reads several windows, a record each, told
+-- apart by where each starts (`window_at`; before 2026-11-08 the key left it out, and runs with
+-- windows showed false differences). No run has two records with one key; if one did, its
+-- records are flagged 'duplicate key'. Runs before 2026-10-27 have no append_splits, which is
+-- compared only where both runs have it.
 ALTER TABLE steps ADD COLUMN IF NOT EXISTS append_splits BIGINT;
+ALTER TABLE steps ADD COLUMN IF NOT EXISTS window_at DOUBLE;
 CREATE MACRO steps_diff(run_a, run_b) AS TABLE
 WITH a AS (
-    SELECT *, coalesce(reader, '') AS reader_key,
-           count(*) OVER (PARTITION BY arm, step, phase, coalesce(reader, '')) AS copies
+    SELECT *, coalesce(reader, '') AS reader_key, coalesce(window_at, -1) AS window_key,
+           count(*) OVER (PARTITION BY arm, step, phase, coalesce(reader, ''),
+                                       coalesce(window_at, -1)) AS copies
     FROM steps WHERE run_id = run_a
 ), b AS (
-    SELECT *, coalesce(reader, '') AS reader_key,
-           count(*) OVER (PARTITION BY arm, step, phase, coalesce(reader, '')) AS copies
+    SELECT *, coalesce(reader, '') AS reader_key, coalesce(window_at, -1) AS window_key,
+           count(*) OVER (PARTITION BY arm, step, phase, coalesce(reader, ''),
+                                       coalesce(window_at, -1)) AS copies
     FROM steps WHERE run_id = run_b
 ), arms AS (
     SELECT DISTINCT arm FROM a INTERSECT SELECT DISTINCT arm FROM b
@@ -48,7 +54,7 @@ SELECT coalesce(a.arm, b.arm) AS arm, coalesce(a.step, b.step) AS step,
            CASE WHEN coalesce(a.delete_files, -1) <> coalesce(b.delete_files, -1)
                 THEN 'delete_files' END
        ], x -> x IS NOT NULL) AS differs
-FROM a FULL JOIN b USING (arm, step, phase, reader_key)
+FROM a FULL JOIN b USING (arm, step, phase, reader_key, window_key)
 WHERE coalesce(a.arm, b.arm) IN (FROM arms);
 
 -- Repetitions: runs of one label and configuration hash (a rerun of the same config file).
