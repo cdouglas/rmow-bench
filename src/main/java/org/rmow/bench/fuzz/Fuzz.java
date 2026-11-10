@@ -238,12 +238,15 @@ public final class Fuzz {
     }
     // the cut (2026-11-10), drawn from a stream of its own so every other draw of a seed stays as
     // it was: strides far smaller than Iceberg's page limit, since these row groups hold 270 to
-    // 35,000 rows
+    // 35,000 rows, but 2 to 64 of them a row group (128 MiB of the bench's rows holds 215 and
+    // 16 MiB 27). Strides of a few rows cut row groups into thousands, whose footers every read
+    // decodes: seeds 291 and 757 of round cut-r1, at 7 and 14 rows, ran past 20 minutes.
     SplittableRandom rc = new SplittableRandom(seed ^ 0x2545F4914F6CDD1DL);
     if (chance(rc, 0.5)) {
       LayoutSpec.CutSpec c = new LayoutSpec.CutSpec();
       c.minStrides = rc.nextInt(1, 6);
-      c.strideRows = (int) logUniform(rc, 5, 5_000);
+      long rgRows = Math.max(100, l.rowGroupBytes / 60);
+      c.strideRows = (int) Math.max(5, rgRows / logUniform(rc, 2.0, 64.0));
       l.cut = c;
     }
     // A heavy statement empties most of a region only if the batch changes that many rows, and
