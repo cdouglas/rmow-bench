@@ -205,8 +205,13 @@ final class Scans {
   }
 
 
-  /** Iceberg fetches Parquet files up to this size whole ({@code Parquet.ReadBuilder}). */
-  static final long EAGER_BYTES = 1L << 20;
+  /**
+   * Iceberg fetches Parquet files up to 1 MiB whole ({@code Parquet.ReadBuilder}), and plans them
+   * so: the layout's {@code eagerBytes}, which only the fuzzer lowers.
+   */
+  static long eagerBytes(ArmContext ctx) {
+    return ctx.layout().eagerBytesOrDefault();
+  }
 
   /**
    * A file's tail, read the way parquet-java reads a footer: the last 8 bytes, then the footer
@@ -268,7 +273,7 @@ final class Scans {
               f.file(), f.deletes(), SCHEMA_JSON, SPEC_JSON, ResidualEvaluator.unpartitioned(filter));
       List<FileScanTask> splits = new ArrayList<>();
       byte[] tail = null;
-      if (reader.footerCache() && f.file().fileSizeInBytes() <= EAGER_BYTES) {
+      if (reader.footerCache() && f.file().fileSizeInBytes() <= eagerBytes(ctx)) {
         // one fetch of the whole version (Iceberg reads files up to 1 MiB whole), not one per
         // split
         splits.add(task);
@@ -465,7 +470,7 @@ final class Scans {
           continue; // its DV covers every row
         }
         long size = f.file().fileSizeInBytes();
-        if (size <= EAGER_BYTES) {
+        if (size <= eagerBytes(ctx)) {
           runs.add(new Run(f, null, -1, -1, Long.MIN_VALUE)); // fetched whole: opened first
           continue;
         }
@@ -768,7 +773,7 @@ final class Scans {
             new BaseFileScanTask(
                 object, f.deletes(), SCHEMA_JSON, SPEC_JSON, ResidualEvaluator.unpartitioned(filter));
         Iterable<FileScanTask> splits =
-            reader.footerCache() && v.length() <= EAGER_BYTES
+            reader.footerCache() && v.length() <= eagerBytes(ctx)
                 ? List.of(whole)
                 : whole.split(reader.splitTargetBytes());
         for (FileScanTask split : splits) {
@@ -797,7 +802,7 @@ final class Scans {
    */
   static byte[] readFooterObject(ArmContext ctx, Reader reader, String location, long length)
       throws IOException {
-    if (length > EAGER_BYTES) {
+    if (length > eagerBytes(ctx)) {
       return readTail(ctx, reader, location, length);
     }
     return tailOf(readWhole(ctx, location, length));

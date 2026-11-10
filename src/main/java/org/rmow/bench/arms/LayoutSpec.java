@@ -202,6 +202,17 @@ public final class LayoutSpec {
   @JsonInclude(JsonInclude.Include.NON_NULL)
   public CutSpec cut = null;
 
+  /**
+   * Files of at most this many bytes are planned as Iceberg reads them, fetched whole: no row
+   * group skipped, no footer held by a writer (null: 1 MiB, the threshold of Iceberg's Parquet
+   * reader, which fetches such a file whole whatever this says). For the fuzzer alone: lowered, it
+   * sends a small table's files down the paths that work row group by row group (dead row groups
+   * skipped, the sorted read's runs, the locate by key), at no cost to which rows a read returns.
+   * Left out of the configuration's hash when absent.
+   */
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  public Long eagerBytes = null;
+
   /** Where a rewritten row group is cut. */
   public static final class CutSpec {
     /** {@code changed}: at the runs of strides the write changes or that hold dead rows. */
@@ -226,6 +237,11 @@ public final class LayoutSpec {
   /** Whether a MoR-family writer's locate prunes row groups by each target: {@code locate} {@code keys}. */
   public boolean locatesByKey() {
     return locatesByScan() && "keys".equals(locate);
+  }
+
+  /** {@link #eagerBytes}, with null as 1 MiB. */
+  public long eagerBytesOrDefault() {
+    return eagerBytes != null ? eagerBytes : 1L << 20;
   }
 
   /** {@link #updateRead}, with null as {@code id}. */

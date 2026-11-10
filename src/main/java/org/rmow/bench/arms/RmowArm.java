@@ -331,7 +331,7 @@ public final class RmowArm implements Arm {
       footer(f);
       return src.tail();
     }
-    if (f.length() <= Scans.EAGER_BYTES || footers.mustRead(f.location(), f.length())) {
+    if (f.length() <= Scans.eagerBytes(ctx) || footers.mustRead(f.location(), f.length())) {
       return null;
     }
     return src.tail();
@@ -806,7 +806,7 @@ public final class RmowArm implements Arm {
           NO_DELETES,
           Rows.SCHEMA,
           Expressions.alwaysTrue(),
-          f.length() <= Scans.EAGER_BYTES || footers.mustRead(f.location(), f.length())
+          f.length() <= Scans.eagerBytes(ctx) || footers.mustRead(f.location(), f.length())
               ? null
               : f.tail(),
           -1,

@@ -67,7 +67,7 @@ final class WriterFooters {
    * most 1 MiB, which every open fetches whole).
    */
   byte[] tail(String location, long length) throws IOException {
-    if (!transaction || length <= Scans.EAGER_BYTES) {
+    if (!transaction || length <= Scans.eagerBytes(ctx)) {
       return null;
     }
     String key = location + "@" + length;

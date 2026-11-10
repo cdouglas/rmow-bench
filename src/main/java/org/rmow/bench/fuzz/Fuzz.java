@@ -249,6 +249,15 @@ public final class Fuzz {
       c.strideRows = (int) Math.max(5, rgRows / logUniform(rc, 2.0, 64.0));
       l.cut = c;
     }
+    // planning's whole-file threshold (2026-11-10), from a stream of its own: Iceberg fetches files
+    // of at most 1 MiB whole, and these tables (2,000 to 60,000 rows) seldom make a file larger, so
+    // half the seeds plan files above 8 to 256 KiB row group by row group, reaching the paths that
+    // work so (dead row groups skipped by readers and writers, the sorted read's runs, the locate by
+    // key). Iceberg's reader still fetches such a file whole, which changes requests, not rows.
+    SplittableRandom re = new SplittableRandom(seed ^ 0x9E3779B97F4A7C15L);
+    if (chance(re, 0.5)) {
+      l.eagerBytes = logUniform(re, 8 << 10, 256 << 10);
+    }
     // A heavy statement empties most of a region only if the batch changes that many rows, and
     // leaves a row group dead but for a few rows only if its region spans the row group: regions
     // of about a row group or a few, and batches that change at least a region's rows.

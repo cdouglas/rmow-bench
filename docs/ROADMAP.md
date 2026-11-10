@@ -539,8 +539,24 @@ lower.
   merge late rows, where the time goes, and row groups of 4 to 32 MiB. The updates' sorted read is
   left out: it ran only under `cached`, which reads dead row groups, so it charges RMoR and the
   deferred merges for the row groups they copied out (RMoR reads 3.4 times its live bytes).
-- [ ] **A sorted read that skips dead row groups**: `read_sorted` runs only under `cached`; a run
-  under `cached-skip` would make the updates' sorted read fair to RMoR and the deferred merges.
+- [x] **A sorted read that skips dead row groups** (built 2026-11-10, 6db916a): under
+  `skipDeadRowGroups` the sorted read leaves out each row group the file's deletes cover whole, as
+  the full read does. The two workloads' reference runs and cloud run read sorted under
+  `cached-skip`.
+- [ ] **The two workloads in the cloud** (decided 2026-11-10): measure what the workloads page
+  simulates, on S3 Express and Azure Blob, and make it the results page's data. Steps:
+  - [x] the base point and the sweeps moved to Calibration (their MoR skipped the update read);
+    the workloads page gains whiskers and latency as snapshots are added (ee7f046);
+  - [x] the locate by each changed key (`locate` `keys`) and the skipping sorted read (6db916a),
+    with tests and two mutants; five configurations `wl-*` and campaign `workloads-ref` (b49a57f);
+  - [ ] fuzz rounds on havoc at b49a57f (`keys-r1`, `keys-r1-heavy`) and the mutants' calibration;
+  - [ ] reference runs: `workloads-ref` on havoc (requests and bytes), the same on the laptop
+    (instructions); the workloads page's main points refreshed from them;
+  - [ ] hypotheses registered from the reference runs' simulation;
+  - [ ] the measured page built and checked on the reference runs, so the cloud runs drop in;
+  - [ ] the cloud run: on S3 Express a `c7a.4xlarge` per configuration (four at once, the fifth
+    after), each after its twin and spike; on Azure Blob one `D8as_v6`, in turn, after one spike.
+    The user's address changes during the day: rerun `infra-up` before each deploy step.
 - [ ] **The density hypothesis at Iceberg's row-group size** (raised by the user 2026-11-09): use
   the deletion vector's share of a row group to copy at a finer grain than the file, copying whole
   row groups, parts of them (runs of pages, which the writer aligns across columns every 20,000
@@ -563,7 +579,8 @@ lower.
     groups to that one range, which spans most of the table when a write changes ten regions), a
     request each: about 1,070 a write for the cut, 850 for the deferred merges, 89 for compacted
     MoR. The model leaves it out, and it costs most of the cut's write on Azure Blob. Pruning row
-    groups by each changed key, as files already are, would cut it.
+    groups by each changed key, as files already are, would cut it: built as `locate` `keys`
+    (2026-11-10, 6db916a), not yet run at 128 MiB.
   - [ ] **The windows' footers:** the region designs' windows read the footer of every file whose
     metrics overlap the window (276 requests for the cut at 128 MiB, the model's 14).
   - [ ] **Cold pieces merged back,** a **sparse workload** (where density can choose differently
