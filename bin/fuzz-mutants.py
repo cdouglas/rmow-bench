@@ -16,7 +16,8 @@ every required mutant is caught; RMoW packing open row groups is caught by about
 to 500 (a round on havoc, not 60 seeds); a row group dead but for interior rows (ends-only) needs
 the heavy profile, which catches it in about one seed in 12; one dead but for its second row has
 not been caught in about 1,000 heavy seeds. The cut's two (2026-11-10, strides of 2 to 64 a row
-group): 8 and 2 of the 60 seeds.
+group): 8 and 2 of the 60 seeds. The sorted read's skip and the locate by key (2026-11-10): see
+calibration.txt of their first round.
 
 Each mutant is an exact-text replacement anchored in the code as this file's last commit left it;
 a replacement that no longer matches is reported, not skipped. Results: DIR/<mutant>/summary-*.jsonl
@@ -121,6 +122,20 @@ MUTANTS = {
         "      if (bestGap == 0) {\n        out.get(best).add(row);\n      }",
         "run",
         "the cut drops a row folded in from a delta row group whose id no piece's rows span",
+    ),
+    "sorted-read-drops-live-row-groups": (
+        ARMS + "Scans.java",
+        "          if (dead.contains(FooterCodec.startOffset(rg))) {",
+        "          if (!dead.isEmpty()) {",
+        "run",
+        "the sorted read under the skipping reader drops every row group of a file with one dead",
+    ),
+    "locate-keys-skips-first-key": (
+        ARMS + "Scans.java",
+        "      int first = i >= 0 ? i : -i - 1;",
+        "      int first = i >= 0 ? i : -i;",
+        "run",
+        "the locate by key misses a row group whose only changed key is the first past its least id",
     ),
     "mor-stats-miss-deletes": (
         ARMS + "MorArm.java",

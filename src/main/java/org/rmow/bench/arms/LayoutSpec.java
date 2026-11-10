@@ -2,6 +2,7 @@ package org.rmow.bench.arms;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import org.apache.iceberg.TableProperties;
 
@@ -69,8 +70,14 @@ public final class LayoutSpec {
    * How writers find the rows a batch updates or deletes. {@code oracle}: from an in-memory index,
    * at no cost (isolates write I/O). {@code scan}: as a MERGE would, timed as the {@code locate}
    * phase and checked against the index; MoR-family arms scan {@code id} and {@code _pos} of every
-   * live data file whose {@code id} bounds may hold a target, RMoW reads row-group {@code id}
-   * statistics from its footers.
+   * live data file whose {@code id} bounds may hold a target, with row groups pruned to the
+   * targets' one {@code id} range, and RMoW reads row-group {@code id} statistics from its footers.
+   * {@code keys}: as {@code scan}, but a MoR-family writer also prunes row groups by each target,
+   * as it prunes files: it reads only the row groups whose {@code id} statistics, in the footer it
+   * holds ({@code writerFooters} {@code transaction}), may hold one. An enhancement over Iceberg,
+   * whose filters stop pruning by a list of keys past 200 of them; files of at most 1 MiB (fetched
+   * whole), and every file under {@code writerFooters} {@code open}, are pruned as under {@code
+   * scan}. RMoW as under {@code scan}.
    */
   public String locate = "oracle";
 
@@ -206,6 +213,19 @@ public final class LayoutSpec {
      * page. Smaller only for the fuzzer, whose row groups hold fewer rows than a page limit.
      */
     public int strideRows = Cut.STRIDE_ROWS;
+  }
+
+  /** Whether writers find their rows by reading the table: {@code locate} {@code scan} or {@code keys}. */
+  public boolean locatesByScan() {
+    if (!List.of("oracle", "scan", "keys").contains(locate)) {
+      throw new IllegalArgumentException("layout.locate: oracle, scan or keys, not " + locate);
+    }
+    return !"oracle".equals(locate);
+  }
+
+  /** Whether a MoR-family writer's locate prunes row groups by each target: {@code locate} {@code keys}. */
+  public boolean locatesByKey() {
+    return locatesByScan() && "keys".equals(locate);
   }
 
   /** {@link #updateRead}, with null as {@code id}. */

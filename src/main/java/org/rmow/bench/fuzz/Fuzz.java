@@ -209,7 +209,7 @@ public final class Fuzz {
     l.maxRowGroupsPerFile = (int) logUniform(r, 2, 128);
     l.footerOrder = pick(r, "logical", "offset");
     l.footerPrefetchBytes = prefetch(r);
-    l.locate = pick(r, "oracle", "scan");
+    l.locate = pick(r, "oracle", "scan", "keys");
     l.updateRead = pick(r, null, "id", "row", "scan");
     double every = r.nextDouble();
     l.compactEvery = every < 0.25 ? 0 : every < 0.65 ? r.nextInt(1, 4) : r.nextInt(4, 9);

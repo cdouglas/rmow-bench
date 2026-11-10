@@ -28,7 +28,9 @@ a delete cache does, which helps the designs with deletion vectors, MoR and RMoR
 its old file under a deletion vector, and stock Iceberg fetches and decodes that row group only to
 drop every one of its rows. Our reader plans no split for a row group whose rows the file's
 deletion vector all covers, nor for a file whose vector covers every row, and RMoR's writers skip
-them the same way when they scan for the rows a write changes. Our check asks the vector's bitmap
+them the same way when they scan for the rows a write changes. The sorted read skips them too (since
+2026-11-10; before, it fetched every row group of a file it did not skip whole, charging RMoR and
+the deferred merges for the row groups they had copied out). Our check asks the vector's bitmap
 whether each row group's range is deleted whole, at the cost of a few of its containers. The
 results pages take RMoR's times from runs with this check; earlier runs tested each row position in
 turn, which cost RMoR seconds of each write and read ([RMoR re-measured](./rmor-rerun.md)).
@@ -43,6 +45,15 @@ end offset as its length. In our fork of Iceberg 1.12 (`atomicio`) the stream op
 it reads, and asks for exactly its range, as Iceberg's S3 stream does.
 
 ## Writers
+
+**Finding a write's rows by key.** A MERGE finds the rows a write changes by scanning the table's
+key column. Iceberg prunes the scan's files and row groups by its filter, but stops pruning by a
+list of values past 200 of them, so a write of thousands of changes prunes at best to the range
+between its smallest and largest key, which spans most of the table when the changes fall in
+several regions. Our writers prune files by each changed key, and since 2026-11-10 row groups too:
+they read the key column only of the row groups whose statistics, in the footer the writer already
+holds, may hold one of the keys (`layout.locate` `keys`). It helps MoR, RMoR, RMoW-external and
+the deferred merges alike; RMoW-append finds its rows from its footers' statistics alone.
 
 **Conditional appends.** RMoW-append and RMoW-external extend an existing object, which Iceberg's
 FileIO cannot do. Our fork's `SupportsAtomicOperations` appends at the object's length on the

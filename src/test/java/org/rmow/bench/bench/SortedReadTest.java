@@ -95,6 +95,58 @@ class SortedReadTest {
     assertThat(held).anyMatch(e -> e.get("phase").asText().equals("read_sorted"));
   }
 
+  /**
+   * Under the reader that skips dead row groups, the sorted read leaves out the row groups RMoR's
+   * deletes cover whole, as the full read does: the same rows (the runner checks them) for fewer
+   * bytes, and no more for any arm.
+   */
+  @Test
+  void theSkippingReaderLeavesDeadRowGroupsOutOfTheSortedRead(@TempDir Path dir) throws IOException {
+    BenchConfig cfg = config();
+    // files past 1 MiB, which a read opens row group by row group (smaller ones it fetches whole)
+    cfg.workload.initialRows = 160_000;
+    cfg.workload.regionRows = 8_000;
+    cfg.layout.targetFileBytes = 4 << 20;
+    cfg.arms = List.of("mor-v3", "rmor-c", "rmow-c");
+    BenchConfig.ReaderSpec cached = BenchConfig.ReaderSpec.cached();
+    cached.sortedRead = true;
+    BenchConfig.ReaderSpec skipping = BenchConfig.ReaderSpec.skipping();
+    skipping.sortedRead = true;
+    cfg.reads.readers = List.of(cached, skipping);
+    new Runner(cfg, dir, "t").run();
+    List<JsonNode> steps = lines(dir.resolve("steps.jsonl"));
+    for (String arm : cfg.arms) {
+      long kept = 0;
+      long skipped = 0;
+      for (JsonNode s : steps) {
+        if (s.get("arm").asText().equals(arm) && s.get("phase").asText().equals("read_sorted")) {
+          if (s.get("reader").asText().equals("cached")) {
+            kept += s.get("bytes_read").asLong();
+          } else {
+            skipped += s.get("bytes_read").asLong();
+          }
+        }
+      }
+      assertThat(skipped).as(arm + ": the skipping reader's sorted read reads no more").isLessThanOrEqualTo(kept);
+      if (arm.equals("rmor-c")) {
+        assertThat(skipped).as("RMoR's dead row groups go unread").isLessThan(kept);
+      }
+    }
+    // the same rows at every probe, whichever reader
+    for (JsonNode s : steps) {
+      if (s.get("phase").asText().equals("read_sorted") && s.get("reader").asText().equals("cached-skip")) {
+        JsonNode c =
+            steps.stream()
+                .filter(o -> o.get("phase").asText().equals("read_sorted")
+                    && o.get("reader").asText().equals("cached")
+                    && o.get("arm").equals(s.get("arm")) && o.get("step").equals(s.get("step")))
+                .findFirst()
+                .orElseThrow();
+        assertThat(s.get("rows").asLong()).isEqualTo(c.get("rows").asLong());
+      }
+    }
+  }
+
   @Test
   void anInitialLoadWithJitteredEventTimesCannotBeReadSorted(@TempDir Path dir) {
     BenchConfig cfg = config();

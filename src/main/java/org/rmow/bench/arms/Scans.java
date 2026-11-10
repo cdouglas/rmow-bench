@@ -328,6 +328,35 @@ final class Scans {
     return groups;
   }
 
+  private static final int ID_COLUMN = Rows.SCHEMA.columns().indexOf(Rows.SCHEMA.findField("id"));
+
+  /**
+   * For each of a version's row groups, in its footer's order: whether its {@code id} statistics
+   * may hold one of the sorted {@code keys} (true without statistics).
+   */
+  static boolean[] rowGroupsMayHold(byte[] tail, long[] keys) {
+    List<RowGroup> rgs = FooterCodec.read(tail, 0, tail.length - 8).getRow_groups();
+    boolean[] may = new boolean[rgs.size()];
+    for (int g = 0; g < rgs.size(); g++) {
+      var meta = rgs.get(g).getColumns().get(ID_COLUMN).getMeta_data();
+      if (!meta.isSetStatistics() || !meta.getStatistics().isSetMin_value()
+          || !meta.getStatistics().isSetMax_value()) {
+        may[g] = true;
+        continue;
+      }
+      long lo = littleEndianLong(meta.getStatistics().getMin_value());
+      long hi = littleEndianLong(meta.getStatistics().getMax_value());
+      int i = Arrays.binarySearch(keys, lo);
+      int first = i >= 0 ? i : -i - 1;
+      may[g] = first < keys.length && keys[first] <= hi;
+    }
+    return may;
+  }
+
+  private static long littleEndianLong(byte[] b) {
+    return ByteBuffer.wrap(b).order(ByteOrder.LITTLE_ENDIAN).getLong();
+  }
+
   /**
    * The start offsets of {@code df}'s row groups that its deletes cover whole: the deletes loaded
    * once (through {@code deleteCache}, if not null, so later scans reuse them), checked against the
@@ -419,7 +448,9 @@ final class Scans {
    * its rows held until merged. Every run must come out sorted, so every write must be
    * ({@code sortWrites}) and the initial load's event times in id order ({@code
    * initialJitterRows} 0); a row out of order fails the read. Needs {@code footerCache}; with
-   * {@code deleteCache}, each file's deletes load once.
+   * {@code deleteCache}, each file's deletes load once. With {@code skipDeadRowGroups} it leaves
+   * out, as the full read does, each file whose deletes cover every row and each row group they
+   * cover whole (the deletes loaded once to plan, through the read's delete cache if it has one).
    */
   static TableHash readSorted(ArmContext ctx, Reader reader, List<ReadFile> files)
       throws IOException {
@@ -439,7 +470,14 @@ final class Scans {
           continue;
         }
         byte[] tail = readTail(ctx, reader, f.file().location(), size);
+        Set<Long> dead =
+            reader.skipDeadRowGroups() && f.deletes().length > 0
+                ? deadRowGroups(ctx, reader.footerPrefetchBytes(), f.file(), f.deletes(), tail, deletes)
+                : Set.of();
         for (RowGroup rg : FooterCodec.read(tail, 0, tail.length - 8).getRow_groups()) {
+          if (dead.contains(FooterCodec.startOffset(rg))) {
+            continue; // its deletes cover every row
+          }
           runs.add(
               new Run(f, tail, FooterCodec.startOffset(rg), FooterCodec.compressedSize(rg),
                   minTs(rg)));

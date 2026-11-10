@@ -220,7 +220,7 @@ public final class RmowArm implements Arm {
   @Override
   public void apply(OpLog.Batch b) throws IOException {
     footers.begin();
-    if ("scan".equals(ctx.layout().locate)) {
+    if (ctx.layout().locatesByScan()) {
       ctx.phases().run("locate", () -> locateByStats(b));
     }
 

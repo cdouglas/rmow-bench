@@ -160,7 +160,7 @@ public abstract class MorArm implements Arm {
    */
   protected void locate(OpLog.Batch b, boolean rows) throws IOException {
     locatedDeletes.clear();
-    if ("scan".equals(ctx.layout().locate)) {
+    if (ctx.layout().locatesByScan()) {
       locating = true;
       try {
         ctx.phases().run("locate", () -> locateByScan(b, rows && b.updateIds().length > 0));
@@ -337,8 +337,9 @@ public abstract class MorArm implements Arm {
   /**
    * Finds the batch's updated and deleted rows as a MERGE would: reads {@code id} and {@code _pos}
    * (deletes applied) of every live data file whose {@code id} bounds may hold one of them, with
-   * row groups pruned to the targets' id range; with {@code wholeRows}, every column. Checks every
-   * position found against the index.
+   * row groups pruned to the targets' id range, or under {@code locate} {@code keys} to those whose
+   * {@code id} statistics may hold one; with {@code wholeRows}, every column. Checks every position
+   * found against the index.
    */
   private void locateByScan(OpLog.Batch b, boolean wholeRows) throws IOException {
     long[] targets = new long[b.updateIds().length + b.deleteIds().length];
@@ -357,6 +358,7 @@ public abstract class MorArm implements Arm {
             Expressions.greaterThanOrEqual("id", targets[0]),
             Expressions.lessThanOrEqual("id", targets[targets.length - 1]));
     int[] found = {0};
+    long[] keys = ctx.layout().locatesByKey() ? targets : null;
     for (int k = live.nextSetBit(0); k >= 0; k = live.nextSetBit(k + 1)) {
       DataFile df = files.get(k);
       if (!mayHoldAny(df, targets)) {
@@ -369,6 +371,7 @@ public abstract class MorArm implements Arm {
           deletes,
           projection,
           range,
+          keys,
           rows -> {
             for (int r = 0; r < rows.size(); r++) {
               long id = rows.id(r);
@@ -769,12 +772,6 @@ public abstract class MorArm implements Arm {
     scan(df, seq, liveDeletes, Rows.SCHEMA, filter, rows);
   }
 
-  /**
-   * With {@code writerSkipsDeadRowGroups}, the writer reads no row group the file's deletes cover
-   * whole, and no file whose DV covers every row, as the {@code skipDeadRowGroups} reader plans its
-   * splits: the deletes loaded once, checked against the footer the writer holds. A file of at most
-   * 1 MiB, fetched whole, is skipped only whole.
-   */
   private void scan(
       DataFile df,
       long seq,
@@ -783,34 +780,62 @@ public abstract class MorArm implements Arm {
       Expression filter,
       Consumer<RowBatch> rows)
       throws IOException {
+    scan(df, seq, liveDeletes, projection, filter, null, rows);
+  }
+
+  /**
+   * With {@code writerSkipsDeadRowGroups}, the writer reads no row group the file's deletes cover
+   * whole, and no file whose DV covers every row, as the {@code skipDeadRowGroups} reader plans its
+   * splits: the deletes loaded once, checked against the footer the writer holds. With {@code keys}
+   * (sorted; the locate under {@code locate} {@code keys}), it reads only the row groups whose
+   * {@code id} statistics in that footer may hold one of them. A file of at most 1 MiB, fetched
+   * whole, is skipped only whole, and is not pruned by key.
+   */
+  private void scan(
+      DataFile df,
+      long seq,
+      List<Delete> liveDeletes,
+      Schema projection,
+      Expression filter,
+      long[] keys,
+      Consumer<RowBatch> rows)
+      throws IOException {
     Reader writer = Reader.writer(ctx.layout());
     DeleteFile[] ds = deletesFor(df, seq, liveDeletes);
     byte[] tail = footers.tail(df.location(), df.fileSizeInBytes());
-    if (ctx.layout().writerSkipsDeadRowGroups && ds.length > 0) {
-      if (Scans.deadWhole(df, ds)) {
+    boolean skipDead = ctx.layout().writerSkipsDeadRowGroups && ds.length > 0;
+    if (skipDead && Scans.deadWhole(df, ds)) {
+      return;
+    }
+    if (tail == null || (!skipDead && keys == null)) {
+      Scans.scan(ctx, writer, df, ds, projection, filter, tail, -1, -1, rows);
+      return;
+    }
+    // the deletes, once per scan however many row groups it reads
+    try (DeleteCache loaded = ds.length > 0 ? new DeleteCache() : null) {
+      Set<Long> dead = Set.of();
+      if (skipDead) {
+        dead = Scans.deadRowGroups(ctx, writer.footerPrefetchBytes(), df, ds, tail, loaded);
+        if (locating) {
+          locatedDeletes.add(df.location());
+        }
+      }
+      List<long[]> read = new ArrayList<>();
+      List<long[]> groups = Scans.rowGroups(tail);
+      boolean[] mayHold = keys == null ? null : Scans.rowGroupsMayHold(tail, keys);
+      for (int g = 0; g < groups.size(); g++) {
+        if (!dead.contains(groups.get(g)[2]) && (mayHold == null || mayHold[g])) {
+          read.add(groups.get(g));
+        }
+      }
+      if (read.size() == groups.size()) {
+        Scans.scan(ctx, writer, df, ds, projection, filter, tail, -1, -1, loaded, rows);
         return;
       }
-      if (tail != null) {
-        try (DeleteCache loaded = new DeleteCache()) { // the deletes, once per scan
-          Set<Long> dead =
-              Scans.deadRowGroups(ctx, writer.footerPrefetchBytes(), df, ds, tail, loaded);
-          if (locating) {
-            locatedDeletes.add(df.location());
-          }
-          if (dead.isEmpty()) {
-            Scans.scan(ctx, writer, df, ds, projection, filter, tail, -1, -1, loaded, rows);
-            return;
-          }
-          for (long[] g : Scans.rowGroups(tail)) {
-            if (!dead.contains(g[2])) {
-              Scans.scan(ctx, writer, df, ds, projection, filter, tail, g[2], g[3], loaded, rows);
-            }
-          }
-        }
-        return;
+      for (long[] g : read) {
+        Scans.scan(ctx, writer, df, ds, projection, filter, tail, g[2], g[3], loaded, rows);
       }
     }
-    Scans.scan(ctx, writer, df, ds, projection, filter, tail, -1, -1, rows);
   }
 
   /** The live bytes of one delete file (a DV counts its blob, not its whole Puffin file). */
