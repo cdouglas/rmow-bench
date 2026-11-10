@@ -111,6 +111,31 @@ mode = "table"
 only_finished = true
 options = { ignore_errors = true }
 
+# The append spike's requests (AzureAppendSpike, results/spike/azure-appends-*; not RMoW's, for the
+# catalog's shared log), one record each: level, mode (blind or conditional), bytes, writers,
+# writer, seq, op (append, or the head after a lost race), outcome (ok, lost, throttled, error,
+# full), status, code, offset, blocks, start_ns (from the level's start), ns, steady (after the
+# warm-up and before the deadline)
+[[facts]]
+name = "append_requests"
+runs = "spike"
+file = "appends.jsonl"
+format = "jsonl"
+mode = "table"
+only_finished = true
+options = { ignore_errors = true }
+
+# The append spike's levels, one record each: rates over the steady window, latency percentiles by
+# op and outcome, the client's CPU share, and the check of the blob's frames
+[[facts]]
+name = "append_levels"
+runs = "spike"
+file = "levels.jsonl"
+format = "jsonl"
+mode = "table"
+only_finished = true
+options = { ignore_errors = true }
+
 # The container runner's foreign-load samples (docker/campaign.py), added to a run when it ends:
 # one per second, each over the wall-clock interval [t0, t1] in epoch seconds, with the job's own
 # CPUs, the foreign load on its cores and the busy time of its idle SMT siblings. Matched to

@@ -164,6 +164,11 @@ every VM shares.
   its cloud run (`run twin`, `fetch`, register them, then `run spike bench`). Its store holds every
   arm's objects until the run ends, up to 60 GB for the sweeps (`sweep-rg64m`), so set `DISK_GB`
   to 128; the AWS disk is a gp3 at 500 MB/s and 6,000 IOPS, not its 125 MB/s baseline.
+- **appends** (Azure only, not in `run`'s default steps): `AzureAppendSpike` at `SPIKE_COMMIT`,
+  blind and conditional appends from 1 to 64 writers to one Append Blob each, for the catalog's
+  shared log rather than RMoW ([docs/AZURE_RUNBOOK.md](../docs/AZURE_RUNBOOK.md), "Blind
+  appends"). `APPENDS_ARGS` adds its flags (`--bytes 4096,65536`, `--reps 2`). Its results land in
+  `results/spike/azure-appends-<UTC start>`, which `fetch` brings back with the spikes'.
 
 **The VM.** Ubuntu 24.04 and its OpenJDK 17 package, which the twins ran on (17.0.20.1 when this
 was written). The defaults are AMD, as the twins' laptop is (Zen 4):

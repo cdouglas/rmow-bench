@@ -12,6 +12,7 @@
 #   ./deploy/deploy.sh up            # the VM (or VMs)
 #   ./deploy/deploy.sh ship          # rmow-bench to the VM, and the builds there (detached)
 #   ./deploy/deploy.sh run [step]... # test, spike, bench (by default all three, in order)
+#                                    # (also twin; and appends, on Azure only, run by name)
 #   ./deploy/deploy.sh status        # whether the VM's steps still run, and the log's tail
 #   ./deploy/deploy.sh wait          # until they end
 #   ./deploy/deploy.sh fetch         # the results into results/, the VM's log into deploy/logs/
@@ -46,6 +47,8 @@ BENCH_COMMIT="${BENCH_COMMIT:-${CALIBRATION_COMMIT:-}}"
 BENCH_REPS="${BENCH_REPS:-${CALIBRATION_REPS:-1}}"
 BENCH_HEAP="${BENCH_HEAP:-8g}"
 BENCH_FLAGS="${BENCH_FLAGS:---log-requests}"
+# The appends step's flags (AzureAppendSpike), on top of its defaults
+APPENDS_ARGS="${APPENDS_ARGS:-}"
 FLEET="${FLEET:-false}"
 # How long `wait` waits on a VM it cannot reach before it gives up on it (minutes)
 WAIT_UNREACHABLE_MIN="${WAIT_UNREACHABLE_MIN:-60}"
@@ -232,7 +235,7 @@ write_env() {
       FORK_REPO "$FORK_REPO" FORK_COMMIT "$FORK_COMMIT" FORK_BASE_TAG "$FORK_BASE_TAG" \
       BENCH_COMMIT "$bench" SPIKE_COMMIT "$spike" SPIKE_REPS "$SPIKE_REPS" \
       CONFIGS "$configs" BENCH_REPS "$BENCH_REPS" BENCH_HEAP "$BENCH_HEAP" \
-      BENCH_FLAGS "$BENCH_FLAGS"
+      BENCH_FLAGS "$BENCH_FLAGS" APPENDS_ARGS "$APPENDS_ARGS"
     case "$CLOUD" in
       aws) printf '%s=%q\n' AWS_REGION "$(infra_out region)" S3_EXPRESS_BUCKET "$(infra_out bucket)" ;;
       azure) printf '%s=%q\n' AZURE_ACCOUNT "$(infra_out account)" \
