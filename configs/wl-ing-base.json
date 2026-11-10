@@ -1,0 +1,65 @@
+{
+  "label": "wl-ing-base",
+  "store": {
+    "type": "local",
+    "root": "store",
+    "fsync": false
+  },
+  "warmup": {
+    "batches": 3,
+    "initialRows": 1000000
+  },
+  "workload": {
+    "seed": 1,
+    "initialRows": 25685000,
+    "batches": 30,
+    "opsPerBatch": 350000,
+    "insertFrac": 1.0,
+    "updateFrac": 0.0,
+    "deleteFrac": 0.0,
+    "keyDist": "REGIONS",
+    "regionRows": 513700,
+    "regionSkew": 1.0,
+    "updateShare": 0.03,
+    "lateMedianBatches": 0.05,
+    "lateP99Batches": 5,
+    "initialJitterRows": 0
+  },
+  "layout": {
+    "codec": "zstd",
+    "rowGroupBytes": 16777216,
+    "targetFileBytes": 134217728,
+    "tailSealBytes": 16777216,
+    "locate": "keys",
+    "writerSkipsDeadRowGroups": true,
+    "updateRead": "row"
+  },
+  "arms": [
+    "mor-v3",
+    "rmor-c-kept",
+    "rmow-c"
+  ],
+  "reads": {
+    "every": 5,
+    "recentFraction": 0.01,
+    "travelBack": 1000,
+    "windows": {
+      "by": [
+        "ts"
+      ],
+      "count": 5,
+      "fraction": 0.01
+    },
+    "readers": [
+      {
+        "name": "cached-skip",
+        "footerCache": true,
+        "deleteCache": true,
+        "footerPrefetchBytes": 65536,
+        "skipDeadRowGroups": true,
+        "sortedRead": true
+      }
+    ]
+  },
+  "verifyRows": false
+}

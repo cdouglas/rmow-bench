@@ -1,0 +1,12 @@
+{
+  "description": "The two workloads' main configurations (the windows campaign's, labelled wl-*), the references for their cloud run: the locate pruned by each changed key (layout.locate keys) and the sorted read skipping dead row groups, read through the skipping reader alone, with no reads of old versions. Payload checks off, requests and held memory logged. The laptop runs the same configurations for instructions.",
+  "flags": ["--log-requests", "--log-held"],
+  "cores_per_job": 3,
+  "jobs": [
+    {"config": "configs/wl-upd-base.json", "heap": "16g", "store_gib": 40},
+    {"config": "configs/wl-upd-compact.json", "heap": "16g", "store_gib": 20},
+    {"config": "configs/wl-ing-base.json", "heap": "16g", "store_gib": 30},
+    {"config": "configs/wl-ing-compact.json", "heap": "16g", "store_gib": 20},
+    {"config": "configs/wl-ing-seal160.json", "heap": "16g", "store_gib": 30}
+  ]
+}
