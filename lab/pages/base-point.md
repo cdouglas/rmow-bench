@@ -11,7 +11,7 @@ title: The base point on S3 Express and Azure
 
 import altair as alt
 import pandas as pd
-from labbook import figures_module, table, theme
+from labbook import figures_module, q, table, theme
 theme()
 fig = figures_module()
 
@@ -31,6 +31,14 @@ def spliced(fn, runs=RUNS, rmor=RMOR, **kw):
     """fn over the pinned runs, with RMoR's rows from its own runs"""
     return fig.rmor_spliced(fn(runs, key="store", **kw), fn(rmor, key="store", **kw))
 
+
+# MB a write of MoR's reads in the S3 Express run, against MoR's at this setting once it reads the
+# rows its updates replace (`updateRead` `row`; campaign mor-row, havoc)
+mor_mb = q("""SELECT r.label = 'mor-row-base' AS update_read, avg(s.bytes_read) / 1e6 AS mb
+              FROM steps s JOIN canonical_runs r USING (run_id)
+              WHERE s.arm = 'mor-v3' AND s.phase = 'batch' AND s.step >= 1
+                AND (r.label = 'mor-row-base' OR r.run_id = $run)
+              GROUP BY 1""", run=RUNS[S3X]).set_index("update_read").mb
 
 # each design's mean write and full read (s), and what it sent and moved; `every` has the
 # appendix's two variants too. RMoR's are over the MoR of its own run (`own`)
@@ -117,6 +125,17 @@ noskip_over = noskip / times[(times.design == "RMoR") & (times.what == READ)].se
 tail = fig.over_mor(every[every.design.isin(["MoR", "TailCoW"])], KEYS).set_index(
     ["store", "what"]).over_mor
 ```
+
+:::{note} Calibration: the first cloud measurement, superseded as the results
+This is the base point as first measured in the cloud (2026-10-31 and 11-01), kept for the record
+and for the model's check ([The model on the cloud base point](./base-point-model.md)). Its
+workload mixes inserts and updates, and its MoR does not read the rows its updates replace, as
+later runs do: with that read, MoR's write at this setting reads
+{eval}`f"{mor_mb[True]:.0f}"` MB where it read {eval}`f"{mor_mb[False]:.0f}"` here, so the ratios
+below overstate what the region designs' writes cost against MoR's. The results are now
+[Updates and inserts: writes against reads](./workloads.md), simulated at the current build, until
+a cloud run of those workloads measures them.
+:::
 
 What each design costs a writer and a reader of one table on two object stores, S3 Express and
 Azure Blob, written and read with the Parquet code Spark uses for an Iceberg table.

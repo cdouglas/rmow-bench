@@ -12,7 +12,7 @@ title: The sweeps on S3 Express and Azure
 import altair as alt
 import numpy as np
 import pandas as pd
-from labbook import figures_module, table, theme
+from labbook import figures_module, q, table, theme
 theme()
 fig = figures_module()
 
@@ -31,6 +31,14 @@ def spliced(fn, **kw):
     """fn over every pinned run, with RMoR's rows from its own runs"""
     return fig.rmor_spliced(fig.cs_frame(fn, RUNS, **kw), fig.cs_frame(fn, RMOR, **kw))
 
+
+# MB a write MoR reads at each setting once it reads the rows its updates replace (`updateRead`
+# `row`; campaign mor-row, havoc), which these runs' MoR does not
+mor_row_mb = q("""SELECT r.label, avg(s.bytes_read) / 1e6 AS mb
+                  FROM steps s JOIN canonical_runs r USING (run_id)
+                  WHERE list_contains(r.campaigns, 'mor-row') AND s.arm = 'mor-v3'
+                    AND s.phase = 'batch' AND s.step >= 1
+                  GROUP BY 1""").set_index("label").mb
 
 # each design's mean write and full read (s), and what it sent and moved, per store and setting;
 # `every` has the appendix's two variants too. RMoR's are over the MoR of its own run (`own`)
@@ -145,6 +153,17 @@ noskip_grow = (_n.last_s / _n.first_s).max()
 tail = fig.over_mor(every[every.design.isin(["MoR", "TailCoW"])], KEYS)
 tail_g = tail.groupby(["store", "what"]).over_mor
 ```
+
+:::{note} Calibration: the sweeps' first cloud measurement, superseded as results
+These are the sweeps as first measured in the cloud (2026-11-01), kept for the record and for the
+model's check ([the model on the sweeps](./cloud-sweep-model.md)). Their workload mixes inserts and
+updates, and their MoR does not read the rows its updates replace, as later runs do: with that
+read, MoR's write reads {eval}`f"{mor_row_mb.min():.0f}"`–{eval}`f"{mor_row_mb.max():.0f}"` MB at
+these settings (havoc's runs of MoR alone, campaign `mor-row`), so the ratios below overstate what
+the region designs' writes cost against MoR's. The results are now
+[Updates and inserts: writes against reads](./workloads.md), simulated at the current build, until
+a cloud run of those workloads measures them.
+:::
 
 How each design's trade-off between writing and reading moves as the workload and the layout
 change, measured on S3 Express and Azure Blob. From the base point, one setting changes at a time:

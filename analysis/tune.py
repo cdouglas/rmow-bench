@@ -242,7 +242,10 @@ def prices(con, runs):
     return pd.concat(out)
 
 
-def policies(con, workload, formula, ns, measured):
+def steps(con, workload, formula, ns, measured):
+    """Simulated time per store, run, arm, step and priced phase (a write, a compaction and each
+    read of READS under its reader): `ms` = the work (`work`) plus the requests priced by size
+    (`prices`)."""
     runs = con.sql(f"""SELECT run_id, label FROM canonical_runs
                        WHERE {GRID} AND host = 'havoc' AND status = 'finished' AND {WORKLOADS[workload]}""").df()
     w = work(con, list(runs.run_id), formula, ns, measured)
@@ -251,8 +254,16 @@ def policies(con, workload, formula, ns, measured):
     priced = d.phase.isin(["batch", "compact"])
     for phase, reader in READS.values():
         priced |= (d.phase == phase) & (d.reader == reader)
-    d = d[priced]
+    d = d[priced].copy()
     d["ms"] = d.work_ms + d.request_ms
+    return d
+
+
+def policies(con, workload, formula, ns, measured, d=None):
+    """Each policy's mean write (with its compactions spread over its writes) and reads, per store,
+    over `steps` (or `d`, its result, when given)."""
+    if d is None:
+        d = steps(con, workload, formula, ns, measured)
     rows = []
     for (store, label, arm), g in d.groupby(["store", "label", "arm"]):
         writes = g[(g.phase == "batch") & (g.step >= 1)]

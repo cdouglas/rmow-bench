@@ -402,8 +402,8 @@ cost of copying whole row groups, not a steady state.
 :class: col-page-right
 
 alt.Chart(T).mark_point(filled=True, size=90).encode(
-    x=alt.X("write_s:Q", scale=alt.Scale(type="log"), title="s a write (simulated)"),
-    y=alt.Y("window_s:Q", scale=alt.Scale(type="log"), title="s a 1% window (simulated)"),
+    x=alt.X("write_s:Q", scale=alt.Scale(type="log"), title="write latency (s)"),
+    y=alt.Y("window_s:Q", scale=alt.Scale(type="log"), title="1% window read latency (s)"),
     color=alt.Color("design:N", scale=COLOR),
     tooltip=["design", "store", "writes", alt.Tooltip("write_s:Q", format=".2f"),
              alt.Tooltip("window_s:Q", format=".2f"), alt.Tooltip("full_s:Q", format=".1f")],
@@ -413,7 +413,7 @@ alt.Chart(T).mark_point(filled=True, size=90).encode(
 ```{code-cell} ipython3
 :tags: [remove-input]
 
-table(T.round(2), caption="Simulated seconds: a write over the writes named (of which its "
+table(T.round(2), caption="Simulated latency (s): a write over the writes named (of which its "
       "requests, `write_store_s`), and a window and a full read at the last write")
 ```
 

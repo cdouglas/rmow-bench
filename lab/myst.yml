@@ -5,8 +5,9 @@ extends: _build/labbook/myst.yml
 project:
   title: rmow-bench results
   # The run catalog and the pages that browse runs, then the experiments in three kinds:
-  # results measured on the cloud stores, as a paper would show them; calibration, which tuned
-  # the benchmark and its model; and decisions, the data behind a fork in the implementation
+  # results, as a paper would show them (measured on the cloud stores, or simulated where the page
+  # says so); calibration, which tuned the benchmark and its model; and decisions, the data behind
+  # a fork in the implementation
   toc:
     - file: index.md
     - file: pages/experiments.md
@@ -14,12 +15,12 @@ project:
     - title: Results
       children:
         - file: pages/workloads.md
-        - file: pages/base-point.md
-        - file: pages/cloud-sweep.md
         - file: pages/reader-changes.md
     - title: Calibration
       children:
+        - file: pages/base-point.md
         - file: pages/base-point-model.md
+        - file: pages/cloud-sweep.md
         - file: pages/cloud-sweep-model.md
         - file: pages/rmor-rerun.md
         - file: pages/cloud.md

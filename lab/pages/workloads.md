@@ -26,15 +26,22 @@ train = tune.records(con, tune.TRAIN.replace("campaigns", "r.campaigns").replace
 formula = tune.Formula(train)
 ns = tune.pace(con)
 tune.WORKLOADS["ing_all"] = "regexp_matches(label, '^(win-ing-|tune-ing-)')"
-P = pd.concat([tune.policies(con, "upd", formula, ns, True), tune.policies(con, "ing_all", formula, ns, True)])
+SU, SI = (tune.steps(con, wl, formula, ns, True) for wl in ("upd", "ing_all"))
+P = pd.concat([tune.policies(con, "upd", formula, ns, True, SU), tune.policies(con, "ing_all", formula, ns, True, SI)])
 STORES = ["S3 Express", "Azure Blob"]
 S3X, AZ = STORES
 P["Store"] = P.store.map({"s3x": S3X, "azure": AZ})
+# each write's, compaction's and read's simulated time (s), for the whiskers and the snapshots
+S = pd.concat([SU, SI])
+S["Store"] = S.store.map({"s3x": S3X, "azure": AZ})
+S["s"] = S.ms / 1e3
 
 COLOR = {"MoR": "#2a78d6", "RMoR": "#eda100", "RMoW-external": "#008300", "RMoW-append": "#1baf7a",
          "deferred merges": "#b8478f", "appending": "#5f6b75"}
 SHAPE = {"MoR": "circle", "RMoR": "triangle-up", "RMoW-external": "square", "RMoW-append": "diamond",
          "deferred merges": "triangle-down", "appending": "circle"}
+# a main point's own color where two share a family (MoR and MoR compacted, in the snapshots)
+NCOLOR = {"MoR compacted": "#7fb2ea"}
 
 # (configuration, arm, family, curve it lies on, its knob's value, its name if a main point, order on
 # the curve). A curve runs through one family's settings of one knob.
@@ -67,6 +74,26 @@ ING = [
 ]
 
 
+def whiskers():
+    """Per store, configuration and arm: the 10th and 90th percentile of its writes (with its
+    compactions spread over them, as its mean has), and its fastest and slowest read of each kind
+    over the probes after 5 to 30 writes (s)."""
+    rows = []
+    for (store, label, arm), g in S.groupby(["Store", "label", "arm"]):
+        w = g[(g.phase == "batch") & (g.step >= 1)]
+        c = g[g.phase == "compact"].s.sum() / w.step.nunique()
+        row = dict(Store=store, label=label, arm=arm, write_lo=w.s.quantile(0.1) + c,
+                   write_hi=w.s.quantile(0.9) + c)
+        for kind, (phase, reader) in tune.READS.items():
+            r = g[(g.phase == phase) & (g.reader == reader) & (g.step >= 5)].s
+            row[f"{kind}_s_lo"], row[f"{kind}_s_hi"] = (r.min(), r.max()) if len(r) else (np.nan, np.nan)
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+W = whiskers()
+
+
 def frame(spec):
     rows = []
     for label, arm, family, curve, knob, name, order in spec:
@@ -75,7 +102,7 @@ def frame(spec):
                              name=name or "", main=name is not None, order=order,
                              write_s=(r.write_ms + r.compact_ms) / 1e3, compact_s=r.compact_ms / 1e3,
                              window_s=r.window_ms / 1e3, full_s=r.full_ms / 1e3, sorted_s=r.sorted_ms / 1e3))
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows).merge(W, on=["Store", "label", "arm"], how="left")
 
 
 U, I = frame(UPD), frame(ING)
@@ -102,47 +129,114 @@ READ = {"window_s": "a range read (1% of the table)", "full_s": "a full scan", "
 
 
 def tradeoff(d, reads, place, width=300, height=220):
-    """Seconds a write (compactions spread over the writes) against seconds a read, a panel per kind
+    """Write latency (compactions spread over the writes) against read latency, a panel per kind
     of read and a row per store; each family's settings of one knob joined in order. The designs
-    are named in the first panel, each placed by `place` (name: (align, dy))."""
+    are named in the first panel, each placed by `place` (name: (align, dy[, dx]), or a dict of
+    them by store), and carry whiskers:
+    across, their writes' 10th to 90th percentile; up, their fastest to slowest read."""
     L = d.melt(id_vars=[c for c in d.columns if c not in READ], value_vars=reads,
                var_name="kind", value_name="read_s")
     L["read"] = L.kind.map(READ)
-    L["place"] = [f"{place[n][0]} {place[n][1]}" if n in place and k == reads[0] else ""
-                  for n, k in zip(L.name, L.kind)]
+    L["read_lo"] = [r[f"{r['kind']}_lo"] for r in L.to_dict("records")]
+    L["read_hi"] = [r[f"{r['kind']}_hi"] for r in L.to_dict("records")]
+    def at_(n, st):
+        p = place[n]
+        return p.get(st, p.get("*")) if isinstance(p, dict) else p
+    L["place"] = [" ".join(str(x) for x in at_(n, st)) if n in place and k == reads[0] else ""
+                  for n, k, st in zip(L.name, L.kind, L.Store)]
     fams = [f for f in COLOR if f in set(L.family) | set(L.curve)]
     legend = alt.Legend(title=None, orient="bottom", direction="horizontal")
     color = alt.Color("family:N", legend=legend, scale=alt.Scale(domain=fams, range=[COLOR[f] for f in fams]))
     lcolor = alt.Color("curve:N", legend=legend, scale=alt.Scale(domain=fams, range=[COLOR[f] for f in fams]))
     shape = alt.Shape("family:N", legend=legend, scale=alt.Scale(domain=fams, range=[SHAPE[f] for f in fams]))
-    x = alt.X("write_s:Q", title="seconds a write, with its compactions",
-              scale=alt.Scale(domain=[0, 1.18 * L.write_s.max()], nice=False))
-    y = alt.Y("read_s:Q", title="seconds a read", scale=alt.Scale(zero=True))
+    xs = alt.Scale(domain=[0, max(1.18 * L.write_s.max(), 1.04 * L[L.main].write_hi.max())], nice=False)
+    x = alt.X("write_s:Q", title="write latency (s)", scale=xs)
+    y = alt.Y("read_s:Q", title="read latency (s)", scale=alt.Scale(zero=True))
     tip = ["Store", "family", "knob", "name", alt.Tooltip("write_s:Q", format=".2f"),
            alt.Tooltip("compact_s:Q", format=".2f"), "read", alt.Tooltip("read_s:Q", format=".2f")]
     line = alt.Chart().transform_filter(alt.datum.curve != "").mark_line(strokeWidth=1.5, opacity=0.55).encode(
         x=x, y=y, color=lcolor, detail="curve:N", order="order:Q")
     small = alt.Chart().transform_filter(~alt.datum.main).mark_point(size=28, filled=True, opacity=0.8).encode(
         x=x, y=y, color=color, shape=shape, tooltip=tip)
+    across = alt.Chart().transform_filter(alt.datum.main).mark_rule(strokeWidth=1.5, opacity=0.6).encode(
+        x=alt.X("write_lo:Q", title="write latency (s)", scale=xs), x2="write_hi:Q", y=y, color=color)
+    up = alt.Chart().transform_filter(alt.datum.main).mark_rule(strokeWidth=1.5, opacity=0.6).encode(
+        x=x, y=alt.Y("read_lo:Q", title="read latency (s)", scale=alt.Scale(zero=True)), y2="read_hi:Q",
+        color=color)
     big = alt.Chart().transform_filter(alt.datum.main).mark_point(
         size=110, filled=True, opacity=1, stroke="white", strokeWidth=0.8).encode(
         x=x, y=y, color=color, shape=shape, tooltip=tip)
     labels = []
     for p in sorted(set(L.place) - {""}):
-        align, dy = p.split()
+        align, dy, *dx = p.split()
+        dx = int(dx[0]) if dx else (8 if align == "left" else -8)
         labels.append(alt.Chart().transform_filter(alt.datum.place == p).mark_text(
-            align=align, dx=8 if align == "left" else -8, dy=int(dy), fontSize=11, fontWeight="bold").encode(
+            align=align, dx=dx, dy=int(dy), fontSize=11, fontWeight="bold").encode(
             x=x, y=y, text="name:N", color=color))
-    return alt.layer(line, small, big, *labels, data=L).properties(width=width, height=height).facet(
+    return alt.layer(line, across, up, small, big, *labels, data=L).properties(width=width, height=height).facet(
         row=alt.Row("Store:N", sort=STORES, title=None),
         column=alt.Column("read:N", sort=[READ[r] for r in reads], title=None)).resolve_scale(y="independent")
 
 
-def twin(d):
-    t = d[["Store", "family", "knob", "name", "label", "arm", "write_s", "compact_s", "window_s", "full_s",
-           "sorted_s"]].copy()
+def twin(d, reads=("window_s", "full_s", "sorted_s")):
+    t = d[["Store", "family", "knob", "name", "label", "arm", "write_s", "write_lo", "write_hi", "compact_s",
+           *[c for r in reads for c in (r, f"{r}_lo", f"{r}_hi")]]].copy()
     t["_s"] = t.Store.map(STORES.index)
     return t.sort_values(["_s", "family", "order" if "order" in t else "write_s"]).drop(columns="_s").round(3)
+
+
+def snapshots(spec, reads):
+    """Each design's (main point's) simulated time at every write, compaction and read probe."""
+    rows = []
+    for label, arm, family, curve, knob, name, order in spec:
+        if name is None:
+            continue
+        g = S[(S.label == label) & (S.arm == arm)]
+        parts = [g[(g.phase == "batch") & (g.step >= 1)].assign(what="a write"),
+                 g[g.phase == "compact"].assign(what="a compaction")]
+        for r in reads:
+            phase, reader = tune.READS[r[:-2]]
+            parts.append(g[(g.phase == phase) & (g.reader == reader)].assign(what=READ[r]))
+        rows += [x.assign(name=name, family=family)[["Store", "name", "family", "what", "step", "s"]] for x in parts]
+    return pd.concat(rows, ignore_index=True)
+
+
+def snapshot_chart(d, reads, width=300, height=150):
+    """Lines over the snapshots: write latency at every write (a compaction a cross at its write),
+    and each kind of read's latency at every probe; a column per store."""
+    names = list(dict.fromkeys(d.name))
+    fam = d.drop_duplicates("name").set_index("name").family
+    color = alt.Color("name:N", title=None, sort=names, legend=alt.Legend(orient="bottom"),
+                      scale=alt.Scale(domain=names, range=[NCOLOR.get(n, COLOR[fam[n]]) for n in names]))
+    shape = alt.Shape("name:N", title=None, sort=names,
+                      scale=alt.Scale(domain=names, range=[SHAPE[fam[n]] for n in names]))
+    x = alt.X("step:Q", title="snapshots (writes since the initial load)",
+              scale=alt.Scale(domain=[0, 30], nice=False), axis=alt.Axis(values=list(range(0, 31, 5))))
+    tip = ["Store", "name", "what", "step", alt.Tooltip("s:Q", format=".2f")]
+
+    def graph(what, title, ytitle, size):
+        y = alt.Y("s:Q", title=ytitle, scale=alt.Scale(zero=True))
+        line = alt.Chart().transform_filter(alt.datum.what == what).mark_line(
+            strokeWidth=2, point=alt.OverlayMarkDef(size=size)).encode(
+            x=x, y=y, color=color, shape=shape, detail="name:N", tooltip=tip)
+        layers = [line]
+        if what == "a write" and (d.what == "a compaction").any():
+            layers.append(alt.Chart().transform_filter(alt.datum.what == "a compaction").mark_point(
+                shape="cross", filled=True, size=90, opacity=1).encode(x=x, y=y, color=color, tooltip=tip))
+        return (alt.layer(*layers, data=d).properties(width=width, height=height)
+                .facet(column=alt.Column("Store:N", title=None, sort=STORES))
+                .properties(title=alt.Title(title, anchor="start")))
+
+    return alt.vconcat(graph("a write", "A write", "write latency (s)", 18),
+                       *[graph(READ[r], READ[r][0].upper() + READ[r][1:], "read latency (s)", 50) for r in reads])
+
+
+def snapshot_table(d, what):
+    t = d[d.what == what].pivot_table(index="step", columns=["Store", "name"], values="s")
+    names = list(dict.fromkeys(d.name))
+    t = t.reindex(columns=[(st, n) for st in STORES for n in names if (st, n) in t.columns])
+    t.columns = [f"{st}: {n}" for st, n in t.columns]
+    return table(t.reset_index().round(2), caption=f"{what[0].upper() + what[1:]}: simulated latency (s) at each snapshot")
 
 
 # Where the time goes: the laptop's CPU split by kind (phase_breakdown, the phase's own thread) applies
@@ -250,6 +344,34 @@ def u(label, arm, col, s=S3X):
 
 def i_(label, arm, col, s=S3X):
     return v(I, s, label, arm, col)
+
+
+# each design's latency at every write, compaction and read (the snapshot sections)
+SNU = snapshots(UPD, ["window_s", "full_s"])
+
+
+def at(d, name, what, step, store=S3X):
+    return d[(d.Store == store) & (d.name == name) & (d.what == what) & (d.step == step)].s.iloc[0]
+
+
+def avg_write(d, name, first, last, store=S3X):
+    w = d[(d.Store == store) & (d.name == name) & (d.what == "a write") & d.step.between(first, last)]
+    return w.s.mean()
+
+
+def reads_of(d, name, what, store=S3X):
+    return d[(d.Store == store) & (d.name == name) & (d.what == what)].sort_values("step").s
+
+
+SNI = snapshots(ING, ["window_s", "sorted_s"])
+IN = [s[5] for s in ING if s[5]]
+
+
+def seal_writes(name, store=S3X):
+    """A sealed tail's ordinary write (s), its write that merges (s), and those writes' steps."""
+    w = SNI[(SNI.Store == store) & (SNI.name == name) & (SNI.what == "a write")]
+    slow = w.s > 2 * w.s.median()
+    return w[~slow].s.mean(), w[slow].s.mean(), sorted(w[slow].step)
 ```
 
 ## What it shows
@@ -275,6 +397,10 @@ def i_(label, arm, col, s=S3X):
   {eval}`f"{v(P.assign(write_s=P.write_ms), S3X, 'tune-upd-rg32m', 'rmow-c', 'write_s') / v(P.assign(write_s=P.write_ms), S3X, 'tune-upd-rg4m', 'rmow-c', 'write_s'):.1f}"`
   times from 4 to 32 MiB. Iceberg's default, 128 MiB, and copying parts of row groups are not
   tested here.
+- **Over 30 writes MoR slows and the region designs do not:** on the updates MoR's write and range
+  read grow as its deletes pile up (its range read
+  {eval}`f"{at(SNU, 'MoR', READ['window_s'], 30) / at(SNU, 'MoR', READ['window_s'], 5):.1f}"` times as
+  long after 30 writes as after 5 on S3 Express), while RMoW-append's stay level.
 - **Where the time goes:** a region design's write is mostly encoding the row groups it copies,
   MoR's mostly finding the rows to delete and the store; reads are mostly the store.
 
@@ -312,7 +438,7 @@ laptop's speed, plus its requests priced by size from a latency test of the stor
 a `c7a.4xlarge` in usw2-az3, Azure Blob on a `D8as_v6` in westus). A cloud run of seven of these
 policies came within 3% of this on S3 Express once CPU was priced at the cloud VM's speed, which
 is slower than the laptop's; at the laptop's speed, as here, S3 Express times run 4–12% low
-({doc}`tune-cloud`).
+([the tuner's picks in the cloud](./tune-cloud.md)).
 
 ```{code-cell} ipython3
 :tags: [remove-input]
@@ -328,12 +454,15 @@ table(runs)
 :class: col-page-right
 
 tradeoff(U, ["window_s", "full_s"], {
-    "MoR": ("left", -10), "MoR compacted": ("right", 0), "deferred merges": ("right", 14),
+    "MoR": ("left", -10), "MoR compacted": ("right", 0),
+    "deferred merges": {"*": ("right", 14), AZ: ("right", 30, -24)},
     "RMoW-append": ("right", -10), "RMoW-external": ("right", 14), "RMoR": ("left", -10)})
 ```
 
-Each design's seconds a write (with its compactions spread over the writes) against seconds a
-read, simulated. The large marks are the designs. MoR's line runs from never compacted through
+Each design's write latency (with its compactions spread over the writes) against its read
+latency, simulated. The large marks are the designs, each with whiskers: across, from its 10th to
+its 90th percentile write; up, from its fastest to its slowest read over the reads after 5 to 30
+writes. MoR's line runs from never compacted through
 compaction every 12, 10 (the large mark), 6 and 3 writes; the deferred merges' from θ 1 (never
 merging) through 0.5, 0.25 and 0.12 to 0.06 (the large mark). The sorted read is left out here
 (Limits).
@@ -341,7 +470,8 @@ merging) through 0.5, 0.25 and 0.12 to 0.06 (the large mark). The sorted read is
 ```{code-cell} ipython3
 :tags: [remove-input]
 
-table(twin(U).drop(columns="sorted_s"))
+table(twin(U, ("window_s", "full_s")), caption="Simulated latency (s): the mean write (with compactions spread "
+      "over the writes), its 10th and 90th percentiles (`_lo`, `_hi`), and each read's mean, fastest and slowest")
 ```
 
 ```{code-cell} ipython3
@@ -394,6 +524,59 @@ dz1 = {s: dz[(dz.Store == s) & (dz.knob == "θ 1")].iloc[0] for s in STORES}
   yet they read a range in {eval}`f2(dz1[S3X].window_s)` s against MoR's
   {eval}`f2(rd(S3X, B_, "mor-v3", "window_s"))`, for {eval}`f1(dz1[S3X].write_s)` s a write: the gain
   comes from the new versions waiting in a delta row group per region, not from merging.
+
+### Updates: latency as snapshots are added
+
+```{code-cell} ipython3
+:label: workloads-updates-snapshots
+:tags: [remove-input]
+:class: col-page-right
+
+snapshot_chart(SNU, ["window_s", "full_s"])
+```
+
+Each design's simulated write latency at every write, its compactions (crosses, compacted MoR's
+every 10 writes, not in its line), and its read latency after every 5 writes. Each graph has one
+latency axis for both stores.
+
+```{code-cell} ipython3
+:tags: [remove-input, hide-output]
+
+snapshot_table(SNU, "a write")
+```
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+snapshot_table(SNU, READ["window_s"])
+```
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+snapshot_table(SNU, READ["full_s"])
+```
+
+- **MoR slows as its deletes pile up, in its writes and its reads.** On S3 Express its write takes
+  {eval}`f1(avg_write(SNU, "MoR", 1, 10))` s on average over the first 10 writes and
+  {eval}`f1(avg_write(SNU, "MoR", 21, 30))` over the last 10, and its range read
+  {eval}`f2(at(SNU, "MoR", READ["window_s"], 5))` s after 5 writes and
+  {eval}`f2(at(SNU, "MoR", READ["window_s"], 30))` after 30 (on Azure
+  {eval}`f2(at(SNU, "MoR", READ["window_s"], 5, AZ))` and {eval}`f2(at(SNU, "MoR", READ["window_s"], 30, AZ))`).
+  Compacting every 10 writes keeps its range read between
+  {eval}`f2(reads_of(SNU, "MoR compacted", READ["window_s"]).min())` and
+  {eval}`f2(reads_of(SNU, "MoR compacted", READ["window_s"]).max())` s, for a compaction that grows with
+  the table: {eval}`", ".join(f2(x) for x in reads_of(SNU, "MoR compacted", "a compaction"))` s after
+  writes 10, 20 and 30.
+- **The region designs stay level:** RMoW-append's write takes
+  {eval}`f1(avg_write(SNU, "RMoW-append", 1, 10))` and {eval}`f1(avg_write(SNU, "RMoW-append", 21, 30))` s
+  over the first and last 10 writes, and its range read
+  {eval}`span(reads_of(SNU, "RMoW-append", READ["window_s"]))` s throughout. The deferred merges climb
+  as MoR does ({eval}`f1(avg_write(SNU, "deferred merges", 1, 10))` to
+  {eval}`f1(avg_write(SNU, "deferred merges", 21, 30))` s a write, a range read from
+  {eval}`f2(at(SNU, "deferred merges", READ["window_s"], 5))` to
+  {eval}`f2(at(SNU, "deferred merges", READ["window_s"], 30))` s), as more of their changes wait in
+  deletion vectors and delta row groups.
 
 ## 2. Updates: where the time goes
 
@@ -465,8 +648,8 @@ tradeoff(I, ["window_s", "sorted_s"], {
     "MoR compacted": ("left", 14)})
 ```
 
-Seconds a write against seconds a read on the inserts (99% within 5 writes late), simulated.
-Appending alone (any design); MoR's line runs from appending through compaction every 12, 10 (the
+Write latency against read latency on the inserts (99% within 5 writes late), simulated, with
+whiskers as on the updates. Appending alone (any design); MoR's line runs from appending through compaction every 12, 10 (the
 large mark), 6 and 3 writes; RMoR's tail sealed at 160 MiB merging 4 units at a time (the large
 mark; small marks: 8, 2, or sealed at 256 MiB); RMoW-append's sealed at 160 MiB. A full scan takes
 about the same in every policy (table below).
@@ -474,7 +657,7 @@ about the same in every policy (table below).
 ```{code-cell} ipython3
 :tags: [remove-input]
 
-table(twin(I))
+table(twin(I), caption="Simulated latency (s), as in the updates' table")
 ```
 
 ```{code-cell} ipython3
@@ -527,7 +710,7 @@ ls = alt.Shape("policy:N", title=None, sort=LP,
                scale=alt.Scale(domain=LP, range=[SHAPE["appending"], SHAPE["MoR"], SHAPE["RMoR"], SHAPE["RMoW-append"]]))
 lx = alt.X("lateness:Q", title="lateness, p99 (writes)", scale=alt.Scale(type="log", domain=[0.8, 25]),
            axis=alt.Axis(values=[1, 5, 20], format="~g"))
-ly = alt.Y("range_read_s:Q", title="seconds a range read", scale=alt.Scale(zero=True))
+ly = alt.Y("range_read_s:Q", title="range read latency (s)", scale=alt.Scale(zero=True))
 lb = alt.Chart().encode(x=lx, y=ly, color=lc)
 alt.layer(lb.mark_line(strokeWidth=1.5, opacity=0.6),
           lb.mark_point(size=80, filled=True, opacity=1).encode(
@@ -560,6 +743,53 @@ def lt(s, policy, late):
   rows widen every row group's event-time range.
 - **RMoR's seal holds at every lateness:** {eval}`f2(lt(S3X, "RMoR sealed", 1))`,
   {eval}`f2(lt(S3X, "RMoR sealed", 5))` and {eval}`f2(lt(S3X, "RMoR sealed", 20))` s.
+
+### Inserts: latency as snapshots are added
+
+```{code-cell} ipython3
+:label: workloads-inserts-snapshots
+:tags: [remove-input]
+:class: col-page-right
+
+snapshot_chart(SNI, ["window_s", "sorted_s"])
+```
+
+Each merge policy's simulated write latency at every write, its compactions (crosses), and its
+read latency after every 5 writes, at lateness p99 5.
+
+```{code-cell} ipython3
+:tags: [remove-input, hide-output]
+
+snapshot_table(SNI, "a write")
+```
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+snapshot_table(SNI, READ["window_s"])
+```
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+snapshot_table(SNI, READ["sorted_s"])
+```
+
+- **Unmerged, a range read slows with every write:** appending's takes
+  {eval}`f2(at(SNI, "appending", READ["window_s"], 5))` s after 5 writes and
+  {eval}`f2(at(SNI, "appending", READ["window_s"], 30))` after 30 on S3 Express, as late rows widen
+  more row groups' event-time ranges. With RMoR's seal it goes from
+  {eval}`f2(at(SNI, "RMoR sealed", READ["window_s"], 5))` to
+  {eval}`f2(at(SNI, "RMoR sealed", READ["window_s"], 30))` s; compacted MoR's drops back after each
+  compaction, to {eval}`", ".join(f2(at(SNI, "MoR compacted", READ["window_s"], k)) for k in (10, 20, 30))` s
+  after writes 10, 20 and 30, for {eval}`span(reads_of(SNI, "MoR compacted", "a compaction"), "{:.1f}")` s a
+  compaction.
+- **A seal makes one write in four slow:** RMoR's sealed tail writes in
+  {eval}`f2(seal_writes("RMoR sealed")[0])` s, and in {eval}`f2(seal_writes("RMoR sealed")[1])` s at
+  writes {eval}`", ".join(str(k) for k in seal_writes("RMoR sealed")[2])`, when four units merge.
+- **The sorted read slows in every policy**, from
+  {eval}`span([at(SNI, n, READ["sorted_s"], 5) for n in IN], "{:.1f}")` s after 5 writes to
+  {eval}`span([at(SNI, n, READ["sorted_s"], 30) for n in IN], "{:.1f}")` s after 30 on S3 Express.
 
 ## 4. Inserts: where the time goes
 
@@ -635,7 +865,7 @@ alt.layer(rb.mark_line(strokeWidth=1.5, opacity=0.6),
 ```
 
 RMoW-append and the deferred merges (θ 0.06) on the updates at four row-group sizes, simulated:
-seconds a write, a range read and a full scan.
+the latency of a write, a range read and a full scan.
 
 ```{code-cell} ipython3
 :tags: [remove-input]
