@@ -533,10 +533,25 @@ lower.
   groups came out 19–44% low). Train on a row-group sweep, or count row groups read per phase.
 - [ ] **A writer that tunes itself**: the same prices could drive the writer, merging a row group
   when the reads expected before it next changes cost more than rewriting it.
-- [ ] **The write-up of the two workloads** (`split`, `seal`, `windows`) as a lab page, with the
-  write and read time breakdown simulated from the laptop's work. `sized_latency`
-  (lab/views/65_sized.sql) prices only writes and the full, newest and old reads: it needs
-  `read_window` and `read_sorted`, whose five or one records a probe it must average.
+- [x] **The write-up of the two workloads** (`split`, `seal`, `windows`; 2026-11-09,
+  [lab/pages/workloads.md](../lab/pages/workloads.md), Results). Simulated, at 16 MiB row groups:
+  each design's write against its range read and full scan, the inserts as a choice of when to
+  merge late rows, where the time goes, and row groups of 4 to 32 MiB. The updates' sorted read is
+  left out: it ran only under `cached`, which reads dead row groups, so it charges RMoR and the
+  deferred merges for the row groups they copied out (RMoR reads 3.4 times its live bytes).
+- [ ] **A sorted read that skips dead row groups**: `read_sorted` runs only under `cached`; a run
+  under `cached-skip` would make the updates' sorted read fair to RMoR and the deferred merges.
+- [ ] **The density hypothesis at Iceberg's row-group size** (raised by the user 2026-11-09): use
+  the deletion vector's share of a row group to copy at a finer grain than the file, copying whole
+  row groups, parts of them (runs of pages, which the writer aligns across columns every 20,000
+  rows), or merging small cold pieces back. As built, the deferred merges only choose when to copy
+  a whole row group, and every two-workload run is at 4-32 MiB on an 11-column, 1 GB table, whose
+  update regions (513,700 rows) are about one 16 MiB row group, so finer copies had little to win
+  (the 2026-11-05 re-cut model ran at 16 MiB only). Needs 128 MiB row groups on a table with many
+  of them (about 7 GB at this width), regions several to a row group, and later a wide table.
+  Model first (`analysis/recut_model.py`, `analysis/hybrid_model.py`), then register, build, and
+  run on havoc and the laptop. Open: the piece in the write's new file with a deletion vector over
+  the old run (RMoR's way), or the old row group's footer re-cut (RMoW-append's way).
 - [ ] **Hot-region isolation** (a micro-benchmark question, not a Parquet benchmark). Can RMoW
   isolate frequently updated regions as row groups of their own, and so cut its amplification?
   - RMoW sets row-group boundaries on every rewrite, so it can cut a hot range out as its own row

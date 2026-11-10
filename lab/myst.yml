@@ -13,6 +13,7 @@ project:
     - file: pages/run.md
     - title: Results
       children:
+        - file: pages/workloads.md
         - file: pages/base-point.md
         - file: pages/cloud-sweep.md
         - file: pages/reader-changes.md

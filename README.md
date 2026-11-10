@@ -649,6 +649,8 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
   [docs/HYPOTHESES.md](docs/HYPOTHESES.md), [lab/pages/tune-cloud.md](lab/pages/tune-cloud.md)):
   every judged pick was the cheapest of the seven policies on measured time, and on S3 Express the
   VM's own work and spike priced every policy within 3.3%.
-- **Next:** the write-up of the two workloads
-  ([docs/ROADMAP.md](docs/ROADMAP.md)). GCS needs APPEND in the fork first; split files can also
-  run on standard S3.
+- **Done (2026-11-09):** the write-up of the two workloads, simulated at 16 MiB row groups
+  ([lab/pages/workloads.md](lab/pages/workloads.md)).
+- **Next:** the density hypothesis at Iceberg's 128 MiB row groups: copies finer than a row group,
+  chosen from the deletion vector ([docs/ROADMAP.md](docs/ROADMAP.md)). GCS needs APPEND in the
+  fork first; split files can also run on standard S3.
