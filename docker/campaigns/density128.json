@@ -1,0 +1,11 @@
+{
+  "description": "The update workload at Iceberg's row-group size (docs/HYPOTHESES.md, 2026-11-09, D1-D2): win-upd-base's workload with 8x the initial rows (205,480,000, about 6.7 GB), 128 MiB row groups in 512 MiB files, one setting a job. MoR, MoR compacted every 10 writes and the deferred merges as built over 240 writes; RMoR kept and RMoW-append over 30. Reads every 40 writes (every 10 over 30) under cached-skip: full, newest 1%, five 1% windows by id. Payload checks off, requests and held memory logged.",
+  "flags": ["--log-requests", "--log-held"],
+  "cores_per_job": 3,
+  "jobs": [
+    {"config": "configs/d128-upd-mor.json", "heap": "32g", "store_gib": 25},
+    {"config": "configs/d128-upd-compact.json", "heap": "32g", "store_gib": 40},
+    {"config": "configs/d128-upd-density.json", "heap": "32g", "store_gib": 40},
+    {"config": "configs/d128-upd-copies.json", "heap": "32g", "store_gib": 80}
+  ]
+}

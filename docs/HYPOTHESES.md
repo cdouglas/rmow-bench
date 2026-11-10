@@ -1314,3 +1314,121 @@ hours, and Azure's read waits moved by seconds between runs before (lab/pages/rm
 predictions price CPU at the laptop's pace, and the base point's S3 Express VM did the same work in
 1.3–1.6 times the laptop's thread time: where a mix's order turns on a write, which is more work,
 against a read, the VMs' pace can move it.
+
+## Copies cut where a write changes, at Iceberg's row-group size (registered 2026-11-09)
+
+**What it decides:** whether RMoR can choose what a write copies at a finer grain than a row group,
+without a new reader. Every two-workload run so far used 4–32 MiB row groups on a 1 GB table,
+where an update region (513,700 rows) is about one 16 MiB row group, so copying whole row groups
+cost little. At Iceberg's 128 MiB a row group holds about eight regions. A write that changes one
+reads all eight (MoR, and the deferred merges as built), or copies all eight (RMoR with row groups
+kept, RMoW-append).
+
+**The cut:** when RMoR copies a row group, it copies all of it, but as several row groups. Each run
+of strides that the write changes, or that holds dead rows, becomes a row group of its own, and so
+does each run of strides between them. A run of fewer than four unchanged strides joins the copy
+beside it. A stride is the 20,000 rows at which every column starts a new page. At 128 MiB every
+column of this table cuts its pages there (checked 2026-11-09, docs/drafts/region-cut-2026-11-09.md).
+The old row group is then dead as a whole, and the reader that skips dead row groups (`cached-skip`)
+skips it. A later write that changes the same region copies only that region's row group. The plan
+is the draft named above; the cut is not built yet.
+
+**The model** (`analysis/hybrid_model.py updates`, 2026-11-09):
+- **The op log:** `win-upd-base`'s workload with 8 times the initial rows (205,480,000, about
+  6.7 GB), 150,000 changes a write, over 240 writes.
+- **The layout:** 128 MiB row groups in 512 MiB files (`--rg-mib 128 --target-mib 512
+  --read-every 40`).
+- **The reader:** its `rg_*` reader, which reads every live row group its statistics don't prune,
+  as `cached-skip` does.
+- **The policies:** `mor`, `morc:10`, `copy:file:rg:0.06` (the deferred merges as built), and the
+  cut: `copy:split:rg` (θ 0) and `copy:split:rg:0.06`. Over the same workload's first 30 writes
+  (its 30-write op log, `--read-every 5`), `copy:file:rg` and `copy:place:rg`: whole row groups
+  copied, as RMoR with row groups kept and RMoW-append do.
+- **Its rows** are 28.6 bytes; Parquet's at 128 MiB are about 31. So the predictions are ratios
+  between designs, or against live bytes.
+
+| Design (arm) | MB written a write: mean, first 40, last 40 | MB read a write: mean, last 40 | 1% window / live bytes, write 240 | Full read / live bytes, write 240 |
+|---|---|---|---|---|
+| MoR (`mor-v3`) | 3.6 | 1,594; 1,939 | 16.7 | 1.18 |
+| MoR compacted every 10 writes | 3.6 | 1,640; 2,069 | 7.0 | 1.15 |
+| Deferred merges as built (`rmor-density`, θ 0.06) | 55; 15; 74 | 1,304; 1,413 | 3.3 | 1.03 |
+| The cut, θ 0 (`rmor-c-kept` with the cut) | 218; 369; 162 | 231; 173 | 1.01 | 1.00 |
+| The cut, θ 0.06 (`rmor-density` with the cut) | 52; 13; 57 | 763; 477 | 1.69 | 1.03 |
+
+Over 30 writes, whole row groups copied (`rmor-c-kept`, `rmow-c`) write 861 MB a write, against the
+deferred merges' 19 MB and MoR's 3.6. Their windows read 3.3 times their live bytes.
+
+Priced on S3 Express with the laptop's CPU per MB (a scratch pricing of the model, not a lab view),
+the cut at θ 0 takes 7.0 s a write over writes 201–240. That is as fast as the footer re-cut the
+model also ran, against 16.4 s for the deferred merges as built and 19.4 s for MoR. Its 1% window
+takes 0.56 s at write 240, against 1.79 and 10.5 s.
+
+**Setup:**
+- **Configurations:** `configs/d128-upd-*.json`.
+  - **Common to all:** `win-upd-base`'s workload with 205,480,000 initial rows, so the op logs are
+    the model's; 128 MiB row groups in 512 MiB files.
+  - **Reads:** every 40 writes, a full read, the newest 1% and five 1% windows by id, under
+    `cached-skip` alone. No time-travel read: `travelBack` is past the last write.
+  - **One setting a configuration,** so they run apart: `d128-upd-mor` (MoR),
+    `d128-upd-compact` (MoR compacted every 10 writes), `d128-upd-density` (the deferred merges as
+    built, θ 0.06, deltas by region), each over 240 writes; `d128-upd-copies` (RMoR with row groups
+    kept, RMoW-append) over 30 writes, read every 10.
+- **After the cut is built:** `d128-upd-cut` (RMoR with row groups kept, cut) and
+  `d128-upd-density-cut` (the deferred merges, cut), over the same 240 writes.
+- **Where:** on havoc (campaign `docker/campaigns/density128.json`), with requests and held
+  memory logged. No laptop twins: these are byte claims, which need no instruction counts.
+
+**How it is judged:**
+- **When:** after the 240th write (the 30th for `d128-upd-copies`), under `cached-skip`.
+- **A window:** the mean of the five.
+- **A write's reads:** its update and merge reads (`update-read`, `merge-read`; the model counts
+  the locate apart).
+- **A write's writes:** everything it puts (`write`, `delete-write`).
+- **Live bytes:** a window's rows times the bytes a live row takes in that arm's full read.
+
+**Predicted:**
+- **D1 (whole row groups read, as built): MoR, compacted MoR and the deferred merges each read
+  at least 1 GB a write over the 240 writes, and at least 15 times what they write** (model 1.59,
+  1.64 and 1.30 GB, against 3.6, 3.6 and 55 MB written). **After the 240th write, MoR's windows
+  read at least 8 times their live bytes, compacted MoR's at least 4 times and the deferred
+  merges' at least 2.5 times** (model 16.7, 7.0 and 3.3).
+- **D2 (whole row groups copied, 30 writes): RMoR with row groups kept and RMoW-append write at
+  least 30 times the deferred merges' bytes a write** (model 861 against 19 MB, 45 times), **and
+  their windows after the 30th write read at least 2.5 times their live bytes** (model 3.3).
+- **D3 (the cut, θ 0):**
+  - **Over writes 201–240, a write reads at most 0.2 of what the deferred merges as built read**
+    (model 173 against 1,413 MB, 0.12), **and writes at most 3 times their bytes** (162 against
+    74, 2.2).
+  - **Its first 40 writes write at least 1.8 times its last 40** (369 against 162, 2.3): the copies
+    of whole 128 MiB row groups end once the regions in them are cut out.
+  - **After the 240th write, its windows read at most 1.3 times their live bytes, and its full read
+    at most 1.05 times** (model 1.01 and 1.00).
+- **D4 (the cut, θ 0.06):**
+  - **Over writes 201–240, a write reads at most 0.5 of the deferred merges' bytes** (477 against
+    1,413, 0.34), **and writes 0.5 to 1.2 times theirs** (57 against 74, 0.77).
+  - **After the 240th write, its windows read at most 2.2 times their live bytes** (model 1.69).
+
+**Controls:**
+- **The op logs:** every 240-write run replays the model's op log, and `d128-upd-copies` the
+  30-write one (the SHA-256 of `oplog.bin`).
+- **The build:** with the cut off, every arm sends what it sent before the build, in requests and
+  bytes. Checked on the laptop on `win-upd-base` (`steps_diff`).
+
+**Measured, not judged:**
+- requests: at 16 MiB the model counted 3–14 for a window where RMoR and the deferred merges sent
+  25–65;
+- each design's row groups and files after 240 writes (the model: 756 row groups for the cut,
+  540 for the deferred merges, 288 for MoR);
+- held memory;
+- time, simulated on S3 Express and Azure Blob from requests by size and the laptop's CPU per MB,
+  as the forecasts were.
+
+**Limits:**
+- **One seed, one workload.** A statement changes 3% of a region's rows, spread evenly, so every
+  stride of the region changes and the cut follows regions. The density of the deletion vectors
+  has nothing finer to find here; a workload of sparse changes would.
+- **A narrow table.** 128 MiB is about 4.3 million of these 11-column rows. A wide table reaches
+  128 MiB in fewer rows, and pays for small row groups in a request a column.
+- **Cold pieces never merge back.** The cut only splits.
+- **No page-skipping reader.** It is planned separately (the draft above).
+- **No instruction counts on havoc.** Time is simulated, as in the forecasts.

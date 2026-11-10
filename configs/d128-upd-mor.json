@@ -1,0 +1,62 @@
+{
+  "label": "d128-upd-mor",
+  "store": {
+    "type": "local",
+    "root": "store",
+    "fsync": false
+  },
+  "warmup": {
+    "batches": 3,
+    "initialRows": 1000000
+  },
+  "workload": {
+    "seed": 1,
+    "initialRows": 205480000,
+    "batches": 240,
+    "opsPerBatch": 150000,
+    "insertFrac": 0.0,
+    "updateFrac": 0.8333333333333334,
+    "deleteFrac": 0.16666666666666666,
+    "keyDist": "REGIONS",
+    "regionRows": 513700,
+    "regionSkew": 1.0,
+    "updateShare": 0.03,
+    "lateMedianBatches": 0.05,
+    "lateP99Batches": 5,
+    "initialJitterRows": 0
+  },
+  "layout": {
+    "codec": "zstd",
+    "rowGroupBytes": 134217728,
+    "targetFileBytes": 536870912,
+    "tailSealBytes": 134217728,
+    "locate": "scan",
+    "writerSkipsDeadRowGroups": true,
+    "updateRead": "row"
+  },
+  "arms": [
+    "mor-v3"
+  ],
+  "reads": {
+    "every": 40,
+    "recentFraction": 0.01,
+    "travelBack": 100000,
+    "windows": {
+      "by": [
+        "id"
+      ],
+      "count": 5,
+      "fraction": 0.01
+    },
+    "readers": [
+      {
+        "name": "cached-skip",
+        "footerCache": true,
+        "deleteCache": true,
+        "footerPrefetchBytes": 65536,
+        "skipDeadRowGroups": true
+      }
+    ]
+  },
+  "verifyRows": false
+}

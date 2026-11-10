@@ -28,6 +28,22 @@ Update policies (`--policy`):
                  sorted by id, or with `region` one per row group they left). A delta row group
                  never merges on its own (rmor-density).
   defer-stride:T the same, stride by stride.
+  copy:FORM:GRAIN[:T[:M]]
+                 copies of runs of strides (GRAIN stride) or of row groups (rg), once a unit's
+                 dead rows and the write's changes reach T of its rows (default 0: at once); below
+                 that, DVs, and new versions to a delta row group per region, folded in when the
+                 unit is copied. Runs of fewer than M strides (default 4) between copied ones are
+                 copied too. FORM:
+                   file   RMoR's: the copies go into the write's new file; DVs cover the old runs.
+                   place  RMoW-append's re-cut: the copies are appended, and the footer keeps the
+                          runs not copied as row groups by reference (a range a column).
+                   trunc  the re-cut, keeping only the prefix before the first copied stride.
+                   split  RMoR's, a row group copied whole (GRAIN rg), but cut into row groups at
+                          the runs of strides the write changes (or holding dead rows), so the
+                          next write that changes one copies only it; the old row group is dead
+                          whole (a reader that skips dead row groups skips it).
+                   shrink RMoR's, a row group copied whole (GRAIN rg), cut into row groups of
+                          at most M MiB (default 16) whatever the write changes; M is that size.
 
 Ingest policies:
   tail           inserts appended as row groups sorted by event time, to a tail object until it
@@ -72,6 +88,10 @@ WINDOW_AT = (0.1, 0.3, 0.5, 0.7, 0.9)  # the runs' read_window: reads.windows, 5
 # load's, sorted by id: the ing-* runs' inserts take 33.7 (11.8 MB a write of 350,000 rows), so at
 # B a 160 MiB seal let four 4-write units merge, which the runs' 189 MB did not (2026-11-07).
 INSERT_B = B
+SCALED = False  # --rg-mib given: row groups and files sized from it and --target-mib
+
+
+EMPTY = np.array([], np.int64)
 
 
 class Table:
@@ -85,21 +105,27 @@ class Table:
         self.objects = {}  # object -> its pieces in footer order
         self.next_obj = 0
 
-    def new(self, ids, delta=False):
+    def new(self, ids, delta=False, dead=None):
         p = len(self.rows)
         self.rows.append(ids); self.dead.append(None); self.ndead.append(0); self.obj.append(-1)
         self.scattered.append(False); self.delta.append(delta)
         self.lo.append(0); self.hi.append(0); self.tlo.append(0); self.thi.append(0)
-        self.set_rows(p, ids)
+        self.set_rows(p, ids, dead)
         return p
 
-    def set_rows(self, p, ids):
+    def set_rows(self, p, ids, dead=None):
+        """A piece's rows; with `dead`, a deletion vector carried over (a run kept by reference),
+        whose rows stay where their new versions are."""
         self.rows[p] = ids
         self.lo[p], self.hi[p] = int(ids.min()), int(ids.max())
         tv = self.ts[ids]
         self.tlo[p], self.thi[p] = int(tv.min()), int(tv.max())
+        at = np.arange(len(ids), dtype=np.int32)
+        if dead is not None and dead.any():
+            self.dead[p], self.ndead[p] = dead.copy(), int(dead.sum())
+            ids, at = ids[~dead], at[~dead]
         self.piece_of[ids] = p
-        self.pos_of[ids] = np.arange(len(ids), dtype=np.int32)
+        self.pos_of[ids] = at
 
     def new_object(self, ps=()):
         o = self.next_obj
@@ -143,15 +169,26 @@ class Table:
     def pieces(self):
         return [p for lst in self.objects.values() for p in lst]
 
+    def free_unlisted(self):
+        """Drops the rows of pieces no object lists any more (replaced or compacted away): no
+        live id points at them, and at 128 MiB they would hold every row group ever copied."""
+        listed = set(self.pieces())
+        for p in range(len(self.rows)):
+            if p not in listed and len(self.rows[p]):
+                self.rows[p], self.dead[p] = EMPTY, None
 
-def chunks(ids):
-    """A run of rows as row groups of at most RG rows, of even size."""
-    return np.array_split(ids, -(-len(ids) // RG)) if len(ids) else []
+
+def chunks(ids, size=None):
+    """A run of rows as row groups of at most `size` rows (default RG), of even size."""
+    size = size or RG
+    return np.array_split(ids, -(-len(ids) // size)) if len(ids) else []
 
 
 def initial(t, n0):
-    per = -(-n0 // INITIAL_FILES)
-    for f in range(INITIAL_FILES):
+    # --rg-mib: files of TARGET's worth of whole row groups, as the initial load rolls a file
+    # over at the target size; otherwise the 16 MiB runs' six files
+    per = RG * max(1, round(TARGET / RG)) if SCALED else -(-n0 // INITIAL_FILES)
+    for f in range(-(-n0 // per)):
         ids = np.arange(f * per, min((f + 1) * per, n0))
         t.new_object([t.new(ids[a:a + RG]) for a in range(0, len(ids), RG)])
 
@@ -162,6 +199,27 @@ def strides_of(n):
 
 def stride_rows(n, s):
     return np.minimum(STRIDE, n - s * STRIDE)
+
+
+def runs_of(flags):
+    """Maximal runs of equal flags: (first, end, flag) each."""
+    if not len(flags):
+        return []
+    cuts = np.flatnonzero(np.diff(flags.astype(np.int8))) + 1
+    starts = np.concatenate([[0], cuts]); ends = np.concatenate([cuts, [len(flags)]])
+    return [(int(a), int(b), bool(flags[a])) for a, b in zip(starts, ends)]
+
+
+def fill_gaps(flags, m):
+    """Strides flagged for copying, with every unflagged run shorter than m strides flagged too
+    (it joins the copies beside it rather than stay a piece of its own); none if none."""
+    if not flags.any():
+        return flags
+    out = flags.copy()
+    for a, b, f in runs_of(flags):
+        if not f and b - a < m:
+            out[a:b] = True
+    return out
 
 
 # ---------------------------------------------------------------------------------------------
@@ -185,21 +243,65 @@ def run_updates(data, policy, arg, by_region=False):
         k = np.searchsorted(cs, lo)
         cand = (k < len(cs)) & (cs[np.minimum(k, len(cs) - 1)] <= hi)
         cand_rows = int(sum(len(t.rows[p]) for p, c in zip(ps, cand) if c))
+        # a reader that locates by the page index reads the id pages whose range holds a target
+        cand_page_rows = 0
+        # each request's MB, by reader: the write's reads, and what it writes (an append to each
+        # object it copies in place, a new file, a deletion vector file)
+        rsz = {"rg": [], "pg": []}
+        for p, c in zip(ps, cand):
+            if c:
+                r = t.rows[p]
+                s_lo, s_hi = r[::STRIDE], r[np.minimum(np.arange(STRIDE - 1, len(r) + STRIDE - 1,
+                                                                 STRIDE), len(r) - 1)]
+                k = np.searchsorted(cs, s_lo)
+                hit = (k < len(cs)) & (cs[np.minimum(k, len(cs) - 1)] <= s_hi)
+                hit_rows = int(stride_rows(len(r), np.flatnonzero(hit)).sum())
+                cand_page_rows += hit_rows
+                rsz["rg"].append(ID_SHARE * len(r) * B / 1e6)
+                rsz["pg"].append(ID_SHARE * hit_rows * B / 1e6)
         o_ = np.argsort(cp, kind="stable")
         cp, cpos, is_upd, changed = cp[o_], cpos[o_], is_upd[o_], changed[o_]
         touched, start = np.unique(cp, return_index=True)
         end = np.append(start[1:], len(cp))
         t.piece_of[dele] = -1
         fresh = []  # new versions of rows a DV hides, as (row group they left, ids)
-        copies = []  # (source piece, ids copied, in place?)
+        copies = []  # (source piece, [("new", ids) | ("kept", first row, end row)], in place?)
         read_units = 0  # rows of the units copied (a write reads a unit it copies whole)
         upd_strides = 0  # rows of strides holding an updated row, in units not copied
         upd_groups = 0  # rows of row groups holding an updated row, not copied whole
+        # what the write reads beyond the locate (updateRead row), by reader: every row group it
+        # copies from or holds a row it updates, whole; or only those strides (and deltas folded)
+        wread_rg = wread_pg = 0
         for p, a, b in zip(touched.tolist(), start, end):
             rows, nr = t.rows[p], len(t.rows[p])
             pos, uh = cpos[a:b], is_upd[a:b]
             name = policy
-            if name in ("mor", "morc"):
+            hot = None
+            if name == "copy":
+                form, grain, theta, m = arg
+                ns = strides_of(nr)
+                if t.delta[p]:  # a delta row group never merges on its own
+                    copy = np.zeros(ns, bool)
+                elif grain == "rg":
+                    copy = np.full(ns, t.ndead[p] + (b - a) >= theta * nr)
+                else:
+                    ch = np.bincount(pos // STRIDE, minlength=ns)
+                    dd = np.zeros(ns, int) if t.dead[p] is None else \
+                        np.add.reduceat(t.dead[p].astype(int), np.arange(0, nr, STRIDE))
+                    copy = fill_gaps((ch > 0) & (ch + dd >= theta * stride_rows(nr, np.arange(ns))),
+                                     m)
+                hot = copy
+                if form == "split" and copy.any():
+                    # the cut: runs of strides changed or holding dead rows, each a row group
+                    ch = np.bincount(pos // STRIDE, minlength=ns)
+                    dd = np.zeros(ns, int) if t.dead[p] is None else \
+                        np.add.reduceat(t.dead[p].astype(int), np.arange(0, nr, STRIDE))
+                    hot = fill_gaps((ch + dd) > 0, m)
+                if form == "trunc" and copy.any():
+                    # the footer keeps only the prefix before the first copied stride (a column
+                    # chunk's later pages need its dictionary page): the rest is rewritten
+                    copy = copy.copy(); copy[int(np.argmax(copy)):] = True
+            elif name in ("mor", "morc"):
                 copy = np.zeros(strides_of(nr), bool)
             elif name in ("rmor", "rmow"):
                 copy = np.ones(strides_of(nr), bool)
@@ -218,6 +320,20 @@ def run_updates(data, policy, arg, by_region=False):
             else:
                 raise ValueError(policy)
             in_copy = copy[pos // STRIDE]
+            upd_left = ~in_copy & uh
+            if copy.any() or upd_left.any():
+                wread_rg += nr
+                k = ranges(t, p)
+                rsz["rg"] += [nr * B / 1e6 / k] * k
+                need = copy.copy(); need[pos[upd_left] // STRIDE] = True
+                wread_pg += int(stride_rows(nr, np.flatnonzero(need)).sum())
+                if need.all() and not t.scattered[p]:
+                    rsz["pg"].append(nr * B / 1e6)
+                else:
+                    for s0, s1, f in runs_of(need):
+                        if f:
+                            rsz["pg"] += [stride_rows(nr, np.arange(s0, s1)).sum() * B / 1e6
+                                          / COLUMNS] * COLUMNS
             # rows in units not copied: deletion vectors, new versions to the write's file
             if (~in_copy).any():
                 t.kill(p, pos[~in_copy])
@@ -232,22 +348,58 @@ def run_updates(data, policy, arg, by_region=False):
                 sel = np.repeat(copy, STRIDE)[:nr]
                 ids = rows[sel & keep]
                 read_units += int(sel.sum())
+                if name == "copy":
+                    # runs of strides: those copied rewritten (with the new versions folded in
+                    # from earlier deltas), the rest kept as pieces of their own by reference
+                    first = int(np.argmax(copy))
+                    parts = []
+                    for s0, s1, f in runs_of(hot):
+                        r0, r1 = s0 * STRIDE, min(s1 * STRIDE, nr)
+                        if f or form in ("split", "shrink") or (form == "trunc" and s0 >= first):
+                            ids = rows[r0:r1][keep[r0:r1]]
+                            if theta > 0:
+                                folded, rd = fold(t, int(rows[r0]), int(rows[r1 - 1]), rsz)
+                                if len(folded):
+                                    ids = np.sort(np.concatenate([ids, folded]))
+                                read_units += rd; wread_rg += rd; wread_pg += rd
+                            parts.append(("new", ids, int(round(532_000 * m / 16)))
+                                         if form == "shrink" else ("new", ids))
+                        elif form != "file":
+                            parts.append(("kept", r0, r1))
+                    if form in ("file", "split", "shrink"):
+                        t.kill(p, np.nonzero(sel)[0])
+                    copies.append((p, parts, form not in ("file", "split", "shrink")))
+                    continue
                 if name == "defer":
                     # a deferred merge folds in the region's new versions from earlier deltas
                     folded, rd = fold(t, t.lo[p], t.hi[p])
                     ids = np.sort(np.concatenate([ids, folded]))
-                    read_units += rd
+                    read_units += rd; wread_rg += rd; wread_pg += rd
                 if copy.all() and name == "rmow":
-                    copies.append((p, ids, True))
+                    copies.append((p, [("new", ids)], True))
                 else:
-                    copies.append((p, ids, False))
+                    copies.append((p, [("new", ids)], False))
                     t.kill(p, np.nonzero(sel)[0])
-        # the write's new file: copied units (each a row group), then the new versions by id
+        # the write's new file: copied units (each a row group), then the new versions by id;
+        # copied in place, a unit's pieces take its place in its object's footer
         new_file = []
-        for p, ids, in_place in copies:
-            qs = [t.new(c) for c in chunks(ids)]
+        wsz = []
+        for p, parts, in_place in copies:
+            qs = []
+            for part in parts:
+                if part[0] == "new":
+                    qs.extend(t.new(c) for c in chunks(*part[1:]))
+                    continue
+                _, r0, r1 = part
+                d = None if t.dead[p] is None else t.dead[p][r0:r1]
+                if d is not None and d.all():
+                    continue
+                q = t.new(t.rows[p][r0:r1], dead=d)
+                t.scattered[q] = True  # a range of pages of each column chunk: a read a column
+                qs.append(q)
             if in_place:
                 t.replace(p, qs)
+                wsz.append(sum(len(t.rows[q]) for q in qs if not t.scattered[q]) * B / 1e6)
             else:
                 new_file.extend(qs)
         fr = np.sort(np.concatenate([ids for _, ids in fresh])) if fresh else np.array([], np.int64)
@@ -263,11 +415,23 @@ def run_updates(data, policy, arg, by_region=False):
             new_file.extend(t.new(c, delta=True) for c in chunks(fr))
         if new_file:
             t.new_object(new_file)
-        written = sum(len(ids) for _, ids, _ in copies) + len(fr)
+            nf = sum(len(t.rows[q]) for q in new_file) * B / 1e6
+            wsz += [nf / -(-nf // (TARGET * B / 1e6))] * int(-(-nf // (TARGET * B / 1e6)))
+        if fresh or any(not ip for _, _, ip in copies):
+            wsz.append(0.0)  # the write's deletion vectors
+        written = sum(len(x[1]) for _, parts, _ in copies for x in parts if x[0] == "new") + len(fr)
         compacted = 0
         if policy == "morc" and (w + 1) % arg == 0:
             compacted = compact(t)
         t.drop_empty_objects()
+        t.free_unlisted()
+        wr = dict(written=written * B / 1e6, compacted=compacted * B / 1e6,
+                  wread_rg=(ID_SHARE * cand_rows + wread_rg) * B / 1e6,
+                  wread_pg=(ID_SHARE * cand_page_rows + wread_pg) * B / 1e6,
+                  wread_rg_sizes=rsz["rg"], wread_pg_sizes=rsz["pg"], wput_sizes=wsz)
+        if not reading(w, len(writes)):
+            out.append(wr)
+            continue
         r = dict(written=written * B / 1e6, compacted=compacted * B / 1e6,
                  # the reads an update costs, by engine: blind (this harness: the id column of the
                  # row groups that may hold a target, and the units copied), Iceberg's reader (every
@@ -278,16 +442,25 @@ def run_updates(data, policy, arg, by_region=False):
                  # in two passes (updateRead row): the id column of those row groups, then whole
                  # every row group holding an updated row
                  read_rows=(ID_SHARE * cand_rows + read_units + upd_groups) * B / 1e6)
+        r.update(wr)
         r.update(full_read(t))
         r.update(window_reads(t, by="id"))
         r.update(span_windows(t, "id", 0, n0 - 1))
+        r.update(two_readers(t, "id", 0, n0 - 1))
         out.append(r)
     return out
 
 
-def fold(t, lo, hi):
+READ_EVERY = 1  # --read-every: reads after every this many writes, and after the last
+
+
+def reading(w, n):
+    return (w + 1) % READ_EVERY == 0 or w == n - 1
+
+
+def fold(t, lo, hi, sizes=None):
     """The live rows with ids in [lo, hi] of delta row groups, taken out of them (DVs), and the
-    rows of the delta row groups read to find them."""
+    rows of the delta row groups read to find them (with `sizes`, each one's MB, by reader)."""
     out, read = [], 0
     for q in t.pieces():
         if not t.delta[q] or t.live(q) == 0 or t.hi[q] < lo or t.lo[q] > hi:
@@ -300,6 +473,9 @@ def fold(t, lo, hi):
             out.append(rows[sel])
             t.kill(q, np.nonzero(sel)[0])
             read += len(rows)
+            if sizes is not None:
+                for v in sizes.values():
+                    v.append(len(rows) * B / 1e6)
     return (np.concatenate(out) if out else np.array([], np.int64)), read
 
 
@@ -605,10 +781,96 @@ def span_windows(t, by, lo_key, hi_key, frac=0.01):
     return out
 
 
+def two_readers(t, by, lo_key, hi_key, frac=0.01):
+    """A full scan and the runs' 1% windows (cut as span_windows cuts them) by two readers.
+    `rg_*`: Iceberg's, which reads every live row group it does not prune by its statistics
+    whole (one range; a piece kept by reference, one a column). `pg_*`: a reader that reads only
+    the pages it needs, those a deletion vector leaves a live row in and, in a window, those the
+    page index puts in it (a row group read whole in one range, else one range a column for each
+    run of pages; arrow-rs's row selections). Requests: data ranges, plus a footer an object,
+    a deletion vector an object holding a dead row it reads, and for `pg` a page index an object
+    it reads part of a row group of. MB read, and for the windows their mean against live MB."""
+    info = []
+    for p in t.pieces():
+        if t.live(p) == 0:
+            continue
+        r = t.rows[p]; nr = len(r)
+        key = r if by == "id" else t.ts[r]
+        starts = np.arange(0, nr, STRIDE)
+        live = np.ones(len(starts), bool) if t.dead[p] is None else \
+            np.add.reduceat((~t.dead[p]).astype(np.int32), starts) > 0
+        info.append((p, nr, np.minimum.reduceat(key, starts), np.maximum.reduceat(key, starts),
+                     live, stride_rows(nr, np.arange(len(starts)))))
+    lv = np.concatenate([t.live_rows(p) for p, *_ in info])
+    lkey = lv if by == "id" else t.ts[lv]
+
+    def cost(window):
+        """Per reader: requests, rows read, each data range's MB, and the small requests
+        (footers, deletion vectors, page indexes)."""
+        res = {}
+        for rd in ("rg", "pg"):
+            rows = 0
+            sizes = []
+            objs, dvo, pidx = set(), set(), set()
+            for p, nr, kmin, kmax, live, srows in info:
+                need = live
+                if window is not None:
+                    a, b = window
+                    if not (kmin.min() < b and kmax.max() >= a):  # the row group's statistics
+                        continue
+                    need = live & (kmin < b) & (kmax >= a)
+                if rd == "rg":
+                    rows += nr
+                    k = ranges(t, p)
+                    sizes += [nr * B / 1e6 / k] * k
+                else:
+                    if not need.any():
+                        continue
+                    rows += int(srows[need].sum())
+                    if need.all() and not t.scattered[p]:
+                        sizes.append(nr * B / 1e6)
+                    else:
+                        for s0, s1, f in runs_of(need):
+                            if f:
+                                sizes += [srows[s0:s1].sum() * B / 1e6 / COLUMNS] * COLUMNS
+                        pidx.add(t.obj[p])
+                objs.add(t.obj[p])
+                if t.ndead[p]:
+                    dvo.add(t.obj[p])
+            small = len(objs) + len(dvo) + len(pidx)
+            res[rd] = (len(sizes) + small, rows, sizes, small)
+        return res
+
+    out = {}
+    full = cost(None)
+    for rd in ("rg", "pg"):
+        out[f"{rd}_full_req"], out[f"{rd}_full_mb"] = full[rd][0], full[rd][1] * B / 1e6
+        out[f"{rd}_full_sizes"], out[f"{rd}_full_small"] = full[rd][2], full[rd][3]
+    out["full_live_mb"] = len(lv) * B / 1e6
+    span = hi_key - lo_key
+    acc = {k: [] for k in ("rg_win_req", "rg_win_mb", "rg_win_amp", "pg_win_req", "pg_win_mb",
+                           "pg_win_amp", "win_live_mb")}
+    for rd in ("rg", "pg"):  # each window's, as lists
+        out[f"{rd}_win_sizes"], out[f"{rd}_win_small"] = [], []
+    for at in WINDOW_AT:
+        a, b = lo_key + int((at - frac / 2) * span), lo_key + int((at + frac / 2) * span)
+        live_rows = max(int(((lkey >= a) & (lkey < b)).sum()), 1)
+        c = cost((a, b))
+        acc["win_live_mb"].append(live_rows * B / 1e6)
+        for rd in ("rg", "pg"):
+            acc[f"{rd}_win_req"].append(c[rd][0])
+            acc[f"{rd}_win_mb"].append(c[rd][1] * B / 1e6)
+            acc[f"{rd}_win_amp"].append(c[rd][1] / live_rows)
+            out[f"{rd}_win_sizes"].append(c[rd][2]); out[f"{rd}_win_small"].append(c[rd][3])
+    out.update({k: float(np.mean(v)) for k, v in acc.items()})
+    return out
+
+
 # ---------------------------------------------------------------------------------------------
 
 def summarize(name, out, keys):
-    col = lambda k: np.array([r[k] for r in out], float)
+    # with --read-every, the reads' keys are means over the writes read after
+    col = lambda k: np.array([r[k] for r in out if k in r], float)
     last = out[-1]
     parts = [f"{name:20s}"]
     for k in keys:
@@ -644,18 +906,45 @@ def main():
                    help="ingest: bytes a row of inserts, for a seal given in MiB")
     p.add_argument("--watermark", type=float, default=float("inf"),
                    help="ingest: rows later than this many writes are dropped")
+    p.add_argument("--rg-mib", type=float,
+                   help="row groups of this many MiB (532,000 rows a 16 MiB one), and files of "
+                        "--target-mib's worth of them")
+    p.add_argument("--target-mib", type=float, help="the target file size (default 128)")
+    p.add_argument("--read-every", type=int, default=1,
+                   help="reads after every this many writes, and after the last")
+    p.add_argument("--keys", default="", help="updates: report these keys (comma-separated)")
+    p.add_argument("--json", help="updates: write each policy's per-write records here")
     a = p.parse_args()
-    global INSERT_B
+    global INSERT_B, RG, TARGET, SCALED, READ_EVERY
     INSERT_B = a.insert_row_bytes
+    READ_EVERY = a.read_every
+    if a.target_mib:
+        TARGET = a.target_mib * 2**20 / B
+    if a.rg_mib:
+        RG, SCALED = int(round(532_000 * a.rg_mib / 16)), True
     data = load(a.path)
     if a.workload == "updates":
+        records = {}
         for pol in (a.policy or "mor,morc:10,rmor,rmor-stride,rmow,defer:0.25,defer-stride:0.5"
                     ).split(","):
             name, *args = pol.split(":")
-            arg = float(args[0]) if args else 0
-            out = run_updates(data, name, int(arg) if name == "morc" else arg,
-                              by_region="region" in args)
-            summarize(pol, out, UPDATE_KEYS + SPAN_KEYS)
+            if name == "copy":  # copy:FORM:GRAIN[:THETA[:M]]
+                arg = (args[0], args[1], float(args[2]) if len(args) > 2 else 0.0,
+                       int(args[3]) if len(args) > 3 else 4)
+                if arg[0] in ("split", "shrink") and arg[1] != "rg":
+                    p.error(f"{pol}: {arg[0]} copies whole row groups (GRAIN rg)")
+                if arg[0] == "shrink" and len(args) < 4:
+                    arg = arg[:3] + (16,)
+            else:
+                arg = float(args[0]) if args else 0
+                arg = int(arg) if name == "morc" else arg
+            out = run_updates(data, name, arg, by_region="region" in args or name == "copy")
+            records[pol] = out
+            summarize(pol, out, a.keys.split(",") if a.keys else UPDATE_KEYS + SPAN_KEYS)
+        if a.json:
+            import json
+            json.dump(dict(rg_rows=RG, target_rows=TARGET, stride=STRIDE, row_bytes=B,
+                           policies=records), open(a.json, "w"))
     else:
         for pol in (a.policy or "tail,merge,trunc,defer:10:trunc").split(","):
             name, *args = pol.split(":")
