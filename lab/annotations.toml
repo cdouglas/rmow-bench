@@ -96,6 +96,15 @@ select = ["where:regexp_matches(label, '^tune-.*-(s3x|azure)$') AND git_sha LIKE
 [campaigns.mor-row]
 title = "MoR alone with updateRead row at the eleven rmor-* settings, on havoc at aeee8e3: the calibration of the cloud runs' MoR (docs/HYPOTHESES.md, 2026-11-06)"
 select = ["where:label LIKE 'mor-row-%' AND git_sha LIKE 'aeee8e3%'"]
+
+[campaigns.density128]
+title = "The designs as built at 128 MiB row groups, on a table 8 times win-upd-base's, on havoc at 2025e7c: D1 and D2 (docs/HYPOTHESES.md, 2026-11-09)"
+select = ["where:label IN ('d128-upd-mor', 'd128-upd-compact', 'd128-upd-density', 'd128-upd-copies')"]
+
+[campaigns.density128-cut]
+title = "Copies cut where a write changes, at 128 MiB row groups, on havoc at a68eda3: D3 and D4 (docs/HYPOTHESES.md, 2026-11-09)"
+select = ["where:label IN ('d128-upd-cut', 'd128-upd-density-cut')"]
+
 [[annotate]]
 select = "smoke-*"
 mark = "excluded"

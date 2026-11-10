@@ -29,6 +29,7 @@ project:
         - file: pages/compare.md
     - title: Decisions
       children:
+        - file: pages/region-cut.md
         - file: pages/tune.md
         - file: pages/tune-cloud.md
         - file: pages/vectorized-reader.md

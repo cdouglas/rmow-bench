@@ -552,6 +552,23 @@ lower.
   Model first (`analysis/recut_model.py`, `analysis/hybrid_model.py`), then register, build, and
   run on havoc and the laptop. Open: the piece in the write's new file with a deletion vector over
   the old run (RMoR's way), or the old row group's footer re-cut (RMoW-append's way).
+  - [x] **Modeled, registered, built and run** (2026-11-09/10; D1–D4, plan
+    docs/drafts/region-cut-2026-11-09.md, `layout.cut` in a68eda3,
+    [lab/pages/region-cut.md](../lab/pages/region-cut.md)): RMoR's way, a kept row group copied
+    as several cut at runs of changed strides. D1, D2, D4 held, D3 contradicted by its writes
+    (3.04 times the deferred merges', past 3). On S3 Express, simulated: a write 12.9 s against the
+    deferred merges' 21.4, a 1% window 1.86 s against 2.90.
+  - [ ] **The locate's requests:** every design's write reads the key column of each live row
+    group between the write's smallest and largest changed key (`MorArm.locateByScan` prunes row
+    groups to that one range, which spans most of the table when a write changes ten regions), a
+    request each: about 1,070 a write for the cut, 850 for the deferred merges, 89 for compacted
+    MoR. The model leaves it out, and it costs most of the cut's write on Azure Blob. Pruning row
+    groups by each changed key, as files already are, would cut it.
+  - [ ] **The windows' footers:** the region designs' windows read the footer of every file whose
+    metrics overlap the window (276 requests for the cut at 128 MiB, the model's 14).
+  - [ ] **Cold pieces merged back,** a **sparse workload** (where density can choose differently
+    from "copy what changed"), **cuts of a fixed size** (`copy:shrink:rg`, which first needs the
+    model to free killed copies' rows), and the **page-skipping reader** (step 0 done).
 - [ ] **Hot-region isolation** (a micro-benchmark question, not a Parquet benchmark). Can RMoW
   isolate frequently updated regions as row groups of their own, and so cut its amplification?
   - RMoW sets row-group boundaries on every rewrite, so it can cut a hot range out as its own row

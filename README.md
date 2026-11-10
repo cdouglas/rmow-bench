@@ -651,6 +651,10 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
   VM's own work and spike priced every policy within 3.3%.
 - **Done (2026-11-09):** the write-up of the two workloads, simulated at 16 MiB row groups
   ([lab/pages/workloads.md](lab/pages/workloads.md)).
-- **Next:** the density hypothesis at Iceberg's 128 MiB row groups: copies finer than a row group,
-  chosen from the deletion vector ([docs/ROADMAP.md](docs/ROADMAP.md)). GCS needs APPEND in the
-  fork first; split files can also run on standard S3.
+- **Done (2026-11-10):** copies cut where a write changes, at Iceberg's 128 MiB row groups (D1–D4,
+  on havoc; [lab/pages/region-cut.md](lab/pages/region-cut.md)). RMoR with the cut reads 0.12 of
+  what the deferred merges read a write, with windows at 1.16 times their live bytes, and writes
+  3.04 times their bytes (D3 contradicted by that part alone).
+- **Next:** the density hypothesis where density can choose: a workload of sparse changes, cold
+  pieces merged back, and the locate's requests ([docs/ROADMAP.md](docs/ROADMAP.md)). GCS needs
+  APPEND in the fork first; split files can also run on standard S3.
