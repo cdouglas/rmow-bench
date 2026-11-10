@@ -236,6 +236,16 @@ public final class Fuzz {
       d.deltas = pick(r, "region", "write");
       l.defer = d;
     }
+    // the cut (2026-11-10), drawn from a stream of its own so every other draw of a seed stays as
+    // it was: strides far smaller than Iceberg's page limit, since these row groups hold 270 to
+    // 35,000 rows
+    SplittableRandom rc = new SplittableRandom(seed ^ 0x2545F4914F6CDD1DL);
+    if (chance(rc, 0.5)) {
+      LayoutSpec.CutSpec c = new LayoutSpec.CutSpec();
+      c.minStrides = rc.nextInt(1, 6);
+      c.strideRows = (int) logUniform(rc, 5, 5_000);
+      l.cut = c;
+    }
     // A heavy statement empties most of a region only if the batch changes that many rows, and
     // leaves a row group dead but for a few rows only if its region spans the row group: regions
     // of about a row group or a few, and batches that change at least a region's rows.
@@ -749,6 +759,7 @@ public final class Fuzz {
     m.put("insert_frac", c.workload.insertFrac);
     m.put("rg_bytes", c.layout.rowGroupBytes);
     m.put("compact_every", c.layout.compactEvery);
+    m.put("cut_stride_rows", c.layout.cut == null ? 0 : c.layout.cut.strideRows);
     return JSON.writeValueAsString(m);
   }
 

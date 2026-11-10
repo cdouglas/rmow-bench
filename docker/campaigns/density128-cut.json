@@ -1,0 +1,9 @@
+{
+  "description": "Copies cut where a write changes, at Iceberg's row-group size (docs/HYPOTHESES.md, 2026-11-09, D3-D4): the density128 campaign's workload and reads, with the cut (layout.cut) on RMoR with row groups kept (theta 0) and on the deferred merges (theta 0.06), over 240 writes. Payload checks off, requests and held memory logged.",
+  "flags": ["--log-requests", "--log-held"],
+  "cores_per_job": 3,
+  "jobs": [
+    {"config": "configs/d128-upd-cut.json", "heap": "32g", "store_gib": 60},
+    {"config": "configs/d128-upd-density-cut.json", "heap": "32g", "store_gib": 40}
+  ]
+}

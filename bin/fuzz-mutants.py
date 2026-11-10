@@ -15,7 +15,7 @@ The budgets each mutant needs, as found on 2026-11-08 (c2e1e66): at 60 seeds of 
 every required mutant is caught; RMoW packing open row groups is caught by about one seed in 250
 to 500 (a round on havoc, not 60 seeds); a row group dead but for interior rows (ends-only) needs
 the heavy profile, which catches it in about one seed in 12; one dead but for its second row has
-not been caught in about 1,000 heavy seeds.
+not been caught in about 1,000 heavy seeds. The cut's two (2026-11-10): 6 and 3 of the 60 seeds.
 
 Each mutant is an exact-text replacement anchored in the code as this file's last commit left it;
 a replacement that no longer matches is reported, not skipped. Results: DIR/<mutant>/summary-*.jsonl
@@ -101,6 +101,25 @@ MUTANTS = {
         "compaction's bin-packing depends on a random draw: results right, counts not repeatable"
         " (about one seed in 60 shows it, at random: four times the budget)",
         4,
+    ),
+    "cut-drops-row-before-cut": (
+        ARMS + "TailCowArm.java",
+        "      int j = pieceOf[(int) ((p - r.first()) / stride)];\n      out.get(j).add(row);",
+        "      int j = pieceOf[(int) ((p - r.first()) / stride)];\n"
+        "      long next = (p - r.first() + 1) / stride;\n"
+        "      if ((p - r.first() + 1) % stride == 0 && next < strides && pieceOf[(int) next] != j) {\n"
+        "        continue;\n"
+        "      }\n"
+        "      out.get(j).add(row);",
+        "run",
+        "the cut drops the row just before each cut of a rewritten row group",
+    ),
+    "cut-drops-unspanned-folds": (
+        ARMS + "TailCowArm.java",
+        "      out.get(best).add(row);",
+        "      if (bestGap == 0) {\n        out.get(best).add(row);\n      }",
+        "run",
+        "the cut drops a row folded in from a delta row group whose id no piece's rows span",
     ),
     "mor-stats-miss-deletes": (
         ARMS + "MorArm.java",

@@ -4,6 +4,23 @@ The hypotheses are D1–D4 in [docs/HYPOTHESES.md](../HYPOTHESES.md) (2026-11-09
 designs as built at 128 MiB row groups and run now. D3 and D4 need the cut, which this draft plans.
 Nothing here is built until the user agrees the plan.
 
+**Built (2026-11-10, the user agreed the plan).** Where it differs from the plan below:
+- **The knob** is an object, `layout.cut`: `at` (`changed`, the only kind), `minStrides` (4) and
+  `strideRows` (20,000). Absent means one row group, as before, and keeps every configuration's
+  hash. `strideRows` is smaller only in the fuzzer, whose row groups hold 270 to 35,000 rows.
+- **Which arms:** every arm that keeps row groups whole, `rmor-c-footer-kept` and
+  `rmor-c-clean` too. It changes only how the batch's file cuts a rewritten row group.
+- **Folded rows** go to the piece whose live rows' ids span them, or the nearest. The writer no
+  longer knows the position they left, and ids follow position in this workload, as in the model.
+- **The planted bugs:** a piece drops the row just before a cut; a folded row that no piece's ids
+  span is dropped. A folded row placed in the neighbouring piece, as planned, is no bug: placement
+  changes the layout, never the rows, so no check could catch it.
+- **The code:** `arms/Cut.java` (the pieces), `TailCowArm.cutRows`, `LayoutSpec.CutSpec`,
+  `CutTest`; the fuzzer draws the cut from a stream of its own, so every other draw of a seed is
+  as before.
+- **Configurations:** `configs/d128-upd-cut.json`, `configs/d128-upd-density-cut.json`, campaign
+  `docker/campaigns/density128-cut.json`.
+
 ## Why
 
 At Iceberg's 128 MiB row groups a row group of this table holds about eight update regions. The

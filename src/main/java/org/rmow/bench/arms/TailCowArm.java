@@ -134,6 +134,8 @@ public final class TailCowArm extends MorArm {
   private int nextRegion = 0;
   private final Map<Long, List<long[]>> deltaReads = new HashMap<>();
   private final Set<Long> folded = new HashSet<>();
+  // with keep: where a rewritten row group is cut into row groups (null: it stays one)
+  private final LayoutSpec.CutSpec cut;
 
   public TailCowArm(ArmContext ctx, TailPolicy.Kind kind) {
     this(ctx, kind, Double.POSITIVE_INFINITY);
@@ -216,6 +218,12 @@ public final class TailCowArm extends MorArm {
     this.clean = clean;
     this.defer = defer;
     this.regionOf = defer == null ? null : new int[(int) ctx.log().totalIds()];
+    this.cut = keep ? ctx.layout().cut : null;
+    if (cut != null && (!"changed".equals(cut.at) || cut.minStrides < 1 || cut.strideRows < 1)) {
+      throw new IllegalArgumentException(
+          "Unknown cut: at " + cut.at + ", minStrides " + cut.minStrides + ", strideRows "
+              + cut.strideRows);
+    }
   }
 
   @Override
@@ -498,11 +506,21 @@ public final class TailCowArm extends MorArm {
               () -> {
                 Rewrite r = rewrites.get(at);
                 List<long[]> rows = changed(r.live(), versions);
-                if (foldedRows.get(at) != null) {
-                  rows.addAll(changed(foldedRows.get(at), versions));
-                  foldedRows.set(at, null);
+                List<long[]> fold =
+                    foldedRows.get(at) == null ? List.of() : changed(foldedRows.get(at), versions);
+                foldedRows.set(at, null);
+                int region = defer == null ? -1 : regionOf(r.k(), r.first());
+                if (cut == null) {
+                  rows.addAll(fold);
+                  out.add(rows, false, region);
+                } else {
+                  // the region stays with the first piece that has rows; the others are numbered
+                  // when a write first needs them
+                  for (List<long[]> piece : cutRows(r, rows, fold, dvPositions.get(r.k()))) {
+                    out.add(piece, false, piece.isEmpty() ? -1 : region);
+                    region = piece.isEmpty() ? region : -1;
+                  }
                 }
-                out.add(rows, false, defer == null ? -1 : regionOf(r.k(), r.first()));
                 rowsHeld.release(
                     Held.Kind.ROWS, r.liveRows(), "a row group of " + out.name + " encoded");
                 rewrites.set(at, r.dropped());
@@ -1184,6 +1202,77 @@ public final class TailCowArm extends MorArm {
       if (version >= 0) {
         out.add(v == null ? r : new long[] {r[0], version});
       }
+    }
+    return out;
+  }
+
+  /**
+   * The cut: rewrite {@code r}'s rows as pieces, in its row order ({@link Cut}). A stride is
+   * flagged when the batch changes a row in it ({@code changed}, the batch's DV positions in the
+   * file) or the file's DV holds a dead row there. Each of its live rows with the batch's changes
+   * ({@code rows}) goes to the piece of its position. Each row folded in from delta row groups
+   * ({@code folded}) left a position the DV now hides, which the writer no longer knows, so it goes
+   * to the piece whose rows' ids span it, or the nearest: the same piece where ids follow
+   * position, as they do in a row group written in id order. Either way every row is written once,
+   * and the old row group is dead whole.
+   */
+  private List<List<long[]>> cutRows(
+      Rewrite r, List<long[]> rows, List<long[]> folded, List<Integer> changed) {
+    int stride = cut.strideRows;
+    int strides = Cut.strides(r.rows(), stride);
+    long end = r.first() + r.rows();
+    boolean[] flagged = new boolean[strides];
+    if (changed != null) {
+      for (int p : changed) {
+        if (p >= r.first() && p < end) {
+          flagged[(int) ((p - r.first()) / stride)] = true;
+        }
+      }
+    }
+    BitSet gone = dead.get(r.k());
+    if (gone != null) {
+      for (int p = gone.nextSetBit((int) r.first()); p >= 0 && p < end; p = gone.nextSetBit(p + 1)) {
+        flagged[(int) ((p - r.first()) / stride)] = true;
+      }
+    }
+    int[] pieceOf = Cut.pieces(flagged, cut.minStrides);
+    int n = strides == 0 ? 1 : pieceOf[strides - 1] + 1;
+    List<List<long[]>> out = new ArrayList<>(n);
+    long[] lo = new long[n];
+    long[] hi = new long[n];
+    for (int j = 0; j < n; j++) {
+      out.add(new ArrayList<>());
+      lo[j] = Long.MAX_VALUE;
+      hi[j] = Long.MIN_VALUE;
+    }
+    for (long[] row : rows) {
+      int id = (int) row[0];
+      long p = posOfId[id];
+      if (fileOfId[id] != r.k() || p < r.first() || p >= end) {
+        throw new IllegalStateException(
+            "Row " + row[0] + " of a row group of " + files.get(r.k()).location()
+                + " rewritten at rows " + r.first() + ".." + end + " is at file " + fileOfId[id]
+                + " position " + p);
+      }
+      int j = pieceOf[(int) ((p - r.first()) / stride)];
+      out.get(j).add(row);
+      lo[j] = Math.min(lo[j], row[0]);
+      hi[j] = Math.max(hi[j], row[0]);
+    }
+    for (long[] row : folded) {
+      int best = 0;
+      long bestGap = Long.MAX_VALUE;
+      for (int j = 0; j < n; j++) {
+        if (lo[j] > hi[j]) {
+          continue; // a piece with no live rows
+        }
+        long gap = row[0] < lo[j] ? lo[j] - row[0] : row[0] > hi[j] ? row[0] - hi[j] : 0;
+        if (gap < bestGap) {
+          best = j;
+          bestGap = gap;
+        }
+      }
+      out.get(best).add(row);
     }
     return out;
   }

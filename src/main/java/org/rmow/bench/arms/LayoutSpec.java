@@ -186,6 +186,28 @@ public final class LayoutSpec {
     return defer != null ? defer : new Defer();
   }
 
+  /**
+   * The arms that keep row groups whole ({@code rmor-c-kept}, {@code rmor-c-footer-kept}, {@code
+   * rmor-c-clean}, {@code rmor-density}): a row group a write rewrites is written as several row
+   * groups, cut where the write changes it ({@link Cut}; docs/HYPOTHESES.md, 2026-11-09). Null: as
+   * one row group, as before. Left out of the configuration's hash when null.
+   */
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  public CutSpec cut = null;
+
+  /** Where a rewritten row group is cut. */
+  public static final class CutSpec {
+    /** {@code changed}: at the runs of strides the write changes or that hold dead rows. */
+    public String at = "changed";
+    /** A run of fewer than this many unflagged strides joins the flagged run beside it. */
+    public int minStrides = 4;
+    /**
+     * Rows a stride: Iceberg's page row limit, where every column of the bench's rows starts a
+     * page. Smaller only for the fuzzer, whose row groups hold fewer rows than a page limit.
+     */
+    public int strideRows = Cut.STRIDE_ROWS;
+  }
+
   /** {@link #updateRead}, with null as {@code id}. */
   public String updateReadOrDefault() {
     return updateRead != null ? updateRead : "id";
