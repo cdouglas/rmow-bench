@@ -97,6 +97,10 @@ select = ["where:regexp_matches(label, '^tune-.*-(s3x|azure)$') AND git_sha LIKE
 title = "The two workloads' main configurations, labelled wl-*, the references for their cloud run (docs/HYPOTHESES.md, 2026-11-10, L1-L4): the windows campaign's, with the locate pruned by each changed key and the sorted read skipping dead row groups, read through the skipping reader alone. On havoc at b49a57f for requests, bytes and held memory, and on the laptop (bearyak) at 0942497 for instructions; 0942497 adds only the fuzzer's layout.eagerBytes, which these leave unset"
 select = ["where:label LIKE 'wl-%' AND host IN ('havoc', 'bearyak')"]
 
+[campaigns.workloads-curves]
+title = "The workloads page's update curves with the reader changes of 6db916a, labelled wlc-upd-* (docker/campaigns/workloads-curves.json): MoR compacted every 3, 6 and 12 writes, the deferred merges at theta 1, 0.5, 0.25 and 0.12, and row groups of 4, 8 and 32 MiB, each the tune or windows campaign's configuration with workloads-ref's readers. On havoc for requests, bytes and held memory, and on the laptop (bearyak) for instructions"
+select = ["where:label LIKE 'wlc-%' AND host IN ('havoc', 'bearyak')"]
+
 [campaigns.mor-row]
 title = "MoR alone with updateRead row at the eleven rmor-* settings, on havoc at aeee8e3: the calibration of the cloud runs' MoR (docs/HYPOTHESES.md, 2026-11-06)"
 select = ["where:label LIKE 'mor-row-%' AND git_sha LIKE 'aeee8e3%'"]

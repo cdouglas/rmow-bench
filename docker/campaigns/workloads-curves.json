@@ -1,0 +1,17 @@
+{
+  "description": "The workloads page's update curves with the reader changes of 6db916a, labelled wlc-upd-*: MoR compacted every 3, 6 and 12 writes, the deferred merges at theta 1, 0.5, 0.25 and 0.12, and row groups of 4, 8 and 32 MiB (RMoW-append and the deferred merges). Each is the tune or windows campaign's configuration with the locate pruned by each changed key (layout.locate keys), read through the skipping reader alone with the sorted read, and no reads of old versions, as workloads-ref's wl-upd-base. Payload checks off, requests and held memory logged. The laptop runs the same configurations for instructions.",
+  "flags": ["--log-requests", "--log-held"],
+  "cores_per_job": 3,
+  "jobs": [
+    {"config": "configs/wlc-upd-mor-c12.json", "heap": "16g", "store_gib": 20},
+    {"config": "configs/wlc-upd-mor-c6.json", "heap": "16g", "store_gib": 20},
+    {"config": "configs/wlc-upd-mor-c3.json", "heap": "16g", "store_gib": 20},
+    {"config": "configs/wlc-upd-defer-p100.json", "heap": "16g", "store_gib": 20},
+    {"config": "configs/wlc-upd-defer-p50.json", "heap": "16g", "store_gib": 20},
+    {"config": "configs/wlc-upd-defer-p25.json", "heap": "16g", "store_gib": 20},
+    {"config": "configs/wlc-upd-defer-p12.json", "heap": "16g", "store_gib": 20},
+    {"config": "configs/wlc-upd-rg4m.json", "heap": "16g", "store_gib": 30},
+    {"config": "configs/wlc-upd-rg8m.json", "heap": "16g", "store_gib": 30},
+    {"config": "configs/wlc-upd-rg32m.json", "heap": "16g", "store_gib": 30}
+  ]
+}
