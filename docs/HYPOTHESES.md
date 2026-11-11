@@ -1432,3 +1432,139 @@ takes 0.56 s at write 240, against 1.79 and 10.5 s.
 - **Cold pieces never merge back.** The cut only splits.
 - **No page-skipping reader.** It is planned separately (the draft above).
 - **No instruction counts on havoc.** Time is simulated, as in the forecasts.
+
+## The two workloads in the cloud (registered 2026-11-10)
+
+**What it decides:** whether the workloads page's trade-offs hold on the stores' measured time.
+Every number on that page is simulated: the laptop's work at its pace, plus havoc's requests
+priced by the registered latency tests. The cloud runs so far timed the calibration, the base
+point, the sweeps, RMoR's rerun and the tuner's four picks, never these designs side by side on
+the two workloads. The page's claims: on the updates the region designs write in about twice MoR's time
+and read a range 2 to 4 times as fast, even against MoR compacted; on the inserts, compacting MoR
+or sealing RMoR's tail reads a range 2 to 3 times as fast as appending, for under half a second
+more a write.
+
+**Setup:** five configurations, `configs/wl-*.json`: the windows campaign's main points (2026-11-07)
+with the two reader changes of 6db916a, which every design takes. The locate prunes row groups by
+each changed key (`layout.locate` `keys`), and the sorted read skips dead row groups. Each reads
+through the skipping reader alone (`cached-skip`, the sorted read too) every 5 writes, and reads
+no old version (`travelBack` 1000). The table and workloads are those of 2026-11-06: 25.7 million
+rows laid out by id in 16 MiB row groups, and 30 writes.
+- **Updates** (150,000 changes a write as statements of 3% of a region's rows, a sixth of them
+  deletes; five windows of 1% by id at each probe): `wl-upd-base` runs MoR (`mor-v3`), RMoR
+  (`rmor-c-kept`), RMoW-external (`rmor-c-footer-kept`), RMoW-append (`rmow-c`) and the deferred
+  merges (`rmor-density`, θ = 0.06); `wl-upd-compact` runs MoR compacted every 10 writes.
+- **Inserts** (350,000 rows a write, late by a median of 0.05 writes and a p99 of 5; five windows
+  of 1% by event time): `wl-ing-base` runs MoR appending (and RMoR and RMoW-append, not judged);
+  `wl-ing-compact` runs MoR compacted every 10 writes; `wl-ing-seal160` runs RMoR (`rmor-c`) and
+  RMoW-append (`rmow-c`) with the tail sealed at 160 MiB.
+
+Each runs once at 0942497, in a 16 GB heap, with requests and held memory logged.
+- **S3 Express:** one `c7a.4xlarge` per configuration in usw2-az3, on one bucket. Four run at
+  once (the account's 64 vCPUs), and `wl-ing-compact` starts once `wl-upd-compact`'s VM is down.
+  Each VM runs its twin (the configuration on its own disk, with instruction counts), then its
+  spike, then its run.
+- **Azure Blob:** one `D8as_v6` in westus: a spike, then the five in turn, shortest first. Azure's
+  VMs count no instructions, so it runs no twin.
+
+**The references** (campaign `workloads-ref`): havoc's runs at b49a57f for requests, bytes and held
+memory, and the laptop's at 0942497 for instructions. 0942497 adds only the fuzzer's
+`layout.eagerBytes`, which these leave unset, and every record's requests and bytes agree between
+the two builds in all five configurations. The laptop's first runs (2026-11-10, 20:42–21:31 UTC)
+ran beside another session's model checks at 3.0–3.2 GHz against 4.6, and are excluded; the
+reruns ran at 4.49–4.59 GHz.
+
+**Measured latency:** as the workloads page has it. A write's mean over the 30, with the
+compactions spread over them; each read's mean over the probes of steps 5 to 30. Each phase's
+time is its wall time on its VM.
+
+**Forecast** (lab/pages/workloads-cloud.md: the laptop's work at its pace, havoc's requests priced
+by the registered spikes of 2026-10-31), in seconds:
+
+S3 Express:
+
+| Workload | Design (configuration, arm) | a write | a 1% window | a full scan | the sorted read |
+|---|---|---|---|---|---|
+| updates | MoR (`wl-upd-base`, `mor-v3`) | 4.15 | 0.92 | 8.30 | 9.55 |
+| updates | MoR compacted (`wl-upd-compact`, `mor-v3`) | 4.01 | 0.47 | 8.02 | 8.66 |
+| updates | RMoR (`wl-upd-base`, `rmor-c-kept`) | 9.82 | 0.33 | 7.21 | 7.53 |
+| updates | RMoW-external (`wl-upd-base`, `rmor-c-footer-kept`) | 9.66 | 0.25 | 7.02 | 7.28 |
+| updates | RMoW-append (`wl-upd-base`, `rmow-c`) | 9.24 | 0.24 | 6.99 | 7.30 |
+| updates | deferred merges (`wl-upd-base`, `rmor-density`) | 5.45 | 0.42 | 8.15 | 8.57 |
+| inserts | appending (`wl-ing-base`, `mor-v3`) | 0.49 | 1.92 | 8.84 | 10.82 |
+| inserts | MoR compacted (`wl-ing-compact`, `mor-v3`) | 0.96 | 0.70 | 8.77 | 9.83 |
+| inserts | RMoR sealed (`wl-ing-seal160`, `rmor-c`) | 0.85 | 0.91 | 8.80 | 9.99 |
+| inserts | RMoW-append sealed (`wl-ing-seal160`, `rmow-c`) | 0.86 | 1.88 | 8.76 | 10.19 |
+
+Azure Blob:
+
+| Workload | Design (configuration, arm) | a write | a 1% window | a full scan | the sorted read |
+|---|---|---|---|---|---|
+| updates | MoR (`wl-upd-base`, `mor-v3`) | 6.53 | 1.99 | 11.50 | 12.76 |
+| updates | MoR compacted (`wl-upd-compact`, `mor-v3`) | 5.77 | 0.72 | 10.33 | 10.98 |
+| updates | RMoR (`wl-upd-base`, `rmor-c-kept`) | 11.01 | 0.49 | 9.29 | 9.61 |
+| updates | RMoW-external (`wl-upd-base`, `rmor-c-footer-kept`) | 11.15 | 0.34 | 9.04 | 9.30 |
+| updates | RMoW-append (`wl-upd-base`, `rmow-c`) | 10.21 | 0.30 | 8.98 | 9.28 |
+| updates | deferred merges (`wl-upd-base`, `rmor-density`) | 7.27 | 0.68 | 11.12 | 11.54 |
+| inserts | appending (`wl-ing-base`, `mor-v3`) | 0.50 | 2.84 | 11.74 | 13.72 |
+| inserts | MoR compacted (`wl-ing-compact`, `mor-v3`) | 1.04 | 0.95 | 11.30 | 12.37 |
+| inserts | RMoR sealed (`wl-ing-seal160`, `rmor-c`) | 0.91 | 1.20 | 11.27 | 12.46 |
+| inserts | RMoW-append sealed (`wl-ing-seal160`, `rmow-c`) | 0.97 | 2.12 | 10.90 | 12.34 |
+
+**What the reader changes moved**, against the windows campaign's runs as the workloads page
+prices them:
+- **Writes:** the locate by key takes 12–16% off MoR's write and 12–17% off the deferred merges',
+  3–8% off RMoR's and RMoW-external's, and nothing off RMoW-append's.
+- **The sorted read:** skipping dead row groups brings RMoR's to 0.31 of its time and the
+  deferred merges' to 0.53. The page priced the sorted read under `cached`.
+- **Everything else:** within 1.5% on the updates' other reads, and within 2.5% on the inserts.
+
+- **L1: each cloud run sends what havoc's run of its configuration counts** (a control): every
+  record's requests, bytes and table state, and every one-thread phase's held peaks; each S3
+  Express twin likewise.
+- **L2: on the updates, the region designs trade a slower write for a faster range read.** On each
+  store:
+  - RMoR, RMoW-external and RMoW-append each write slower than MoR and than MoR compacted
+    (forecast 2.2–2.5 times on S3 Express, 1.6–1.9 on Azure);
+  - each of them reads a 1% window faster than both (1.4–3.9 and 1.5–6.7 times);
+  - MoR compacted reads a window faster than MoR (2.0 and 2.8 times);
+  - the deferred merges read a window faster than MoR (2.2 and 2.9 times), and write faster than
+    each region design (1.7–1.8 and 1.4–1.5 times).
+- **L3: on the inserts, merging late rows trades a little write time for a faster range read.**
+  On each store, MoR compacted and RMoR sealed each:
+  - read a 1% window faster than appending (2.1–2.7 times on S3 Express, 2.4–3.0 on Azure);
+  - write slower than it (1.7–2.1 times), but by less than a second a write (forecast
+    0.36–0.53 s).
+- **L4: on S3 Express each design's write and each of its reads is priced within 15%** by its
+  twin's work (on the VM's own cores, at its arm's pace there) and its VM's spike. In the tuner's
+  cloud run these came within 0–12% (K3 judged whole mixes at 20%).
+
+**Measured, not judged:**
+- **The near pairs:**
+  - the full scans and sorted reads, where the region designs' forecast is 11–28% faster than
+    either MoR's on the updates, and the designs are within 11% of each other on the inserts;
+  - MoR compacted's write against MoR's (0.97 and 0.88 times);
+  - the deferred merges' write against MoR's and MoR compacted's (1.11–1.36 times), and their
+    window against MoR compacted's (1.07–1.11);
+  - RMoW-append sealed's window against appending's (1.02 and 1.34).
+- **Each operation's measured time against its forecast**, on each store, and so the VMs' pace
+  against the laptop's.
+- **Azure's prices**, from the S3 Express twins' work (both VMs Zen 4) and its spike. In the
+  tuner's cloud run they came within 0.82–1.20 of the measured time.
+- **Latency by snapshot over the 30 writes.** On the page, MoR's write and range read grow as its
+  deletes pile up, and RMoW-append's stay level.
+- **Where the measured time goes:** decoding, encoding, the store, and pauses.
+- **The other two designs of `wl-ing-base`.**
+- **The spikes under the fleet's load.**
+
+**Limits:**
+- **Scale:** one run of each configuration, one seed, 30 writes.
+- **Shared and sequential runs:** the S3 Express runs share one bucket, each measured under the
+  others' load, and the fifth runs after the first four. The Azure runs come one after another over
+  three to four hours, and Azure's read waits have moved by seconds between runs before
+  (lab/pages/rmor-rerun.md).
+- **Short reads:** the window reads of the region designs and of MoR compacted take a fraction of
+  a second, so a few requests' first bytes decide them.
+- **The forecast's pace:** it prices CPU at the laptop's pace. The region designs' writes are
+  55–64% CPU in the forecast, against MoR's 26–41%, so the VMs' pace moves their writes more than
+  MoR's.

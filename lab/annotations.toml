@@ -93,6 +93,10 @@ select = ["where:label LIKE 'tune-%' AND host IN ('havoc', 'bearyak')"]
 title = "The tuner's picks in the cloud (docs/HYPOTHESES.md, 2026-11-08, K1-K3): its four configurations at be8d6f1 on S3 Express (a c7a.4xlarge each in usw2-az3, at once, each after its twin on its own disk and its spike) and on Azure Blob (one D8as_v6 in westus, in turn, after one spike)"
 select = ["where:regexp_matches(label, '^tune-.*-(s3x|azure)$') AND git_sha LIKE 'be8d6f1%'", "where:label LIKE 'tune-%' AND host LIKE 'ip-%' AND git_sha LIKE 'be8d6f1%'", "spike/s3x-spike-tune-*", "spike/azure-spike-20261108T225400Z"]
 
+[campaigns.workloads-ref]
+title = "The two workloads' main configurations, labelled wl-*, the references for their cloud run (docs/HYPOTHESES.md, 2026-11-10, L1-L4): the windows campaign's, with the locate pruned by each changed key and the sorted read skipping dead row groups, read through the skipping reader alone. On havoc at b49a57f for requests, bytes and held memory, and on the laptop (bearyak) at 0942497 for instructions; 0942497 adds only the fuzzer's layout.eagerBytes, which these leave unset"
+select = ["where:label LIKE 'wl-%' AND host IN ('havoc', 'bearyak')"]
+
 [campaigns.mor-row]
 title = "MoR alone with updateRead row at the eleven rmor-* settings, on havoc at aeee8e3: the calibration of the cloud runs' MoR (docs/HYPOTHESES.md, 2026-11-06)"
 select = ["where:label LIKE 'mor-row-%' AND git_sha LIKE 'aeee8e3%'"]
@@ -127,3 +131,11 @@ note = "laptop run beside a lab build: its clock 4.36-4.40 GHz against 4.6; reru
 select = "tune-ing-seal160-f2-078f133b6441/20261108T082229Z"
 mark = "excluded"
 note = "laptop run beside a lab build: its clock 4.36-4.40 GHz against 4.6; rerun 2026-11-08"
+[[annotate]]
+select = "where:label LIKE 'wl-%' AND host = 'bearyak' AND started_at BETWEEN TIMESTAMP '2026-11-10 20:40:00' AND TIMESTAMP '2026-11-10 21:40:00'"
+mark = "excluded"
+note = "laptop runs beside another session's TLA+ model checks (load about 9): their clock 3.0-3.2 GHz against 4.5-4.6 for the windows campaign's laptop runs, and wl-upd-base's clock spin read 0.647 (others 1.000), so their work's pace is not the laptop's. Requests and bytes match havoc's exactly. Rerun 2026-11-10 on the idle laptop, from a clean worktree at 0942497"
+[[annotate]]
+select = "where:run_id IN ('wl-ing-compact-7b0b8b27829f/20261110T230425Z', 'wl-ing-seal160-b4a616b68fad/20261110T230658Z')"
+mark = "excluded"
+note = "laptop reruns beside another session's TLA+ model check (TLC with 4 workers, from 23:04:31 UTC): their clock 3.6 GHz against 4.5-4.6 for the three reruns before them; rerun again once the laptop was idle"

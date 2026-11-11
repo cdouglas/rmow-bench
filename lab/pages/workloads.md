@@ -28,20 +28,16 @@ ns = tune.pace(con)
 tune.WORKLOADS["ing_all"] = "regexp_matches(label, '^(win-ing-|tune-ing-)')"
 SU, SI = (tune.steps(con, wl, formula, ns, True) for wl in ("upd", "ing_all"))
 P = pd.concat([tune.policies(con, "upd", formula, ns, True, SU), tune.policies(con, "ing_all", formula, ns, True, SI)])
-STORES = ["S3 Express", "Azure Blob"]
+STORES = fig.WL_STORES
 S3X, AZ = STORES
-P["Store"] = P.store.map({"s3x": S3X, "azure": AZ})
+P["Store"] = P.store.map(fig.WL_STORE)
 # each write's, compaction's and read's simulated time (s), for the whiskers and the snapshots
 S = pd.concat([SU, SI])
-S["Store"] = S.store.map({"s3x": S3X, "azure": AZ})
+S["Store"] = S.store.map(fig.WL_STORE)
 S["s"] = S.ms / 1e3
 
-COLOR = {"MoR": "#2a78d6", "RMoR": "#eda100", "RMoW-external": "#008300", "RMoW-append": "#1baf7a",
-         "deferred merges": "#b8478f", "appending": "#5f6b75"}
-SHAPE = {"MoR": "circle", "RMoR": "triangle-up", "RMoW-external": "square", "RMoW-append": "diamond",
-         "deferred merges": "triangle-down", "appending": "circle"}
-# a main point's own color where two share a family (MoR and MoR compacted, in the snapshots)
-NCOLOR = {"MoR compacted": "#7fb2ea"}
+# the designs' colors and shapes (figures.py, shared with the measured page)
+COLOR, SHAPE, NCOLOR, READ = fig.WL_COLOR, fig.WL_SHAPE, fig.WL_NCOLOR, fig.WL_READ
 
 # (configuration, arm, family, curve it lies on, its knob's value, its name if a main point, order on
 # the curve). A curve runs through one family's settings of one knob.
@@ -74,35 +70,11 @@ ING = [
 ]
 
 
-def whiskers():
-    """Per store, configuration and arm: the 10th and 90th percentile of its writes (with its
-    compactions spread over them, as its mean has), and its fastest and slowest read of each kind
-    over the probes after 5 to 30 writes (s)."""
-    rows = []
-    for (store, label, arm), g in S.groupby(["Store", "label", "arm"]):
-        w = g[(g.phase == "batch") & (g.step >= 1)]
-        c = g[g.phase == "compact"].s.sum() / w.step.nunique()
-        row = dict(Store=store, label=label, arm=arm, write_lo=w.s.quantile(0.1) + c,
-                   write_hi=w.s.quantile(0.9) + c)
-        for kind, (phase, reader) in tune.READS.items():
-            r = g[(g.phase == phase) & (g.reader == reader) & (g.step >= 5)].s
-            row[f"{kind}_s_lo"], row[f"{kind}_s_hi"] = (r.min(), r.max()) if len(r) else (np.nan, np.nan)
-        rows.append(row)
-    return pd.DataFrame(rows)
-
-
-W = whiskers()
+W = fig.wl_whiskers(S)
 
 
 def frame(spec):
-    rows = []
-    for label, arm, family, curve, knob, name, order in spec:
-        for _, r in P[(P.label == label) & (P.arm == arm)].iterrows():
-            rows.append(dict(Store=r.Store, label=label, arm=arm, family=family, curve=curve, knob=knob,
-                             name=name or "", main=name is not None, order=order,
-                             write_s=(r.write_ms + r.compact_ms) / 1e3, compact_s=r.compact_ms / 1e3,
-                             window_s=r.window_ms / 1e3, full_s=r.full_ms / 1e3, sorted_s=r.sorted_ms / 1e3))
-    return pd.DataFrame(rows).merge(W, on=["Store", "label", "arm"], how="left")
+    return fig.wl_frame(spec, P, W)
 
 
 U, I = frame(UPD), frame(ING)
@@ -125,118 +97,16 @@ def span(xs, fmt="{:.2f}"):
     return lo if lo == hi else f"{lo}–{hi}"
 
 
-READ = {"window_s": "a range read (1% of the table)", "full_s": "a full scan", "sorted_s": "a sorted read"}
-
-
-def tradeoff(d, reads, place, width=300, height=220):
-    """Write latency (compactions spread over the writes) against read latency, a panel per kind
-    of read and a row per store; each family's settings of one knob joined in order. The designs
-    are named in the first panel, each placed by `place` (name: (align, dy[, dx]), or a dict of
-    them by store), and carry whiskers:
-    across, their writes' 10th to 90th percentile; up, their fastest to slowest read."""
-    L = d.melt(id_vars=[c for c in d.columns if c not in READ], value_vars=reads,
-               var_name="kind", value_name="read_s")
-    L["read"] = L.kind.map(READ)
-    L["read_lo"] = [r[f"{r['kind']}_lo"] for r in L.to_dict("records")]
-    L["read_hi"] = [r[f"{r['kind']}_hi"] for r in L.to_dict("records")]
-    def at_(n, st):
-        p = place[n]
-        return p.get(st, p.get("*")) if isinstance(p, dict) else p
-    L["place"] = [" ".join(str(x) for x in at_(n, st)) if n in place and k == reads[0] else ""
-                  for n, k, st in zip(L.name, L.kind, L.Store)]
-    fams = [f for f in COLOR if f in set(L.family) | set(L.curve)]
-    legend = alt.Legend(title=None, orient="bottom", direction="horizontal")
-    color = alt.Color("family:N", legend=legend, scale=alt.Scale(domain=fams, range=[COLOR[f] for f in fams]))
-    lcolor = alt.Color("curve:N", legend=legend, scale=alt.Scale(domain=fams, range=[COLOR[f] for f in fams]))
-    shape = alt.Shape("family:N", legend=legend, scale=alt.Scale(domain=fams, range=[SHAPE[f] for f in fams]))
-    xs = alt.Scale(domain=[0, max(1.18 * L.write_s.max(), 1.04 * L[L.main].write_hi.max())], nice=False)
-    x = alt.X("write_s:Q", title="write latency (s)", scale=xs)
-    y = alt.Y("read_s:Q", title="read latency (s)", scale=alt.Scale(zero=True))
-    tip = ["Store", "family", "knob", "name", alt.Tooltip("write_s:Q", format=".2f"),
-           alt.Tooltip("compact_s:Q", format=".2f"), "read", alt.Tooltip("read_s:Q", format=".2f")]
-    line = alt.Chart().transform_filter(alt.datum.curve != "").mark_line(strokeWidth=1.5, opacity=0.55).encode(
-        x=x, y=y, color=lcolor, detail="curve:N", order="order:Q")
-    small = alt.Chart().transform_filter(~alt.datum.main).mark_point(size=28, filled=True, opacity=0.8).encode(
-        x=x, y=y, color=color, shape=shape, tooltip=tip)
-    across = alt.Chart().transform_filter(alt.datum.main).mark_rule(strokeWidth=1.5, opacity=0.6).encode(
-        x=alt.X("write_lo:Q", title="write latency (s)", scale=xs), x2="write_hi:Q", y=y, color=color)
-    up = alt.Chart().transform_filter(alt.datum.main).mark_rule(strokeWidth=1.5, opacity=0.6).encode(
-        x=x, y=alt.Y("read_lo:Q", title="read latency (s)", scale=alt.Scale(zero=True)), y2="read_hi:Q",
-        color=color)
-    big = alt.Chart().transform_filter(alt.datum.main).mark_point(
-        size=110, filled=True, opacity=1, stroke="white", strokeWidth=0.8).encode(
-        x=x, y=y, color=color, shape=shape, tooltip=tip)
-    labels = []
-    for p in sorted(set(L.place) - {""}):
-        align, dy, *dx = p.split()
-        dx = int(dx[0]) if dx else (8 if align == "left" else -8)
-        labels.append(alt.Chart().transform_filter(alt.datum.place == p).mark_text(
-            align=align, dx=dx, dy=int(dy), fontSize=11, fontWeight="bold").encode(
-            x=x, y=y, text="name:N", color=color))
-    return alt.layer(line, across, up, small, big, *labels, data=L).properties(width=width, height=height).facet(
-        row=alt.Row("Store:N", sort=STORES, title=None),
-        column=alt.Column("read:N", sort=[READ[r] for r in reads], title=None)).resolve_scale(y="independent")
-
-
-def twin(d, reads=("window_s", "full_s", "sorted_s")):
-    t = d[["Store", "family", "knob", "name", "label", "arm", "write_s", "write_lo", "write_hi", "compact_s",
-           *[c for r in reads for c in (r, f"{r}_lo", f"{r}_hi")]]].copy()
-    t["_s"] = t.Store.map(STORES.index)
-    return t.sort_values(["_s", "family", "order" if "order" in t else "write_s"]).drop(columns="_s").round(3)
+tradeoff, twin, snapshot_chart = fig.wl_tradeoff, fig.wl_twin, fig.wl_snapshot_chart
 
 
 def snapshots(spec, reads):
     """Each design's (main point's) simulated time at every write, compaction and read probe."""
-    rows = []
-    for label, arm, family, curve, knob, name, order in spec:
-        if name is None:
-            continue
-        g = S[(S.label == label) & (S.arm == arm)]
-        parts = [g[(g.phase == "batch") & (g.step >= 1)].assign(what="a write"),
-                 g[g.phase == "compact"].assign(what="a compaction")]
-        for r in reads:
-            phase, reader = tune.READS[r[:-2]]
-            parts.append(g[(g.phase == phase) & (g.reader == reader)].assign(what=READ[r]))
-        rows += [x.assign(name=name, family=family)[["Store", "name", "family", "what", "step", "s"]] for x in parts]
-    return pd.concat(rows, ignore_index=True)
-
-
-def snapshot_chart(d, reads, width=300, height=150):
-    """Lines over the snapshots: write latency at every write (a compaction a cross at its write),
-    and each kind of read's latency at every probe; a column per store."""
-    names = list(dict.fromkeys(d.name))
-    fam = d.drop_duplicates("name").set_index("name").family
-    color = alt.Color("name:N", title=None, sort=names, legend=alt.Legend(orient="bottom"),
-                      scale=alt.Scale(domain=names, range=[NCOLOR.get(n, COLOR[fam[n]]) for n in names]))
-    shape = alt.Shape("name:N", title=None, sort=names,
-                      scale=alt.Scale(domain=names, range=[SHAPE[fam[n]] for n in names]))
-    x = alt.X("step:Q", title="snapshots (writes since the initial load)",
-              scale=alt.Scale(domain=[0, 30], nice=False), axis=alt.Axis(values=list(range(0, 31, 5))))
-    tip = ["Store", "name", "what", "step", alt.Tooltip("s:Q", format=".2f")]
-
-    def graph(what, title, ytitle, size):
-        y = alt.Y("s:Q", title=ytitle, scale=alt.Scale(zero=True))
-        line = alt.Chart().transform_filter(alt.datum.what == what).mark_line(
-            strokeWidth=2, point=alt.OverlayMarkDef(size=size)).encode(
-            x=x, y=y, color=color, shape=shape, detail="name:N", tooltip=tip)
-        layers = [line]
-        if what == "a write" and (d.what == "a compaction").any():
-            layers.append(alt.Chart().transform_filter(alt.datum.what == "a compaction").mark_point(
-                shape="cross", filled=True, size=90, opacity=1).encode(x=x, y=y, color=color, tooltip=tip))
-        return (alt.layer(*layers, data=d).properties(width=width, height=height)
-                .facet(column=alt.Column("Store:N", title=None, sort=STORES))
-                .properties(title=alt.Title(title, anchor="start")))
-
-    return alt.vconcat(graph("a write", "A write", "write latency (s)", 18),
-                       *[graph(READ[r], READ[r][0].upper() + READ[r][1:], "read latency (s)", 50) for r in reads])
+    return fig.wl_snapshots(spec, S, reads)
 
 
 def snapshot_table(d, what):
-    t = d[d.what == what].pivot_table(index="step", columns=["Store", "name"], values="s")
-    names = list(dict.fromkeys(d.name))
-    t = t.reindex(columns=[(st, n) for st in STORES for n in names if (st, n) in t.columns])
-    t.columns = [f"{st}: {n}" for st, n in t.columns]
-    return table(t.reset_index().round(2), caption=f"{what[0].upper() + what[1:]}: simulated latency (s) at each snapshot")
+    return fig.wl_snapshot_table(d, what, "simulated")
 
 
 # Where the time goes: the laptop's CPU split by kind (phase_breakdown, the phase's own thread) applies
@@ -250,15 +120,12 @@ WHERE r.host = 'bearyak' AND (list_contains(r.campaigns, 'windows') OR list_cont
        OR (b.step >= 5 AND ((b.phase IN ('read_full', 'read_window') AND b.reader = 'cached-skip')
                             OR (b.phase = 'read_sorted' AND b.reader = 'cached'))))
 GROUP BY ALL""")
-CPU_PART = {"decode CPU": "decoding", "encode CPU": "encoding", "footer CPU": "deletion vectors and footers",
-            "deletes CPU": "deletion vectors and footers", "other CPU": "rows and planning",
-            "store client CPU": "the store"}
+CPU_PART = {k: v for k, v in fig.WL_CPU_PART.items() if k.endswith("CPU")}
 B["part"] = B.component.map(CPU_PART)
 SH = B.groupby(["label", "arm", "phase", "part"]).ms.sum()
 SH = SH / SH.groupby(level=["label", "arm", "phase"]).transform("sum")
-PARTS = ["decoding", "encoding", "deletion vectors and footers", "rows and planning", "the store",
-         "compactions, spread over the writes"]
-PCOL = {**fig.PART_COLORS, "compactions, spread over the writes": fig.PART_COLORS["paused (GC, JIT)"]}
+PARTS = [p for p in fig.WL_PARTS if p != "paused (GC, JIT)"]
+PCOL = fig.WL_PCOL
 WHAT = {"write": ("batch", "a write"), "window": ("read_window", READ["window_s"]),
         "full": ("read_full", READ["full_s"]), "sorted": ("read_sorted", READ["sorted_s"])}
 
@@ -283,17 +150,7 @@ def parts(spec):
 
 
 def parts_chart(d, whats, names):
-    def panel(w):
-        return alt.Chart(d[d.what == w]).mark_bar().encode(
-            x=alt.X("s:Q", title="seconds", stack="zero"),
-            y=alt.Y("name:N", title=None, sort=names),
-            color=alt.Color("part:N", title=None, sort=PARTS,
-                            scale=alt.Scale(domain=PARTS, range=[PCOL[p] for p in PARTS]),
-                            legend=alt.Legend(orient="top", columns=3, labelLimit=260)),
-            order=alt.Order("pord:Q"),
-            tooltip=["Store", "name", "what", "part", alt.Tooltip("s:Q", format=".2f")],
-        ).properties(width=190).facet(row=alt.Row("Store:N", sort=STORES, title=None)).properties(title=w)
-    return alt.hconcat(*[panel(w) for w in whats]).resolve_scale(x="independent", y="independent")
+    return fig.wl_parts_chart(d, whats, names, PARTS)
 
 
 UP, IP = parts(UPD), parts(ING)

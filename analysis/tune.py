@@ -200,9 +200,10 @@ def loo(train):
     return rec, mean, w.reset_index()
 
 
-def work(con, runs, formula, ns, measured):
+def work(con, runs, formula, ns, measured, grid=GRID):
     """Work in ms per run, arm, step, phase and reader of the priced phases: predicted from the
-    counts, or with `measured`, the laptop's phase_work where it ran the configuration."""
+    counts, or with `measured`, the laptop's phase_work where it ran the configuration (among the
+    runs `grid` selects)."""
     d = records(con, f"s.run_id IN ({','.join(repr(r) for r in runs)})")
     d["instr"] = formula.predict(d)
     d["reader"] = d.reader.fillna("")
@@ -219,7 +220,7 @@ def work(con, runs, formula, ns, measured):
             SELECT r.label, w.arm, w.step, w.phase, coalesce(w.reader, '') AS reader,
                    avg(w.work_ms) AS work_ms
             FROM phase_work w JOIN canonical_runs r USING (run_id)
-            WHERE r.host <> 'havoc' AND {GRID.replace('campaigns', 'r.campaigns')}
+            WHERE r.host <> 'havoc' AND {grid.replace('campaigns', 'r.campaigns')}
               AND w.phase IN ('batch', 'compact', 'read_full', 'read_recent', 'read_window', 'read_sorted')
             GROUP BY ALL""").df()
         d = d.merge(m, on=["label", "arm", "step", "phase", "reader"], how="left", suffixes=("", "_m"))
@@ -242,13 +243,14 @@ def prices(con, runs):
     return pd.concat(out)
 
 
-def steps(con, workload, formula, ns, measured):
+def steps(con, workload, formula, ns, measured, grid=GRID):
     """Simulated time per store, run, arm, step and priced phase (a write, a compaction and each
     read of READS under its reader): `ms` = the work (`work`) plus the requests priced by size
-    (`prices`)."""
+    (`prices`), for havoc's runs of the workload among those `grid` selects (the windows and tune
+    campaigns by default)."""
     runs = con.sql(f"""SELECT run_id, label FROM canonical_runs
-                       WHERE {GRID} AND host = 'havoc' AND status = 'finished' AND {WORKLOADS[workload]}""").df()
-    w = work(con, list(runs.run_id), formula, ns, measured)
+                       WHERE {grid} AND host = 'havoc' AND status = 'finished' AND {WORKLOADS[workload]}""").df()
+    w = work(con, list(runs.run_id), formula, ns, measured, grid)
     p = prices(con, list(runs.run_id))
     d = p.merge(w, on=["run_id", "arm", "step", "phase", "reader"], how="left")
     priced = d.phase.isin(["batch", "compact"])
@@ -366,22 +368,23 @@ def per_write(d, col):
     return out
 
 
-def cloud(con, store):
-    """The seven policies on `store` (s3x or azure), each part of a write in four bases, as
-    policies() gives them (one frame per basis): `measured`, the cloud run's wall time; `priced`,
-    its S3 Express twin's work (the configuration on that VM's disk, at its arm's pace there) plus
-    the cloud run's requests priced by its spike (on S3 Express its own VM's, on Azure the one the
-    VM ran first); and the two parts of the price, `work` and `requests`."""
+def cloud_steps(con, store, policies=None, where=CLOUD):
+    """Each policy's cloud run on `store` (s3x or azure) per arm, step, phase and reader, from
+    `sized_latency`: `measured_ms`, the phase's wall time in the cloud; `priced_ms`, its twin's
+    work (the configuration on the S3 Express VM's disk, at its arm's pace there) plus the cloud
+    run's requests priced by its spike (on S3 Express its own VM's, on Azure the one the VM ran
+    first), the two parts as `work_ms` and `request_ms`. `policies` are (workload, label, arm),
+    CLOUD_POLICIES by default; `where` selects the campaign's cloud runs, twins and spikes."""
     def one(sql):
         r = con.sql(sql).fetchall()
         if len(r) != 1:
             raise ValueError(f"{len(r)} runs for {sql}")
         return r[0][0]
-    rows = {b: [] for b in ("measured", "priced", "work", "requests")}
-    for workload, label, arm in CLOUD_POLICIES:
-        run = one(f"SELECT run_id FROM canonical_runs WHERE {CLOUD} AND label = '{label}-{store}'")
-        twin = one(f"SELECT run_id FROM canonical_runs WHERE {CLOUD} AND label = '{label}'")
-        spike = one(f"SELECT run_id FROM runs WHERE {CLOUD} AND run_id LIKE 'spike/{store}-spike-%'"
+    out = []
+    for workload, label, arm in policies or CLOUD_POLICIES:
+        run = one(f"SELECT run_id FROM canonical_runs WHERE {where} AND label = '{label}-{store}'")
+        twin = one(f"SELECT run_id FROM canonical_runs WHERE {where} AND label = '{label}'")
+        spike = one(f"SELECT run_id FROM runs WHERE {where} AND run_id LIKE 'spike/{store}-spike-%'"
                     + (f" AND run_id LIKE 'spike/s3x-spike-{label}-2%'" if store == "s3x" else ""))
         m = con.sql(f"SELECT * FROM sized_latency('{run}', '{spike}') WHERE arm = '{arm}'").df()
         t = con.sql(f"SELECT arm, step, phase, reader, work_ms FROM sized_latency('{twin}', '{spike}') "
@@ -389,11 +392,25 @@ def cloud(con, store):
         d = m.drop(columns="work_ms").merge(t, on=["arm", "step", "phase", "reader"], how="left")
         d["reader"] = d.reader.fillna("")
         d["priced_ms"] = d.work_ms + d.request_ms
+        out.append(d.assign(workload=workload, store=store, label=label, design=DESIGN[arm],
+                            run=run, twin=twin, spike=spike))
+    return pd.concat(out, ignore_index=True)
+
+
+def cloud(con, store):
+    """The seven policies on `store` (s3x or azure), each part of a write in four bases, as
+    policies() gives them (one frame per basis), from cloud_steps(): `measured`, the cloud run's
+    wall time; `priced`, its twin's work plus the cloud run's requests priced by its spike; and the
+    two parts of the price, `work` and `requests`."""
+    d = cloud_steps(con, store)
+    rows = {b: [] for b in ("measured", "priced", "work", "requests")}
+    for workload, label, arm in CLOUD_POLICIES:
+        g = d[(d.workload == workload) & (d.label == label) & (d.arm == arm)]
         base = dict(workload=workload, store=store, label=label, arm=arm, design=DESIGN[arm],
-                    run=run, twin=twin, spike=spike)
+                    run=g.run.iloc[0], twin=g.twin.iloc[0], spike=g.spike.iloc[0])
         for basis, col in (("measured", "measured_ms"), ("priced", "priced_ms"), ("work", "work_ms"),
                            ("requests", "request_ms")):
-            rows[basis].append(dict(base, **per_write(d, col)))
+            rows[basis].append(dict(base, **per_write(g, col)))
     return {b: pd.DataFrame(r) for b, r in rows.items()}
 
 

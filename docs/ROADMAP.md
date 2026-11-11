@@ -549,11 +549,22 @@ lower.
     the workloads page gains whiskers and latency as snapshots are added (ee7f046);
   - [x] the locate by each changed key (`locate` `keys`) and the skipping sorted read (6db916a),
     with tests and two mutants; five configurations `wl-*` and campaign `workloads-ref` (b49a57f);
-  - [ ] fuzz rounds on havoc at b49a57f (`keys-r1`, `keys-r1-heavy`) and the mutants' calibration;
-  - [ ] reference runs: `workloads-ref` on havoc (requests and bytes), the same on the laptop
-    (instructions); the workloads page's main points refreshed from them;
-  - [ ] hypotheses registered from the reference runs' simulation;
-  - [ ] the measured page built and checked on the reference runs, so the cloud runs drop in;
+  - [x] fuzz rounds on havoc: `keys-r1` and `keys-r1-heavy` at b49a57f (7,189 seeds), then
+    `keys-r2` and `keys-r2-heavy` at 0942497 (9,043 seeds), whose `layout.eagerBytes` lets small
+    tables reach the per-row-group paths. No wrong result; the timeouts were the cut's small strides
+    decoding large footers. The two new mutants are caught at 0942497 (1 of 60 seeds each);
+  - [ ] every mutant's calibration at 0942497, since the fuzzer's draws changed (running on the
+    laptop 2026-11-10: `results/fuzz/calibration-0942497`, then `-heavy`);
+  - [x] reference runs: `workloads-ref` on havoc at b49a57f (requests and bytes) and on the laptop
+    at 0942497 (instructions), agreeing on every request and byte. The laptop's first runs ran
+    beside another session's model checks and were rerun (lab/annotations.toml);
+  - [x] hypotheses registered from the reference runs' simulation (L1-L4, 2026-11-10);
+  - [x] the measured page (`lab/pages/workloads-cloud.md`, not yet in the toc), sharing the
+    workloads page's charts (`lab/figures.py` `wl_*`), checked on the tuner's cloud runs;
+  - [ ] the workloads page's main points from `workloads-ref`, and its update curves rerun with the
+    same reader changes (`wlc-upd-*` on havoc): the locate by key takes 12-17% off the writes of
+    MoR and the deferred merges, so the old curves (`win-upd-*`, `tune-upd-*`) do not meet the new
+    main points. The insert curves moved under 2.5% and stay;
   - [ ] the cloud run: on S3 Express a `c7a.4xlarge` per configuration (four at once, the fifth
     after), each after its twin and spike; on Azure Blob one `D8as_v6`, in turn, after one spike.
     The user's address changes during the day: rerun `infra-up` before each deploy step.

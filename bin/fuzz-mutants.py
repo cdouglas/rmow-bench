@@ -16,8 +16,9 @@ every required mutant is caught; RMoW packing open row groups is caught by about
 to 500 (a round on havoc, not 60 seeds); a row group dead but for interior rows (ends-only) needs
 the heavy profile, which catches it in about one seed in 12; one dead but for its second row has
 not been caught in about 1,000 heavy seeds. The cut's two (2026-11-10, strides of 2 to 64 a row
-group): 8 and 2 of the 60 seeds. The sorted read's skip and the locate by key (2026-11-10): see
-calibration.txt of their first round.
+group): 8 and 2 of the 60 seeds. The sorted read's skip and the locate by key (2026-11-10,
+0942497): 1 of the 60 seeds each, once the fuzzer drew small tables' planning row group by row
+group (layout.eagerBytes); at the 1 MiB default, none of 60.
 
 Each mutant is an exact-text replacement anchored in the code as this file's last commit left it;
 a replacement that no longer matches is reported, not skipped. Results: DIR/<mutant>/summary-*.jsonl
