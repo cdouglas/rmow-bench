@@ -398,6 +398,20 @@ What their data showed:
   0.70. The cloud runs measured on S3 Express 0.72 and 0.73, 0.99 and 0.93, 0.85 and 0.71, 0.60 and
   0.77 (lab/pages/cloud.md).
 
+**Moved 2026-11-11: the catalog's Azure append spike and seal probe**, to catalog-bench, with the
+code that made them (`AzureAppendSpike`, `AzureSealProbe`, the deploy's `appends` step, the lab's
+`append_requests` and `append_levels`). They measured Azure Append Blobs for fileio-catalog's log,
+not RMoW, so they belong with the catalog's benchmark. Copied unchanged (each directory's files
+checked by SHA-256) into catalog-bench's `results/spike/`, then deleted here:
+- `spike/azure-appends-20261110T192545Z` (107 MB): blind against conditional appends from 1 to 64
+  writers, built at ee7f046;
+- `spike/azure-seal-20261110T224335Z`, `azure-lease-20261110T224617Z`,
+  `azure-fill-20261110T224935Z` and `azure-fill-paced-20261110T225107Z`: the fences a segment of the
+  catalog's log could close by, from the laptop against the account and Azurite.
+
+What they showed is in fileio-catalog's docs/AZURE_LOG.md ("Why: the measurement", "Closing a
+segment"); the predictions, written before the run, are in catalog-bench's docs/AZURE_APPENDS.md.
+
 ## Findings so far
 
 **The cloud calibration (2026-10-28,** [lab/pages/cloud.md](../lab/pages/cloud.md)**).** Three runs

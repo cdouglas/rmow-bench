@@ -15,16 +15,13 @@
 #              cloud twins of runs made elsewhere)
 #   twin       each of CONFIGS with a local store, once, as it is (its label and hash), on the VM's
 #              disk: its run's local twin on the same build and cores, with instruction counts
-#   appends    Azure only: blind and conditional appends from many writers to one Append Blob
-#              (AzureAppendSpike, the build at SPIKE_COMMIT; APPENDS_ARGS adds its flags), for the
-#              catalog's shared log (docs/AZURE_RUNBOOK.md, "Blind appends")
 # In a fleet, a VM's test and spike objects go under a prefix of its NAME, and its spike's results
 # take a label of it, so VMs whose steps start in the same second stay apart.
 # Its log is ~/run.log; results land in ~/rmow-bench/results, as on the laptop.
 set -euo pipefail
 cd "$HOME"
 
-STEPS=(build test spike bench twin appends)
+STEPS=(build test spike bench twin)
 # Gradle without the engines (Spark, Flink, Kafka Connect), which rmow-bench does not use
 GRADLE=(./gradlew --no-daemon -q -DsparkVersions= -DflinkVersions= -DkafkaVersions=)
 
@@ -154,22 +151,6 @@ step_spike() {
   # from rmow-bench, so its results land beside the calibration's (results/spike)
   (cd rmow-bench && java -cp "$jar:$HOME/rmow-spike/target/lib/*" "org.rmow.bench.micro.$cls" \
     "${args[@]}")
-}
-
-step_appends() {
-  [[ "$STORE" == azure ]] || die "the appends step is Azure's (Append Blobs), not $STORE's"
-  local jar label=azure-appends
-  local args=("$ROOT/spike${NAME:+/$NAME}")
-  [[ -z "${NAME:-}" ]] || args+=(--label "$label-$NAME")
-  # shellcheck disable=SC2206 # APPENDS_ARGS is a list of flags, split on purpose
-  [[ -z "${APPENDS_ARGS:-}" ]] || args+=($APPENDS_ARGS)
-  for jar in "$HOME"/rmow-spike/target/rmow-bench-*.jar; do
-    [[ "$jar" == *-tests.jar ]] || break
-  done
-  log "blind and conditional appends (AzureAppendSpike, the build at $SPIKE_COMMIT): ${args[*]}"
-  # from rmow-bench, so its results land beside the spikes' (results/spike), which fetch brings back
-  (cd rmow-bench && java -cp "$jar:$HOME/rmow-spike/target/lib/*" \
-    org.rmow.bench.micro.AzureAppendSpike "${args[@]}")
 }
 
 step_bench() {

@@ -371,11 +371,6 @@ too), from 64 KiB to 128 MiB, a row group at Iceberg's default (a 128 MiB append
 Blocks); GETs by size, of the Put Blobs' blobs whole and as ranges of a 128 MiB one; creates (an
 empty Append Blob, the store's own appendable file, and RMoW's atomic one) and HEADs; GETs of
 Append Blobs of 1 to 1000 blocks; and Iceberg's ranged read of a 32 MiB file against the SDK's.
-`org.rmow.bench.micro.AzureAppendSpike <abfss://...>` is not RMoW's: it measures whether one
-Append Blob takes appends from many writers at once, blind (no position: the service picks it and
-says where) against conditional (at the position the writer last saw), from 1 to 64 writers, and
-reads each blob back to check every block (whole, once, where its reply said), for the catalog's
-shared log (docs/AZURE_RUNBOOK.md, "Blind appends"; the deploy's `appends` step).
 `configs/azure-calibration.json` is the calibration run (2026-10-28). Its
 Azurite twin (`-azurite.json`) gives the requests it must send, but for its creates: each costs a
 HEAD there where Azure's costs a rename.
@@ -542,7 +537,7 @@ were before regions existed (`OpLogGeneratorTest` pins three runs' hashes).
 | `append` | `RegionAppender`, `AtomicAppender` (every store's, through the fork's `SupportsAtomicOperations`) and `EmulatorAppenders` (the emulators' stand-ins). |
 | `bench` | `Runner`, `Phases`, `BenchConfig`, `ThreadCounters` (instructions and cycles), `Store` (mem, local, S3 or Azure) and `Main`; `arms.VersionDump` and `rmow.VersionDigest` dump every version for the interop check. |
 | `fuzz` | `Fuzz`: random configurations through the runner, with the checks beyond a run's own (`bin/fuzz.sh`, [Fuzzing](#fuzzing)). |
-| `micro` | JMH micro-benchmarks (`FooterBench`), the cloud spikes (`S3ExpressSpike`, `AzureSpike`), and `AzureAppendSpike` (many writers' appends to one Append Blob, for the catalog). |
+| `micro` | JMH micro-benchmarks (`FooterBench`), and the cloud spikes (`S3ExpressSpike`, `AzureSpike`). |
 | `analysis/` | `interop_check.py` (pyarrow and DuckDB), `summary.py`, `consolidate.py` (every finished run's records in one Parquet file), `plots.py` (figures and a table twin of each), `sweep.py` (runs that differ in row-group size), `layouts.py` (appendable against split files), `compaction.py` (runs that differ in compaction policy: each arm's cheapest policy per read rate and price model), and `compare_runs.py` (exact repeatability). |
 
 ## Compatibility

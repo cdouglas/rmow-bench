@@ -236,81 +236,10 @@ numbers are kept here and in EXPERIMENTS.md, Retired runs): 47.1 and 79.5 GETs a
 and 122.9 MB for MoR-v3's batch and full read, 11.6 and 49.0 GETs and 24.1 and 157.9 MB for
 RMoW-C's. Simulated, RMoW-C ÷ MoR-v3 was 0.54 for a batch and 0.91 for a full read.
 
-## Blind appends (for the catalog; prepared 2026-11-10, not yet run)
+## Blind appends (moved to catalog-bench)
 
-Not RMoW's question. **Can one Append Blob take appends from many writers at once?** This matters
-for the intention-log catalog (fileio-catalog), whose log is one object that compaction replaces.
-That design forces two things:
-- **Every append must name its position.** An append that didn't could land on a replacement its
-  writer never read.
-- **Writers that race lose.** Only one append lands at a given position.
-
-A log whose records are never replaced, with its checkpoints stored separately, needs no such
-condition (fileio-catalog's docs/LOG.md, "Unconditional appends", and the shared-log TLA+ model).
-Azure's Append Block takes no position, and its reply says where the block landed
-(`x-ms-blob-append-offset`). Concurrent work builds a log of Append Blob segments this way
-(AirDB, arXiv 2611.01363), without saying what one blob takes.
-
-**What it measures.** `AzureAppendSpike` runs levels (its class doc has the details). A level is
-one mode, append size and writer count, on a new Append Blob of its own:
-- **Writers:** 1 to 64, each a thread of one JVM, sending one Append Block at a time. Each level
-  runs for 2 s of warm-up and then a 20 s steady window.
-- **Blind mode:** the append names no position.
-- **Conditional mode:** the append names the position the writer last saw. A writer that loses
-  learns the blob's end with a HEAD and sends again.
-- **Interleaving:** the two modes alternate at each writer count.
-- **SDK retries are off,** so each record is one request.
-- **The check:** each blob is read back after its level. Every block must be whole (a CRC per
-  frame), appear once, and sit at the offset its reply named.
-
-On Azurite the code ran clean at 1, 4 and 16 writers. That checks the code, not Azure.
-
-**What is known before the run.** The 14 Azure spikes here (2026-10-28 to 11-01) measured one
-writer's conditional Append Block of 64 KiB at a median of 13.0 ms (`append_sao`), about 75
-appends a second one after another.
-
-catalog-bench's `azure` profile, which is endive's, puts a landed conditional append at a median
-of 87 ms and a lost one at 2,072 ms. Neither was measured on this account.
-
-**Predictions:**
-- **B1.** Conditional appends land no faster with more writers. At every writer count, landed
-  appends a second stay at or below 1.2 times the one-writer rate. From 4 writers on, more than
-  half of the attempts lose.
-- **B2.** Blind appends lose nothing, and at 16 writers they land at least 4 times as many appends a
-  second as one writer does. The per-blob ceiling is the unknown this measures.
-- **B3.** The check passes at every level: no torn, duplicated or misplaced block. A block landed
-  without an acknowledgement only where a request failed ambiguously.
-
-**Decision rule.** Building a shared-log provider on Append Blobs is worth it if, at 16 writers,
-blind appends land at least 5 times as many appends a second as conditional ones, with the check
-passing at every level.
-
-**Running it.** One VM, after the class is on `main` (`SPIKE_COMMIT`):
-
-```sh
-CLOUD=azure ./deploy/deploy.sh up && CLOUD=azure ./deploy/deploy.sh ship && CLOUD=azure ./deploy/deploy.sh wait
-CLOUD=azure ./deploy/deploy.sh run appends    # APPENDS_ARGS for more: "--bytes 4096,65536 --reps 2"
-CLOUD=azure ./deploy/deploy.sh wait && CLOUD=azure ./deploy/deploy.sh fetch && CLOUD=azure ./deploy/deploy.sh down
-```
-
-The defaults' levels take about 6 minutes, after the builds (about 15).
-
-**Results.** They are written to `results/spike/azure-appends-<UTC start>/`:
-- `manifest.json`;
-- `appends.jsonl`, every request;
-- `levels.jsonl`, each level's rates, latency percentiles, client CPU share and check.
-
-`lab ingest` loads them as the facts `append_requests` and `append_levels`. They are not
-`spike.jsonl`, so the latency fits never see them.
-
-**Limits:**
-- **One VM.** Its writers share one client and one connection pool, twice as large as the most
-  writers. `client_cpu_share` shows whether the client is the bottleneck. Writers on several VMs
-  would need a shared blob and a merged check, which is not built.
-- **The account has a hierarchical namespace** (ADLS Gen2, as rmow-bench's infra makes it). A plain
-  Blob account may differ, and AirDB does not say which kind it used.
-- **One append size by default:** 4 KiB, a catalog record's size. `--bytes` adds others, standing
-  in for batches.
-- **A lost race costs more in the catalog.** The conditional writer here re-learns the end with a
-  HEAD; the catalog also reads the records it missed.
-- **One region (westus), at one time of day.**
+The append spike for the catalog's shared log (`AzureAppendSpike`, run 2026-11-10 on this VM as
+the deploy's `appends` step) and the seal probe (`AzureSealProbe`) were not RMoW's. They moved to
+catalog-bench on 2026-11-11 with their runs and lab tables: its docs/AZURE_APPENDS.md has the
+question, the predictions B1-B3 written here before the run, and how to run them; the findings
+are in fileio-catalog's docs/AZURE_LOG.md.
