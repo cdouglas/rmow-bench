@@ -582,7 +582,6 @@ public final class AzureAppendSpike {
 
   private Map<String, Object> summarize(
       Level level, List<Req> reqs, long wallNs, long cpuNs, boolean full) {
-    double window = steadyNs / 1e9;
     Map<String, List<Long>> latencies = new LinkedHashMap<>();
     Map<String, Long> counts = new LinkedHashMap<>();
     Map<String, Long> steadyCounts = new LinkedHashMap<>();
@@ -596,6 +595,9 @@ public final class AzureAppendSpike {
         latencies.computeIfAbsent(k, x -> new ArrayList<>()).add(r.ns());
       }
     }
+    // A level whose blob filled stopped before its deadline: its rates are over the time it ran
+    double window =
+        (full ? Math.max(1, Math.min(steadyNs, lastEnd - warmupNs)) : steadyNs) / 1e9;
     long landed = steadyCounts.getOrDefault("append_ok", 0L);
     long attempts =
         steadyCounts.entrySet().stream()
