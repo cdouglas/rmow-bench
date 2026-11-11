@@ -20,21 +20,39 @@ tune = fig.tuner()
 con = connect()
 
 # Simulated time per phase (analysis/tune.py): the laptop's measured work at its pace, plus havoc's
-# requests priced by size from each store's latency test, for every configuration of the windows and
-# tune campaigns. The tuner's own set of insert configurations leaves out the lateness twins.
+# requests priced by size from each store's latency test.
 train = tune.records(con, tune.TRAIN.replace("campaigns", "r.campaigns").replace("host", "r.host"))
 formula = tune.Formula(train)
 ns = tune.pace(con)
-tune.WORKLOADS["ing_all"] = "regexp_matches(label, '^(win-ing-|tune-ing-)')"
-SU, SI = (tune.steps(con, wl, formula, ns, True) for wl in ("upd", "ing_all"))
-P = pd.concat([tune.policies(con, "upd", formula, ns, True, SU), tune.policies(con, "ing_all", formula, ns, True, SI)])
 STORES = fig.WL_STORES
 S3X, AZ = STORES
+
+
+def seconds(d):
+    """Each write's, compaction's and read's simulated time (s), for the whiskers and the snapshots."""
+    return d.assign(Store=d.store.map(fig.WL_STORE), s=d.ms / 1e3)
+
+
+# The inserts' curves and lateness twins: the windows and tune campaigns' runs, before the locate by
+# key, their sorted read through the reader that reads every row group (none dies on the inserts).
+# The tuner's own set of insert configurations leaves out the lateness twins.
+tune.READS["sorted"] = ("read_sorted", "cached")
+tune.WORKLOADS["ing_all"] = "regexp_matches(label, '^(win-ing-|tune-ing-)')"
+SIO = seconds(tune.steps(con, "ing_all", formula, ns, True))
+PO = tune.policies(con, "ing_all", formula, ns, True, SIO)
+WO = fig.wl_whiskers(SIO)
+# Everything else: the configurations run in the cloud (campaign workloads-ref) and the update curves
+# rerun with their settings (workloads-curves): the locate pruned by each changed key, and every
+# read, the sorted one too, through the reader that skips dead row groups.
+REF = "(list_contains(campaigns, 'workloads-ref') OR list_contains(campaigns, 'workloads-curves'))"
+tune.READS["sorted"] = ("read_sorted", "cached-skip")
+tune.WORKLOADS["wl_upd"] = "regexp_matches(label, '^(wl-upd-|wlc-upd-)')"
+tune.WORKLOADS["wl_ing"] = "regexp_matches(label, '^wl-ing-')"
+SU, SI = (seconds(tune.steps(con, wl, formula, ns, True, REF)) for wl in ("wl_upd", "wl_ing"))
+P = pd.concat([tune.policies(con, "wl_upd", formula, ns, True, SU), tune.policies(con, "wl_ing", formula, ns, True, SI),
+               PO])
 P["Store"] = P.store.map(fig.WL_STORE)
-# each write's, compaction's and read's simulated time (s), for the whiskers and the snapshots
 S = pd.concat([SU, SI])
-S["Store"] = S.store.map(fig.WL_STORE)
-S["s"] = S.ms / 1e3
 
 # the designs' colors and shapes (figures.py, shared with the measured page)
 COLOR, SHAPE, NCOLOR, READ = fig.WL_COLOR, fig.WL_SHAPE, fig.WL_NCOLOR, fig.WL_READ
@@ -42,35 +60,39 @@ COLOR, SHAPE, NCOLOR, READ = fig.WL_COLOR, fig.WL_SHAPE, fig.WL_NCOLOR, fig.WL_R
 # (configuration, arm, family, curve it lies on, its knob's value, its name if a main point, order on
 # the curve). A curve runs through one family's settings of one knob.
 UPD = [
-    ("win-upd-base", "mor-v3", "MoR", "MoR", "never", "MoR", 0),
-    ("tune-upd-mor-c12", "mor-v3", "MoR", "MoR", "12", None, 1),
-    ("win-upd-base-compact", "mor-v3", "MoR", "MoR", "10", "MoR compacted", 2),
-    ("tune-upd-mor-c6", "mor-v3", "MoR", "MoR", "6", None, 3),
-    ("tune-upd-mor-c3", "mor-v3", "MoR", "MoR", "3", None, 4),
-    ("win-upd-base", "rmor-c-kept", "RMoR", "", "", "RMoR", 0),
-    ("win-upd-base", "rmor-c-footer-kept", "RMoW-external", "", "", "RMoW-external", 0),
-    ("win-upd-base", "rmow-c", "RMoW-append", "", "", "RMoW-append", 0),
-    ("tune-upd-defer-p100", "rmor-density", "deferred merges", "deferred merges", "θ 1", None, 0),
-    ("tune-upd-defer-p50", "rmor-density", "deferred merges", "deferred merges", "0.5", None, 1),
-    ("win-upd-density-p25", "rmor-density", "deferred merges", "deferred merges", "0.25", None, 2),
-    ("tune-upd-defer-p12", "rmor-density", "deferred merges", "deferred merges", "0.12", None, 3),
-    ("win-upd-base", "rmor-density", "deferred merges", "deferred merges", "0.06", "deferred merges", 4),
+    ("wl-upd-base", "mor-v3", "MoR", "MoR", "never", "MoR", 0),
+    ("wlc-upd-mor-c12", "mor-v3", "MoR", "MoR", "12", None, 1),
+    ("wl-upd-compact", "mor-v3", "MoR", "MoR", "10", "MoR compacted", 2),
+    ("wlc-upd-mor-c6", "mor-v3", "MoR", "MoR", "6", None, 3),
+    ("wlc-upd-mor-c3", "mor-v3", "MoR", "MoR", "3", None, 4),
+    ("wl-upd-base", "rmor-c-kept", "RMoR", "", "", "RMoR", 0),
+    ("wl-upd-base", "rmor-c-footer-kept", "RMoW-external", "", "", "RMoW-external", 0),
+    ("wl-upd-base", "rmow-c", "RMoW-append", "", "", "RMoW-append", 0),
+    ("wlc-upd-defer-p100", "rmor-density", "deferred merges", "deferred merges", "θ 1", None, 0),
+    ("wlc-upd-defer-p50", "rmor-density", "deferred merges", "deferred merges", "0.5", None, 1),
+    ("wlc-upd-defer-p25", "rmor-density", "deferred merges", "deferred merges", "0.25", None, 2),
+    ("wlc-upd-defer-p12", "rmor-density", "deferred merges", "deferred merges", "0.12", None, 3),
+    ("wl-upd-base", "rmor-density", "deferred merges", "deferred merges", "0.06", "deferred merges", 4),
 ]
+# the inserts' main points from workloads-ref, their curves' other points from the tune campaign
 ING = [
-    ("win-ing-base", "mor-v3", "appending", "MoR", "", "appending", 0),
+    ("wl-ing-base", "mor-v3", "appending", "MoR", "", "appending", 0),
     ("tune-ing-mor-c12", "mor-v3", "MoR", "MoR", "12", None, 1),
-    ("win-ing-base-compact", "mor-v3", "MoR", "MoR", "10", "MoR compacted", 2),
+    ("wl-ing-compact", "mor-v3", "MoR", "MoR", "10", "MoR compacted", 2),
     ("tune-ing-mor-c6", "mor-v3", "MoR", "MoR", "6", None, 3),
     ("tune-ing-mor-c3", "mor-v3", "MoR", "MoR", "3", None, 4),
     ("tune-ing-seal160-f8", "rmor-c", "RMoR", "", "160 ×8", None, 0),
-    ("win-ing-seal160", "rmor-c", "RMoR", "", "", "RMoR sealed", 0),
+    ("wl-ing-seal160", "rmor-c", "RMoR", "", "", "RMoR sealed", 0),
     ("tune-ing-seal256", "rmor-c", "RMoR", "", "256 ×4", None, 0),
     ("tune-ing-seal160-f2", "rmor-c", "RMoR", "", "160 ×2", None, 0),
-    ("win-ing-seal160", "rmow-c", "RMoW-append", "", "", "RMoW-append sealed", 0),
+    ("wl-ing-seal160", "rmow-c", "RMoW-append", "", "", "RMoW-append sealed", 0),
 ]
+# the same main points in the windows campaign, before the locate by key and the sorted read's skip
+WIN = {"wl-upd-base": "win-upd-base", "wl-upd-compact": "win-upd-base-compact", "wl-ing-base": "win-ing-base",
+       "wl-ing-compact": "win-ing-base-compact", "wl-ing-seal160": "win-ing-seal160"}
 
 
-W = fig.wl_whiskers(S)
+W = pd.concat([fig.wl_whiskers(S), WO])
 
 
 def frame(spec):
@@ -114,11 +136,10 @@ def snapshot_table(d, what):
 B = q("""
 SELECT r.label, b.arm, b.phase, b.component, sum(b.ms) AS ms
 FROM phase_breakdown b JOIN canonical_runs r USING (run_id)
-WHERE r.host = 'bearyak' AND (list_contains(r.campaigns, 'windows') OR list_contains(r.campaigns, 'tune'))
+WHERE r.host = 'bearyak' AND list_contains(r.campaigns, 'workloads-ref')
   AND b.thread = 'phase' AND b.component LIKE '%CPU'
   AND ((b.phase = 'batch' AND b.step >= 1)
-       OR (b.step >= 5 AND ((b.phase IN ('read_full', 'read_window') AND b.reader = 'cached-skip')
-                            OR (b.phase = 'read_sorted' AND b.reader = 'cached'))))
+       OR (b.step >= 5 AND b.phase IN ('read_full', 'read_window', 'read_sorted') AND b.reader = 'cached-skip'))
 GROUP BY ALL""")
 CPU_PART = {k: v for k, v in fig.WL_CPU_PART.items() if k.endswith("CPU")}
 B["part"] = B.component.map(CPU_PART)
@@ -172,20 +193,22 @@ def by_part(d, store, name, what):
 seal_add = (by_part(IP, S3X, "RMoR sealed", "a write") - by_part(IP, S3X, "appending", "a write")).fillna(0)
 
 
-rb_ = q("""SELECT s.arm, s.phase, avg(s.bytes_read) / 1e6 AS mb
-           FROM steps s JOIN canonical_runs r USING (run_id)
-           WHERE r.label = 'win-upd-base' AND r.host = 'havoc' AND s.step >= 5
-             AND ((s.phase = 'read_sorted' AND s.reader = 'cached') OR (s.phase = 'read_full' AND s.reader = 'cached-skip'))
-           GROUP BY ALL""")
-sorted_mb = rb_[rb_.phase == "read_sorted"].set_index("arm").mb
-full_mb = rb_[rb_.phase == "read_full"].set_index("arm").mb
+# how far the locate by key and the sorted read's skip moved each insert main point: its time over
+# the windows campaign's (the sorted read's, with skipping over without)
+MV = P.merge(P.assign(label=P.label.map({v: k for k, v in WIN.items()})).dropna(subset=["label"]),
+             on=["Store", "label", "arm"], suffixes=("", "_win"))
+for c in ("window_ms", "full_ms", "sorted_ms"):
+    MV[c + "_x"] = MV[c] / MV[c + "_win"]
+MV["write_x"] = (MV.write_ms + MV.compact_ms) / (MV.write_ms_win + MV.compact_ms_win)
+ing_moved = (MV[["write_x", "window_ms_x", "full_ms_x", "sorted_ms_x"]] - 1).abs().max().max()
 
+LATE_RUNS = ["win-ing-base", "win-ing-base-compact", "win-ing-seal160", "win-ing-late99-1", "win-ing-late99-20",
+             "win-ing-seal160-late99-1", "win-ing-seal160-late99-20"]
 runs = q("""SELECT run_id, label, host, left(git_sha, 7) AS build FROM canonical_runs
-            WHERE (list_contains(campaigns, 'windows') OR list_contains(campaigns, 'tune'))
+            WHERE (list_contains(campaigns, 'windows') OR list_contains(campaigns, 'tune')
+                   OR list_contains(campaigns, 'workloads-ref') OR list_contains(campaigns, 'workloads-curves'))
               AND list_contains($labels, label) ORDER BY label, host""",
-         labels=sorted({s[0] for s in UPD + ING} | {"win-ing-late99-1", "win-ing-late99-20",
-                                                    "win-ing-seal160-late99-1", "win-ing-seal160-late99-20",
-                                                    "tune-upd-rg4m", "tune-upd-rg8m", "tune-upd-rg32m"}))
+         labels=sorted({s[0] for s in UPD + ING} | set(LATE_RUNS) | {"wlc-upd-rg4m", "wlc-upd-rg8m", "wlc-upd-rg32m"}))
 ```
 
 What each design costs a writer and its readers on two workloads apart, **updates** and
@@ -201,6 +224,15 @@ def u(label, arm, col, s=S3X):
 
 def i_(label, arm, col, s=S3X):
     return v(I, s, label, arm, col)
+
+
+# the region designs' write over MoR's, per store, and their range read's speed-up over MoR's and
+# compacted MoR's
+REGION = ["rmor-c-kept", "rmor-c-footer-kept", "rmow-c"]
+reg_write = {s: [u("wl-upd-base", a, "write_s", s) / u("wl-upd-base", "mor-v3", "write_s", s) for a in REGION]
+             for s in STORES}
+reg_window = [u(m, "mor-v3", "window_s", s) / u("wl-upd-base", a, "window_s", s)
+              for s in STORES for a in REGION for m in ("wl-upd-base", "wl-upd-compact")]
 
 
 # each design's latency at every write, compaction and read (the snapshot sections)
@@ -233,33 +265,38 @@ def seal_writes(name, store=S3X):
 
 ## What it shows
 
-- **Updates: the region designs write in about twice MoR's time and read a range 2 to 4 times as
-  fast.** On S3 Express RMoW-append writes in
-  {eval}`f"{u('win-upd-base', 'rmow-c', 'write_s') / u('win-upd-base', 'mor-v3', 'write_s'):.1f}"`
+- **Updates: the region designs take
+  {eval}`span(reg_write[S3X] + reg_write[AZ], "{:.1f}")` times MoR's time to write, and read a range
+  {eval}`span(reg_window, "{:.1f}")` times as fast as MoR, compacted or not.** On S3 Express
+  RMoW-append writes in
+  {eval}`f"{u('wl-upd-base', 'rmow-c', 'write_s') / u('wl-upd-base', 'mor-v3', 'write_s'):.1f}"`
   times MoR's time, and reads 1% of the table
-  {eval}`f"{u('win-upd-base', 'mor-v3', 'window_s') / u('win-upd-base', 'rmow-c', 'window_s'):.1f}"`
+  {eval}`f"{u('wl-upd-base', 'mor-v3', 'window_s') / u('wl-upd-base', 'rmow-c', 'window_s'):.1f}"`
   times as fast as MoR, or
-  {eval}`f"{u('win-upd-base-compact', 'mor-v3', 'window_s') / u('win-upd-base', 'rmow-c', 'window_s'):.1f}"`
+  {eval}`f"{u('wl-upd-compact', 'mor-v3', 'window_s') / u('wl-upd-base', 'rmow-c', 'window_s'):.1f}"`
   times as fast as MoR compacted every 10 writes, which costs MoR no more a write. A full scan
-  gains {eval}`f"{1 - u('win-upd-base', 'rmow-c', 'full_s') / u('win-upd-base-compact', 'mor-v3', 'full_s'):.0%}"`.
+  gains {eval}`f"{1 - u('wl-upd-base', 'rmow-c', 'full_s') / u('wl-upd-compact', 'mor-v3', 'full_s'):.0%}"`
+  and a sorted read
+  {eval}`f"{1 - u('wl-upd-base', 'rmow-c', 'sorted_s') / u('wl-upd-compact', 'mor-v3', 'sorted_s'):.0%}"`.
 - **Inserts: the designs do not differ; what matters is whether late rows are merged.**
   Compacting MoR or sealing RMoR's tail at 160 MiB reads a range
-  {eval}`f"{i_('win-ing-base', 'mor-v3', 'window_s') / i_('win-ing-base-compact', 'mor-v3', 'window_s'):.1f}"`
-  and {eval}`f"{i_('win-ing-base', 'mor-v3', 'window_s') / i_('win-ing-seal160', 'rmor-c', 'window_s'):.1f}"`
+  {eval}`f"{i_('wl-ing-base', 'mor-v3', 'window_s') / i_('wl-ing-compact', 'mor-v3', 'window_s'):.1f}"`
+  and {eval}`f"{i_('wl-ing-base', 'mor-v3', 'window_s') / i_('wl-ing-seal160', 'rmor-c', 'window_s'):.1f}"`
   times as fast as appending, for
-  {eval}`f"{i_('win-ing-base-compact', 'mor-v3', 'write_s') - i_('win-ing-base', 'mor-v3', 'write_s'):.2f}"`
-  and {eval}`f"{i_('win-ing-seal160', 'rmor-c', 'write_s') - i_('win-ing-base', 'mor-v3', 'write_s'):.2f}"`
+  {eval}`f"{i_('wl-ing-compact', 'mor-v3', 'write_s') - i_('wl-ing-base', 'mor-v3', 'write_s'):.2f}"`
+  and {eval}`f"{i_('wl-ing-seal160', 'rmor-c', 'write_s') - i_('wl-ing-base', 'mor-v3', 'write_s'):.2f}"`
   s more a write; it pays only once rows arrive more than a write late.
 - **Whole-row-group copies get dearer as row groups grow:** RMoW-append's write rises
-  {eval}`f"{v(P.assign(write_s=P.write_ms), S3X, 'tune-upd-rg32m', 'rmow-c', 'write_s') / v(P.assign(write_s=P.write_ms), S3X, 'tune-upd-rg4m', 'rmow-c', 'write_s'):.1f}"`
+  {eval}`f"{v(P.assign(write_s=P.write_ms), S3X, 'wlc-upd-rg32m', 'rmow-c', 'write_s') / v(P.assign(write_s=P.write_ms), S3X, 'wlc-upd-rg4m', 'rmow-c', 'write_s'):.1f}"`
   times from 4 to 32 MiB. Iceberg's default, 128 MiB, and copying parts of row groups are not
   tested here.
 - **Over 30 writes MoR slows and the region designs do not:** on the updates MoR's write and range
   read grow as its deletes pile up (its range read
   {eval}`f"{at(SNU, 'MoR', READ['window_s'], 30) / at(SNU, 'MoR', READ['window_s'], 5):.1f}"` times as
   long after 30 writes as after 5 on S3 Express), while RMoW-append's stay level.
-- **Where the time goes:** a region design's write is mostly encoding the row groups it copies,
-  MoR's mostly finding the rows to delete and the store; reads are mostly the store.
+- **Where the time goes:** on S3 Express the largest part of a region design's write is encoding
+  the row groups it copies, and MoR's is mostly the store and finding the rows to delete; reads are
+  mostly the store.
 
 ## Setup
 
@@ -275,7 +312,9 @@ copied into the write's new file, a deletion vector over the old one), RMoW-exte
 row group rewritten, footers kept apart), RMoW-append (each changed row group appended to its own
 file with a new footer), and RMoR with deferred merges (deletion vectors until a row group's
 changed rows reach a share θ of it, then the whole row group copied; the new versions wait in a
-delta row group per region). Each copies **whole row groups**: none copies part of one.
+delta row group per region). Each copies **whole row groups**: none copies part of one. Each
+writer finds the rows a write changes by key, reading only the row groups whose statistics may hold
+a changed key ([our changes to readers and writers](./reader-changes.md)).
 
 **The knobs drawn as curves:** MoR compacted every 12, 10, 6 or 3 writes; the deferred merges at
 θ of 1 (never merging), 0.5, 0.25, 0.12 and 0.06; on the inserts, RMoR's tail sealed at 160 MiB
@@ -285,7 +324,7 @@ with 2, 4 or 8 units merged at a time, or at 256 MiB.
 - **a range read:** 1% of the table, by id on the updates and by event time on the inserts, timed
   as the mean of five at each probe;
 - **a full scan**, skipping row groups whose rows are all dead;
-- **a sorted read:** the whole table in key order.
+- **a sorted read:** the whole table in key order, skipping them too.
 
 Each read's time is its mean over steps 5 to 30, and a write's over the 30 writes.
 
@@ -295,7 +334,8 @@ laptop's speed, plus its requests priced by size from a latency test of the stor
 a `c7a.4xlarge` in usw2-az3, Azure Blob on a `D8as_v6` in westus). A cloud run of seven of these
 policies came within 3% of this on S3 Express once CPU was priced at the cloud VM's speed, which
 is slower than the laptop's; at the laptop's speed, as here, S3 Express times run 4–12% low
-([the tuner's picks in the cloud](./tune-cloud.md)).
+([the tuner's picks in the cloud](./tune-cloud.md)). The main points here ran in the cloud on
+2026-11-11; [the measured page](./workloads-cloud.md) sets them beside these times.
 
 ```{code-cell} ipython3
 :tags: [remove-input]
@@ -310,7 +350,7 @@ table(runs)
 :tags: [remove-input]
 :class: col-page-right
 
-tradeoff(U, ["window_s", "full_s"], {
+tradeoff(U, ["window_s", "full_s", "sorted_s"], {
     "MoR": ("left", -10), "MoR compacted": ("right", 0),
     "deferred merges": {"*": ("right", 14), AZ: ("right", 30, -24)},
     "RMoW-append": ("right", -10), "RMoW-external": ("right", 14), "RMoR": ("left", -10)})
@@ -321,23 +361,22 @@ latency, simulated. The large marks are the designs, each with whiskers: across,
 its 90th percentile write; up, from its fastest to its slowest read over the reads after 5 to 30
 writes. MoR's line runs from never compacted through
 compaction every 12, 10 (the large mark), 6 and 3 writes; the deferred merges' from θ 1 (never
-merging) through 0.5, 0.25 and 0.12 to 0.06 (the large mark). The sorted read is left out here
-(Limits).
+merging) through 0.5, 0.25 and 0.12 to 0.06 (the large mark).
 
 ```{code-cell} ipython3
 :tags: [remove-input]
 
-table(twin(U, ("window_s", "full_s")), caption="Simulated latency (s): the mean write (with compactions spread "
+table(twin(U), caption="Simulated latency (s): the mean write (with compactions spread "
       "over the writes), its 10th and 90th percentiles (`_lo`, `_hi`), and each read's mean, fastest and slowest")
 ```
 
 ```{code-cell} ipython3
 :tags: [remove-cell]
 
-B_ = "win-upd-base"
+B_ = "wl-upd-base"
 w = {s: {a: v(U, s, B_, a, "write_s") for a in ("mor-v3", "rmor-c-kept", "rmor-c-footer-kept", "rmow-c", "rmor-density")}
      for s in STORES}
-wc = {s: v(U, s, "win-upd-base-compact", "mor-v3", "write_s") for s in STORES}
+wc = {s: v(U, s, "wl-upd-compact", "mor-v3", "write_s") for s in STORES}
 
 
 def rd(s, label, arm, kind):
@@ -347,7 +386,7 @@ def rd(s, label, arm, kind):
 def repay(s, kind):
     """Reads of a kind per write that repay RMoW-append's extra write against compacted MoR."""
     extra = w[s]["rmow-c"] - wc[s]
-    saved = rd(s, "win-upd-base-compact", "mor-v3", kind) - rd(s, B_, "rmow-c", kind)
+    saved = rd(s, "wl-upd-compact", "mor-v3", kind) - rd(s, B_, "rmow-c", kind)
     return extra / saved if saved > 0 else float("inf")
 
 
@@ -356,7 +395,9 @@ dz_w = {s: dz[dz.Store == s].write_s for s in STORES}
 dz1 = {s: dz[(dz.Store == s) & (dz.knob == "θ 1")].iloc[0] for s in STORES}
 ```
 
-- **The region designs write in about twice MoR's time.** On S3 Express RMoW-append takes
+- **The region designs take {eval}`span(reg_write[S3X], "{:.1f}")` times MoR's time to write on S3
+  Express and {eval}`span(reg_write[AZ], "{:.1f}")` on Azure**, where the store's slower requests
+  weigh more on MoR's write, which is mostly the store's (section 2). On S3 Express RMoW-append takes
   {eval}`f1(w[S3X]["rmow-c"])` s a write, RMoW-external {eval}`f1(w[S3X]["rmor-c-footer-kept"])` and
   RMoR {eval}`f1(w[S3X]["rmor-c-kept"])`, against MoR's {eval}`f1(w[S3X]["mor-v3"])` (on Azure,
   {eval}`f1(w[AZ]["rmow-c"])`, {eval}`f1(w[AZ]["rmor-c-footer-kept"])` and
@@ -365,18 +406,18 @@ dz1 = {s: dz[(dz.Store == s) & (dz.knob == "θ 1")].iloc[0] for s in STORES}
   over the run: {eval}`f1(wc[S3X])` s a write with its compactions, against
   {eval}`f1(w[S3X]["mor-v3"])` without, since a compacted table is cheaper to update. It halves
   MoR's range read, from {eval}`f2(rd(S3X, B_, "mor-v3", "window_s"))` s to
-  {eval}`f2(rd(S3X, "win-upd-base-compact", "mor-v3", "window_s"))`.
+  {eval}`f2(rd(S3X, "wl-upd-compact", "mor-v3", "window_s"))`.
 - **Against compacted MoR, RMoW-append reads a range
-  {eval}`f1(rd(S3X, "win-upd-base-compact", "mor-v3", "window_s") / rd(S3X, B_, "rmow-c", "window_s"))`
+  {eval}`f1(rd(S3X, "wl-upd-compact", "mor-v3", "window_s") / rd(S3X, B_, "rmow-c", "window_s"))`
   times as fast and scans
-  {eval}`f2(rd(S3X, "win-upd-base-compact", "mor-v3", "full_s") / rd(S3X, B_, "rmow-c", "full_s"))`
+  {eval}`f2(rd(S3X, "wl-upd-compact", "mor-v3", "full_s") / rd(S3X, B_, "rmow-c", "full_s"))`
   times as fast** on S3 Express
-  ({eval}`f1(rd(AZ, "win-upd-base-compact", "mor-v3", "window_s") / rd(AZ, B_, "rmow-c", "window_s"))`
-  and {eval}`f2(rd(AZ, "win-upd-base-compact", "mor-v3", "full_s") / rd(AZ, B_, "rmow-c", "full_s"))`
+  ({eval}`f1(rd(AZ, "wl-upd-compact", "mor-v3", "window_s") / rd(AZ, B_, "rmow-c", "window_s"))`
+  and {eval}`f2(rd(AZ, "wl-upd-compact", "mor-v3", "full_s") / rd(AZ, B_, "rmow-c", "full_s"))`
   on Azure). Its extra write is repaid by about {eval}`f"{repay(S3X, 'window_s'):.0f}"` range reads
   or {eval}`f1(repay(S3X, 'full_s'))` full scans a write on S3 Express
   ({eval}`f"{repay(AZ, 'window_s'):.0f}"` or {eval}`f1(repay(AZ, 'full_s'))` on Azure).
-- **The deferred merges' threshold barely moves their write**
+- **The deferred merges' threshold moves their write little**
   ({eval}`span(dz_w[S3X], "{:.1f}")` s from θ 1 to 0.06 on S3 Express). At θ 1 they never merge,
   yet they read a range in {eval}`f2(dz1[S3X].window_s)` s against MoR's
   {eval}`f2(rd(S3X, B_, "mor-v3", "window_s"))`, for {eval}`f1(dz1[S3X].write_s)` s a write: the gain
@@ -457,12 +498,16 @@ table(UP.pivot_table(index=["Store", "what", "name"], columns="part", values="s"
       .reindex(columns=[p for p in PARTS if p in set(UP.part)]).reset_index().round(3))
 ```
 
-- **A region design's write is mostly encoding:** the row groups it copies are re-encoded, which
-  is {eval}`f"{share_of(UP, S3X, 'RMoW-append', 'a write', 'encoding'):.0%}"` of RMoW-append's write
-  on S3 Express and {eval}`f"{share_of(UP, S3X, 'RMoR', 'a write', 'encoding'):.0%}"` of RMoR's.
-  MoR's write is mostly decoding (finding the rows to delete) and the store
-  ({eval}`f"{share_of(UP, S3X, 'MoR', 'a write', 'decoding'):.0%}"` and
-  {eval}`f"{share_of(UP, S3X, 'MoR', 'a write', 'the store'):.0%}"`).
+- **On S3 Express the largest part of a region design's write is encoding:** the row groups it
+  copies are re-encoded, which is
+  {eval}`f"{share_of(UP, S3X, 'RMoW-append', 'a write', 'encoding'):.0%}"` of RMoW-append's write
+  and {eval}`f"{share_of(UP, S3X, 'RMoR', 'a write', 'encoding'):.0%}"` of RMoR's, against the
+  store's {eval}`f"{share_of(UP, S3X, 'RMoW-append', 'a write', 'the store'):.0%}"` and
+  {eval}`f"{share_of(UP, S3X, 'RMoR', 'a write', 'the store'):.0%}"` (on Azure the store's part is
+  the larger, {eval}`span([share_of(UP, AZ, n, 'a write', 'the store') for n in ('RMoR', 'RMoW-external', 'RMoW-append')], "{:.0%}")`).
+  MoR's write is mostly the store and decoding, which finds the rows to delete
+  ({eval}`f"{share_of(UP, S3X, 'MoR', 'a write', 'the store'):.0%}"` and
+  {eval}`f"{share_of(UP, S3X, 'MoR', 'a write', 'decoding'):.0%}"`).
 - **A read is mostly the store:**
   {eval}`span([share_of(UP, S3X, n, READ['full_s'], 'the store') for n in UN], "{:.0%}")` of a full
   scan on S3 Express and
@@ -475,7 +520,7 @@ table(UP.pivot_table(index=["Store", "what", "name"], columns="part", values="s"
 ```{code-cell} ipython3
 :tags: [remove-cell]
 
-base = {a: {s: P[(P.label == "win-ing-base") & (P.arm == a) & (P.Store == s)].iloc[0] for s in STORES}
+base = {a: {s: P[(P.label == "wl-ing-base") & (P.arm == a) & (P.Store == s)].iloc[0] for s in STORES}
         for a in ("mor-v3", "rmor-c-kept", "rmow-c")}
 
 
@@ -484,8 +529,8 @@ def spread(col, s=S3X):
     return max(xs) / min(xs) - 1
 
 
-iw = {s: v(I, s, "win-ing-base", "mor-v3", "write_s") for s in STORES}
-ir = {s: v(I, s, "win-ing-base", "mor-v3", "window_s") for s in STORES}
+iw = {s: v(I, s, "wl-ing-base", "mor-v3", "write_s") for s in STORES}
+ir = {s: v(I, s, "wl-ing-base", "mor-v3", "window_s") for s in STORES}
 ```
 
 On the inserts the designs do not differ: each appends a write's rows as new row groups, and none
@@ -520,9 +565,9 @@ table(twin(I), caption="Simulated latency (s), as in the updates' table")
 ```{code-cell} ipython3
 :tags: [remove-cell]
 
-mc = {s: I[(I.Store == s) & (I.label == "win-ing-base-compact")].iloc[0] for s in STORES}
-rs = {s: I[(I.Store == s) & (I.label == "win-ing-seal160") & (I.arm == "rmor-c")].iloc[0] for s in STORES}
-ws = {s: I[(I.Store == s) & (I.label == "win-ing-seal160") & (I.arm == "rmow-c")].iloc[0] for s in STORES}
+mc = {s: I[(I.Store == s) & (I.label == "wl-ing-compact")].iloc[0] for s in STORES}
+rs = {s: I[(I.Store == s) & (I.label == "wl-ing-seal160") & (I.arm == "rmor-c")].iloc[0] for s in STORES}
+ws = {s: I[(I.Store == s) & (I.label == "wl-ing-seal160") & (I.arm == "rmow-c")].iloc[0] for s in STORES}
 fulls = I[I.Store == S3X].full_s
 ```
 
@@ -687,7 +732,7 @@ table(IP.pivot_table(index=["Store", "what", "name"], columns="part", values="s"
 ```{code-cell} ipython3
 :tags: [remove-cell]
 
-RG = {"tune-upd-rg4m": 4, "tune-upd-rg8m": 8, "win-upd-base": 16, "tune-upd-rg32m": 32}
+RG = {"wlc-upd-rg4m": 4, "wlc-upd-rg8m": 8, "wl-upd-base": 16, "wlc-upd-rg32m": 32}
 R = P[P.label.isin(RG) & P.arm.isin(["rmow-c", "rmor-density"])].copy()
 R["design"] = R.arm.map({"rmow-c": "RMoW-append", "rmor-density": "deferred merges"})
 R["rg_mib"] = R.label.map(RG)
@@ -736,8 +781,8 @@ table(R[["Store", "design", "rg_mib", "a write", READ["window_s"], READ["full_s"
   {eval}`f1(rg(S3X, "RMoW-append", 32, "a write"))` s at 32 MiB on S3 Express, and its range read
   {eval}`f2(rg(S3X, "RMoW-append", 4, READ["window_s"]))` and
   {eval}`f2(rg(S3X, "RMoW-append", 32, READ["window_s"]))` s. The deferred merges, which seldom
-  merge, stay at {eval}`span([rg(S3X, "deferred merges", m, "a write") for m in RG.values()], "{:.1f}")` s
-  a write.
+  merge, rise less: {eval}`f1(rg(S3X, "deferred merges", 4, "a write"))` s a write at 4 MiB and
+  {eval}`f1(rg(S3X, "deferred merges", 32, "a write"))` s at 32 MiB.
 - **On Azure, full scans get much faster as row groups grow:** RMoW-append's takes
   {eval}`f1(rg(AZ, "RMoW-append", 4, READ["full_s"]))` s at 4 MiB and
   {eval}`f1(rg(AZ, "RMoW-append", 32, READ["full_s"]))` s at 32 MiB, as its requests get fewer and
@@ -756,11 +801,9 @@ table(R[["Store", "design", "rg_mib", "a write", READ["window_s"], READ["full_s"
 - **The deferred merges copy whole row groups.** They choose when to copy, from the deletion
   vector's share of the row group, but not what: no part of a row group, no splitting or merging of
   row groups.
-- **The sorted read ran only with a reader that reads dead row groups** (`cached`), so on the
-  updates it charges RMoR and the deferred merges for the row groups they copied out: RMoR's sorted
-  read moves {eval}`f"{sorted_mb['rmor-c-kept']:.0f}"` MB against its full scan's
-  {eval}`f"{full_mb['rmor-c-kept']:.0f}"` MB with skipping. It is left out of the updates'
-  comparison. On the inserts no row group dies, so it stands there.
+- **The inserts' curves and lateness twins are earlier runs**, from the tune and windows campaigns,
+  before the locate by key and the sorted read's skip. On the inserts' main points those changes
+  moved no time by more than {eval}`f"{ing_moved:.1%}"`.
 - **Simulated**, from one seed and 30 writes, CPU at the laptop's speed; reads one at a time on one
   thread.
 - **RMoW-external did not run on the inserts.**

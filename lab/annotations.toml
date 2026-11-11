@@ -101,6 +101,10 @@ select = ["where:label LIKE 'wl-%' AND host IN ('havoc', 'bearyak')"]
 title = "The workloads page's update curves with the reader changes of 6db916a, labelled wlc-upd-* (docker/campaigns/workloads-curves.json): MoR compacted every 3, 6 and 12 writes, the deferred merges at theta 1, 0.5, 0.25 and 0.12, and row groups of 4, 8 and 32 MiB, each the tune or windows campaign's configuration with workloads-ref's readers. On havoc for requests, bytes and held memory, and on the laptop (bearyak) for instructions"
 select = ["where:label LIKE 'wlc-%' AND host IN ('havoc', 'bearyak')"]
 
+[campaigns.workloads-cloud]
+title = "The two workloads in the cloud (docs/HYPOTHESES.md, 2026-11-10, L1-L4): the five wl-* configurations at 0942497 on S3 Express (a c7a.4xlarge each in usw2-az3, four at once and wl-ing-compact after, each after its twin on its own disk and its spike) and on Azure Blob (one D8as_v6 in westus, in turn, after one spike), 2026-11-11"
+select = ["where:regexp_matches(label, '^wl-.*-(s3x|azure)$') AND git_sha LIKE '0942497%'", "where:label LIKE 'wl-%' AND host LIKE 'ip-%' AND git_sha LIKE '0942497%'", "spike/s3x-spike-wl-*", "spike/azure-spike-20261111T040817Z"]
+
 [campaigns.mor-row]
 title = "MoR alone with updateRead row at the eleven rmor-* settings, on havoc at aeee8e3: the calibration of the cloud runs' MoR (docs/HYPOTHESES.md, 2026-11-06)"
 select = ["where:label LIKE 'mor-row-%' AND git_sha LIKE 'aeee8e3%'"]
@@ -143,3 +147,7 @@ note = "laptop runs beside another session's TLA+ model checks (load about 9): t
 select = "where:run_id IN ('wl-ing-compact-7b0b8b27829f/20261110T230425Z', 'wl-ing-seal160-b4a616b68fad/20261110T230658Z')"
 mark = "excluded"
 note = "laptop reruns beside another session's TLA+ model check (TLC with 4 workers, from 23:04:31 UTC): their clock 3.6 GHz against 4.5-4.6 for the three reruns before them; rerun again once the laptop was idle"
+[[annotate]]
+select = "where:run_id IN ('wlc-upd-mor-c12-53f3149af5ca/20261111T052007Z', 'wlc-upd-mor-c6-7da9c8210210/20261111T052304Z', 'wlc-upd-mor-c3-38f8f857087b/20261111T052612Z', 'wlc-upd-defer-p100-d1e1abe0c0e4/20261111T052917Z', 'wlc-upd-defer-p50-b894ca8b8eb5/20261111T053200Z', 'wlc-upd-rg8m-8a0b9cb4105d/20261111T054628Z', 'wlc-upd-rg32m-5792c55cbac2/20261111T055359Z')"
+mark = "excluded"
+note = "laptop runs beside other sessions' jobs (2026-11-11, 05:20-06:06 UTC): their clock 3.70-4.44 GHz against 4.5-4.6 for the windows campaign's laptop runs, so their work's pace is not the laptop's. Requests and bytes match havoc's exactly. Rerun 2026-11-11 once the laptop was idle; the other three (4.47-4.54 GHz) stand"

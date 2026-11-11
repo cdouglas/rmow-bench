@@ -660,6 +660,16 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
   on havoc; [lab/pages/region-cut.md](lab/pages/region-cut.md)). RMoR with the cut reads 0.12 of
   what the deferred merges read a write, with windows at 1.16 times their live bytes, and writes
   3.04 times their bytes (D3 contradicted by that part alone).
+- **Done in the cloud (2026-11-11):** the two workloads' main points measured on S3 Express and
+  Azure Blob, with the locate by each changed key and the sorted read skipping dead row groups
+  (L1–L4 in [docs/HYPOTHESES.md](docs/HYPOTHESES.md), all held;
+  [lab/pages/workloads-cloud.md](lab/pages/workloads-cloud.md)). On the updates the region designs
+  write in 2.3–2.4 times MoR's time on S3 Express (1.5–2.2 on Azure Blob) and read a 1% range
+  1.4–3.9 times as fast (1.5–6.4); on the inserts compacting MoR or sealing RMoR's tail reads a
+  range 2.1–2.7 times as fast as appending for 0.41–0.64 s more a write. Over the 30 writes MoR's
+  range read grows 3.1–3.9 times, the region designs' 0.90–1.51 times. The simulated
+  [workloads page](lab/pages/workloads.md) uses the same configurations, with its update curves
+  rerun to match (campaign `workloads-curves`).
 - **Next:** the density hypothesis where density can choose: a workload of sparse changes, cold
   pieces merged back, and the locate's requests ([docs/ROADMAP.md](docs/ROADMAP.md)). GCS needs
   APPEND in the fork first; split files can also run on standard S3.

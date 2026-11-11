@@ -15,6 +15,7 @@ project:
     - title: Results
       children:
         - file: pages/workloads.md
+        - file: pages/workloads-cloud.md
         - file: pages/reader-changes.md
     - title: Calibration
       children:

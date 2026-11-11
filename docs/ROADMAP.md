@@ -553,21 +553,27 @@ lower.
     `keys-r2` and `keys-r2-heavy` at 0942497 (9,043 seeds), whose `layout.eagerBytes` lets small
     tables reach the per-row-group paths. No wrong result; the timeouts were the cut's small strides
     decoding large footers. The two new mutants are caught at 0942497 (1 of 60 seeds each);
-  - [ ] every mutant's calibration at 0942497, since the fuzzer's draws changed (running on the
-    laptop 2026-11-10: `results/fuzz/calibration-0942497`, then `-heavy`);
+  - [x] every mutant's calibration at 0942497, since the fuzzer's draws changed
+    (`results/fuzz/calibration-0942497` and `-heavy`, 2026-11-11): every required mutant caught
+    in the default draws; in the heavy ones all but the locate by key (none of 60, where the
+    default draws catch it in about one seed in 60), now measured there, not required;
   - [x] reference runs: `workloads-ref` on havoc at b49a57f (requests and bytes) and on the laptop
     at 0942497 (instructions), agreeing on every request and byte. The laptop's first runs ran
     beside another session's model checks and were rerun (lab/annotations.toml);
   - [x] hypotheses registered from the reference runs' simulation (L1-L4, 2026-11-10);
-  - [x] the measured page (`lab/pages/workloads-cloud.md`, not yet in the toc), sharing the
-    workloads page's charts (`lab/figures.py` `wl_*`), checked on the tuner's cloud runs;
-  - [ ] the workloads page's main points from `workloads-ref`, and its update curves rerun with the
-    same reader changes (`wlc-upd-*` on havoc): the locate by key takes 12-17% off the writes of
-    MoR and the deferred merges, so the old curves (`win-upd-*`, `tune-upd-*`) do not meet the new
-    main points. The insert curves moved under 2.5% and stay;
-  - [ ] the cloud run: on S3 Express a `c7a.4xlarge` per configuration (four at once, the fifth
-    after), each after its twin and spike; on Azure Blob one `D8as_v6`, in turn, after one spike.
-    The user's address changes during the day: rerun `infra-up` before each deploy step.
+  - [x] the measured page (`lab/pages/workloads-cloud.md`, in the toc under Results since
+    2026-11-11), sharing the workloads page's charts (`lab/figures.py` `wl_*`), checked on the
+    tuner's cloud runs;
+  - [x] the workloads page's main points from `workloads-ref`, and its update curves rerun with the
+    same reader changes (`wlc-upd-*`, campaign `workloads-curves`): the locate by key takes 12-17%
+    off the writes of MoR and the deferred merges, so the old curves (`win-upd-*`, `tune-upd-*`) do
+    not meet the new main points. The insert curves and lateness twins stay on the earlier runs:
+    those changes moved the inserts' main points under 3%, as the page computes. Havoc's ten ran
+    2026-11-11 at 2e3152d; seven of the laptop's ten ran beside other sessions' jobs (3.70-4.44
+    GHz) and were rerun on an idle laptop (4.52-4.64 GHz, every request and byte as havoc's);
+  - [x] the cloud run (2026-11-11 at 0942497): on S3 Express a `c7a.4xlarge` per configuration
+    (four at once, the fifth after), each after its twin and spike; on Azure Blob one `D8as_v6`, in
+    turn, after one spike. L1-L4 held (`lab/pages/workloads-cloud.md`, docs/EXPERIMENTS.md).
 - [ ] **The density hypothesis at Iceberg's row-group size** (raised by the user 2026-11-09): use
   the deletion vector's share of a row group to copy at a finer grain than the file, copying whole
   row groups, parts of them (runs of pages, which the writer aligns across columns every 20,000
