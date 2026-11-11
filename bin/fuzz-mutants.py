@@ -18,7 +18,9 @@ the heavy profile, which catches it in about one seed in 12; one dead but for it
 not been caught in about 1,000 heavy seeds. The cut's two (2026-11-10, strides of 2 to 64 a row
 group): 8 and 2 of the 60 seeds. The sorted read's skip and the locate by key (2026-11-10,
 0942497): 1 of the 60 seeds each, once the fuzzer drew small tables' planning row group by row
-group (layout.eagerBytes); at the 1 MiB default, none of 60.
+group (layout.eagerBytes); at the 1 MiB default, none of 60. Under the heavy profile (2026-11-11,
+0942497) the sorted read's skip 5 of 60 and the locate by key none of 60, so the locate by key is
+measured there, not required (at one seed in 60, a round of 60 misses it about a third of the time).
 
 Each mutant is an exact-text replacement anchored in the code as this file's last commit left it;
 a replacement that no longer matches is reported, not skipped. Results: DIR/<mutant>/summary-*.jsonl
@@ -135,7 +137,7 @@ MUTANTS = {
         ARMS + "Scans.java",
         "      int first = i >= 0 ? i : -i - 1;",
         "      int first = i >= 0 ? i : -i;",
-        "run",
+        {"mixed": "run", "heavy": "?run"},
         "the locate by key misses a row group whose only changed key is the first past its least id",
     ),
     "mor-stats-miss-deletes": (
