@@ -19,8 +19,8 @@ siblings stay idle, so no SMT neighbour shares a core it measures CPU on). Jobs 
 node with the most free cores, on its quietest cores, and no two jobs share a core. The heaviest
 jobs go first, as listed. A job starts only when its heap and its store fit in what is free.
 
-**Measurement hygiene.** CPU is part of every simulated latency (lab/pages/store-latency.md), so a
-job's cores are watched while it runs, as shield's interference monitor watches a cell
+**Measurement hygiene.** CPU is part of every simulated latency (docs/LESSONS.md, Measuring
+work), so a job's cores are watched while it runs, as shield's interference monitor watches a cell
 (~/work/shield/shield-rs/analysis/shieldlib/interference.py). Every second, the busy time of its
 cores (siblings included) less its own CPU time is foreign load, and the busy time of its idle
 siblings, which it cannot run on, is foreign by construction. Leaving siblings idle does not keep

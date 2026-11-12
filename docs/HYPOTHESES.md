@@ -9,6 +9,13 @@ and controls) are this file as of commit 1145f89 ([on GitHub](https://github.com
 1145f89:docs/HYPOTHESES.md`), and the write-ups up to 2026-10-27 cite them there. The commits'
 times show each came before the runs it was decided on. What they settled is summarized below.
 
+On 2026-11-12 the runs and lab pages of the sections up to "Inserts merged by arrival"
+(2026-11-06) were retired, and the tuner's two sections' (2026-11-08) but for its insert
+configurations: what they taught is in [LESSONS.md](LESSONS.md), and the pages these sections
+cite are in git at bfbdf33. The two workloads' runs of 2026-11-06 live on in the windows
+campaign's, which equal them in every record but the windows' reads. The sections stand as
+registered.
+
 ## The question
 
 Treating a Parquet region (a row group) as the unit of a write adds write latency to cut read

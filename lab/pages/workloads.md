@@ -334,7 +334,7 @@ laptop's speed, plus its requests priced by size from a latency test of the stor
 a `c7a.4xlarge` in usw2-az3, Azure Blob on a `D8as_v6` in westus). A cloud run of seven of these
 policies came within 3% of this on S3 Express once CPU was priced at the cloud VM's speed, which
 is slower than the laptop's; at the laptop's speed, as here, S3 Express times run 4–12% low
-([the tuner's picks in the cloud](./tune-cloud.md)). The main points here ran in the cloud on
+(the tuner's picks in the cloud, 2026-11-09: docs/LESSONS.md). The main points here ran in the cloud on
 2026-11-11; [the measured page](./workloads-cloud.md) sets them beside these times.
 
 ```{code-cell} ipython3

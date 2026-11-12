@@ -1,5 +1,9 @@
 # Running on S3 Express (prepared, not yet run)
 
+> Written before the cloud calibration of 2026-10-28, which it planned. The lab pages it names
+> (store-latency, tradeoffs, cloud, scale) were retired with their runs on 2026-11-12; what they
+> taught is in [LESSONS.md](LESSONS.md), and the pages are in git at bfbdf33.
+
 Every latency in the write-ups is simulated: requests, bytes and CPU from local runs, priced with
 endive's store profiles (lab/pages/store-latency.md). The model has been checked only against
 itself, by injecting its own latencies (`sim-validate-s3x`). This run anchors it to the real

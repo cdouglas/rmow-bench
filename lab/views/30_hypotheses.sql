@@ -1,5 +1,5 @@
--- H3 and H4 (docs/HYPOTHESES.md at 1145f89) from the local runs: docs/measurements/layout-vs-policy-2026-10-22.md
--- and docs/measurements/time-travel-2026-10-22.md.
+-- H3 and H4 (docs/HYPOTHESES.md at 1145f89) from the local runs of 2026-10-25, retired 2026-11-12
+-- (docs/LESSONS.md); their pages, layout-vs-policy.md and time-travel.md, are in git at bfbdf33.
 
 -- H4: a time-travel read at step s reads the table as it was after batch s - travelBack, the state
 -- read_full read at step s - travelBack, when it was current. An arm records its history before a

@@ -1,5 +1,5 @@
--- The cloud calibration's charts (lab/pages/cloud.md): what each update sent the store and stored,
--- by the kind of file, and the store profile the spikes measured.
+-- The cloud runs' charts (from the retired cloud calibration; docs/LESSONS.md): what each update
+-- sent the store and stored, by the kind of file, and the store profile the spikes measured.
 
 -- Each logged request (the outermost phases: batch, read_*) with the file it touched:
 --   file_type     the format: parquet or puffin

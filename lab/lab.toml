@@ -89,7 +89,7 @@ path_pattern = '^versions/(?P<arm>[^/]+)/'
 mode = "table"
 
 # The request log (bin/run.sh --log-requests): one record per request, stream read or split task
-# of each outermost phase, for the latency replay (figures.replay, lab/pages/store-latency.md).
+# of each outermost phase, for the latency replay (figures.replay; docs/LESSONS.md, Pricing latency).
 [[facts]]
 name = "requests"
 runs = "bench"

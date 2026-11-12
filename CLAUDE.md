@@ -8,11 +8,15 @@ records requests, bytes and CPU per arm, step and phase.
 ## Start here
 
 - **[docs/EXPERIMENTS.md](docs/EXPERIMENTS.md)** is the map. It covers:
-  - what has been run, and what each experiment varied and found;
-  - the arms and tail policies in one table;
-  - where each hypothesis stands.
+  - the runs that stand, and what each experiment varied and found;
+  - the designs and the two workloads;
+  - where each standing hypothesis stands, and the runs retired (Retired runs).
 
   Read it first, and keep it current (see [Adding an experiment](#adding-an-experiment)).
+- **[docs/LESSONS.md](docs/LESSONS.md)** holds what the retired experiments taught and decided:
+  why their runs no longer stand, the measurement method (work in instructions, latency priced by
+  request size, the stores' surprises), and the results that carry over. Their pages and the full
+  record are in git at bfbdf33.
 - **[README.md](README.md)** has build and run, the phases, the I/O parity rules, the arms and
   every config knob (`layout.*`, `reads.*`).
 - **[docs/ROADMAP.md](docs/ROADMAP.md)** is the outstanding work and what was decided about it.
@@ -23,8 +27,8 @@ records requests, bytes and CPU per arm, step and phase.
   **[docs/DESIGN.md](docs/DESIGN.md)** holds the format-level findings and the writer's rules.
   **[docs/PLAN.md](docs/PLAN.md)** is the original plan, whose default matrix was not what ran.
 - **Write-ups**, one per experiment, are lab pages (`lab/pages/<name>.md`), so the data stay in
-  context: their tables, charts and quoted numbers are computed from the runs. Those before
-  2026-10-22 are `docs/measurements/<experiment>-<date>.md`.
+  context: their tables, charts and quoted numbers are computed from the runs. A retired
+  experiment's page is deleted with its runs, once docs/LESSONS.md says what it taught.
 
 ## Build, test, run
 
@@ -104,7 +108,7 @@ bin/matrix.sh --build configs/local-compact-*.json   # several, from a build sna
   - `steps_diff(a, b)` (`compare_runs.py`);
   - `requests` (the request logs), `store_profiles`, `run_readers`, `phase_latency` and
     `store_sweep(...)` for simulated store latency; `figures.replay(run, profile)` replays a
-    logged run with parallel reads (lab/pages/store-latency.md).
+    logged run with parallel reads (docs/LESSONS.md, Pricing latency).
 - **`analysis/*.py`** are the scripts behind the existing write-ups. They run in the project venv,
   `.venv/bin/python analysis/<script>.py`. If you change one that a lab view ports
   (`sweep.summarize` → `arm_summary`), change the view too and check that both agree.
@@ -112,9 +116,10 @@ bin/matrix.sh --build configs/local-compact-*.json   # several, from a build sna
 ## Rules for measurements
 
 - **Local runs report requests, bytes and CPU, never measured latency.** WSL2 and the page cache
-  make local wall time meaningless. Latency is simulated from requests, bytes and CPU, with a
-  named store profile (lab/pages/store-latency.md), and reported as simulated; a cloud run is
-  needed only to check the simulation's parameters.
+  make local wall time meaningless. Latency is simulated from requests, bytes and CPU, each
+  request priced at its size by a store's latency test (`sized_latency`, lab/views/65_sized.sql;
+  docs/LESSONS.md, Pricing latency), and reported as simulated; a cloud run is needed only to
+  check the simulation's parameters.
 - **Requests and bytes are deterministic** in the op log, config and code. Two runs of one config
   must match exactly (`steps_diff`, or `analysis/compare_runs.py`). A mismatch is a bug, not
   noise.
@@ -122,8 +127,8 @@ bin/matrix.sh --build configs/local-compact-*.json   # several, from a build sna
   `kernel.perf_event_paranoid` at most 2). Thread CPU time moves with the clock: the same read
   repeated back to back took up to twice the time on this laptop. A phase's work is its
   user-mode instructions; its time for simulated latency is that work at its arm's pace
-  (`phase_work.work_ms`, lab/pages/cpu-measure.md). Without counters, thread CPU time under 10%
-  decides nothing for one phase.
+  (`phase_work.work_ms`; docs/LESSONS.md, Measuring work). Without counters, thread CPU time
+  under 10% decides nothing for one phase.
 - **The I/O parity rules in the README** guard against biases found in Iceberg's code. A change
   to any arm's read or write path must keep them, and the tests that check them must pass.
 - **Hypotheses come before the runs that decide them.** Add each one to `docs/HYPOTHESES.md` in a
@@ -137,13 +142,13 @@ bin/matrix.sh --build configs/local-compact-*.json   # several, from a build sna
 
 1. State the question and hypothesis in `docs/HYPOTHESES.md` (new dated section).
 2. Add `configs/<label>.json`, one per setting. The label names the setting, as in
-   `local-compact-aggr-p5`.
+   `wl-upd-compact`.
 3. Run with `bin/matrix.sh --build configs/<label>*.json`, in the background. It takes a while.
 4. Run `lab ingest`, and add a campaign for the runs in `lab/annotations.toml`
-   (`lab annotate 'local-<label>-*' --campaign <name>`).
+   (`lab annotate '<label>-*' --campaign <name>`).
 5. Write the write-up as a lab page, `lab/pages/<name>.md` (the labbook skill), not a plain
-   markdown report, and add it to `lab/myst.yml`'s toc. Follow `layout-vs-policy.md` and
-   `time-travel.md`:
+   markdown report, and add it to `lab/myst.yml`'s toc. Follow `workloads.md` (results) and
+   `region-cut.md` (a decision):
    - setup (configs, workload, arms, build snapshot), with the runs pinned by id;
    - tables and charts computed from the runs, each chart with its table;
    - findings, with every number they quote computed (`{eval}`);

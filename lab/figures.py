@@ -187,7 +187,7 @@ def _plots():
 
 
 def tuner():
-    """analysis/tune.py, the policy tuner (pages/tune.md); its functions take a connection."""
+    """analysis/tune.py, the policy tuner (retired page tune.md: docs/LESSONS.md); its functions take a connection."""
     if str(ANALYSIS) not in sys.path:
         sys.path.insert(0, str(ANALYSIS))
     import tune

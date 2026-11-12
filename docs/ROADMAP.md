@@ -5,6 +5,9 @@ What is left to do before the post, and what was decided along the way. The expe
 next. Keep it current: mark items done (with the commit) rather than deleting them, until a
 write-up covers them.
 
+The lab pages it names that no longer exist were retired with their runs on 2026-11-12: what
+they taught is in [LESSONS.md](LESSONS.md), and the pages are in git at bfbdf33.
+
 ## The question, narrowed (decided 2026-10-26)
 
 **The idea:** treat a Parquet region (a row group) as the unit of a write. That adds write
@@ -102,7 +105,7 @@ reads.
   batch went from 3.0 to 4.5 times MoR-v3's, whose batch was mostly decoding, and its full read
   stayed 0.87 of MoR-v3's, now about 70% the store's time. Engines with Parquet code of their own
   (Trino, DuckDB, Photon) may decode and encode faster still
-  ([lab/pages/vectorized-reader.md](../lab/pages/vectorized-reader.md)).
+  (lab/pages/vectorized-reader.md).
 - [x] **Writers stream** (found and built 2026-10-29). Writers held every row a batch rewrote or
   merged as an Iceberg record (hundreds of bytes each) until the write, and built every file's rows
   as records before encoding: harmless at 1–4 MiB row groups, but 14 GB of live heap by batch 2 of
@@ -474,8 +477,8 @@ lower.
   stage (θ against p, below) has no crossover to start from: where it starts is open. On Azure,
   bigger row groups make RMoW-C's full read faster (0.71 of MoR-v3's at 64 MiB: fewer, larger GETs),
   and RMoR-C's block-uploaded write files read slowly
-  ([lab/pages/cloud-sweep.md](../lab/pages/cloud-sweep.md); the model and the verdicts in
-  [lab/pages/cloud-sweep-model.md](../lab/pages/cloud-sweep-model.md)).
+  (lab/pages/cloud-sweep.md; the model and the verdicts in
+  lab/pages/cloud-sweep-model.md).
 - [ ] **The two workloads apart** (decided 2026-11-05; HYPOTHESES.md, 2026-11-06). Updates
   only (the base point's 150,000 changes a write, clustered by region, no inserts) and inserts
   only (its 350,000 a write, sorted by event time, lateness p99 1, 5 and 20 writes), with
@@ -504,14 +507,14 @@ lower.
   `docker/campaigns/windows.json` on havoc and the same `configs/win-*` on the laptop, for
   instructions. Q1–Q4 held, and the laptop sent what havoc did in every record (EXPERIMENTS.md).
 - [x] **Tuning write policy by simulation** (registered 2026-11-08, HYPOTHESES.md T1–T4; ran
-  2026-11-08, [lab/pages/tune.md](../lab/pages/tune.md)). `analysis/tune.py` prices every policy
+  2026-11-08, lab/pages/tune.md). `analysis/tune.py` prices every policy
   of a workload (a configuration and an arm) per read mix and store: havoc's counts, a formula for
   the work fitted on the laptop's `windows` runs, and the requests priced by size
   (`sized_latency`, which now covers the windows, the sorted read and compactions). Its picks held
   on the laptop's measured work (T2); its formula misses small reads with row groups no training
   run had (T1 in part).
 - [x] **The picks in the cloud** (registered 2026-11-08, HYPOTHESES.md K1–K3; ran 2026-11-08/09
-  at be8d6f1, [lab/pages/tune-cloud.md](../lab/pages/tune-cloud.md)). The four configurations that
+  at be8d6f1, lab/pages/tune-cloud.md). The four configurations that
   hold every S3 Express pick (or one within 0.4% of it) and its runner-up: `tune-upd-rg4m`,
   `tune-upd-mor-c12`, `tune-ing-rg4m` and `tune-ing-rg4m-seal256`, on S3 Express (a fleet of four
   `c7a.4xlarge`, each with its twin and spike) and Azure Blob (one `D8as_v6`, in turn). K1–K3 held:
@@ -656,8 +659,8 @@ lower.
   2026-10-31, 1 h 36 min): V4–V7 held. The counts equal the laptop twin's; every judged mean came
   within 2–14% of the model; RMoW-C's batch took 4.18 times MoR-v3's (predicted 4.48) and its
   full read 0.87 (0.87); the store took 58–70% of the full reads and 18–36% of the batches
-  ([lab/pages/base-point-model.md](../lab/pages/base-point-model.md); the results in
-  [lab/pages/base-point.md](../lab/pages/base-point.md)). **On Azure** (6f24575, 2026-11-01,
+  (lab/pages/base-point-model.md; the results in
+  lab/pages/base-point.md). **On Azure** (6f24575, 2026-11-01,
   2 h 18 min, from a `D8as_v6` in westus, run by a session at the user's request): A1, A3 and A4
   held, A2 is contradicted by RMoR-C's full reads alone. RMoW-C's write took 3.14 times MoR-v3's and
   its full read 0.89; on both stores it repays a write past about six full reads per write. RMoR-C's
@@ -679,7 +682,7 @@ lower.
   time (`infra-up`, `up`, `ship`, `wait`, `run test`, `wait`, then `run spike bench`), then
   `fetch`, `down` and `teardown`. **When the results are in `results/`:**
   1. `lab ingest`.
-  2. In [lab/pages/cloud.md](../lab/pages/cloud.md), swap the pinned stand-ins for the cloud
+  2. In lab/pages/cloud.md, swap the pinned stand-ins for the cloud
      runs: `LATENCY` and `SENT` to the three calibration runs per provider, `SPIKES` to the
      cloud spikes, `PROFILES` to those spikes' run ids (`measured_profiles`), and set
      `STANDIN = False`. Build with `lab build --strict` and look at the charts.
@@ -700,7 +703,7 @@ lower.
   and 3 are done: C1 holds on both, with no difference in requests or bytes in any of the 862
   records, and each Azure phase's `sdk_*` counts equal the Azurite twin's but for RMoR-C with
   footers' creates (a rename for a HEAD). Steps 2, 4 and 5 are done in
-  [lab/pages/cloud.md](../lab/pages/cloud.md): C2 is contradicted as registered, by the profile
+  lab/pages/cloud.md: C2 is contradicted as registered, by the profile
   rather than the model (the spikes' profiles, latency at 64 KiB plus a slope, misprice the
   calibration's small GETs); C3 is contradicted for S3 Express's batches, where the region arms
   beat MoR-v3, and for RMoR-C with footers' batch on Azure; C4 holds on S3 Express and is

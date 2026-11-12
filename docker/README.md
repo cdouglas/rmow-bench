@@ -102,9 +102,9 @@ Each phase record in `steps.jsonl` has its start on the wall clock (`start_ms`),
   kept either way.
 
 Idle siblings do not keep other users' work off a job's cores: the scheduler places threads on
-idle CPUs. The scale campaign's three longer jobs saw 1.6–2.9 CPUs of it on average
-(lab/pages/scale.md). So CPU is judged per phase: the lab's `phase_load` matches each phase to
-the samples it overlaps, and only a `clean` phase (under 0.25 CPUs of foreign load throughout)
+idle CPUs. The scale campaign's three longer jobs saw 1.6–2.9 CPUs of it on average (retired;
+docs/LESSONS.md, Machines). So CPU is judged per phase: the lab's `phase_load` matches each phase
+to the samples it overlaps, and only a `clean` phase (under 0.25 CPUs of foreign load throughout)
 decides anything about CPU. Runs from before the samples (the first scale campaign) have none,
 and decide nothing about CPU if their job had foreign load.
 

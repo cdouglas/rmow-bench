@@ -1,6 +1,6 @@
--- The CPU measure (lab/pages/cpu-measure.md). Thread CPU time moves with the clock: the same read
--- repeated back to back took up to twice the time. A phase's user-mode instructions, its thread's
--- and its read pool's (ThreadCounters), do not. A phase's time for the latency model is its work
+-- The CPU measure (docs/LESSONS.md, Measuring work). Thread CPU time moves with the clock: the
+-- same read repeated back to back took up to twice the time. A phase's user-mode instructions,
+-- its thread's and its read pool's (ThreadCounters), do not. A phase's time for the latency model is its work
 -- at its arm's own pace:
 --   work_ms = instructions x cpi / clock
 -- cpi is the median cycles per instruction of that arm's phases of that kind (and reader) in the

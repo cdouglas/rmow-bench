@@ -2,96 +2,17 @@
 # with `lab annotate`. Selectors: a run_id glob, "path:<glob>" (path under the project root),
 # "source:<name>", or "where:<SQL over runs_raw>".
 
-[campaigns.m1]
-title = "M1: every arm, uniform and recency-skewed updates, with and without compaction"
-select = ["local-m1-*"]
-
-[campaigns.rg-sweep]
-title = "Row-group size sweep, recency-skewed updates (docs/measurements/rg-sweep-recency-2026-10-21.md)"
-select = ["local-rg-sweep-recency-exp-*"]
-
-[campaigns.split-vs-append]
-title = "Appendable and split RMoW files, H5 (docs/measurements/split-vs-append-2026-10-21.md)"
-select = ["local-split-*"]
-
-[campaigns.compaction]
-title = "Compaction policy sweep, H6 (docs/measurements/compaction-sweep-2026-10-21.md)"
-select = ["local-compact-*"]
-
-[campaigns.sim]
-title = "Store latency simulation: validation and logged runs (lab/pages/store-latency.md)"
-select = ["sim-*"]
-
-[campaigns.scale]
-title = "The 4 MiB recency setting scaled to Iceberg's defaults, on havoc (docker/campaigns/scale.json)"
-select = ["where:label LIKE 'scale-%' AND git_sha LIKE '525be1c%'"]
-
-[campaigns.scale-rerun]
-title = "The scale campaign rerun, foreign load per phase and writer footers per transaction (docker/campaigns/scale-rerun.json)"
-select = ["where:label LIKE 'scale-%' AND git_sha LIKE '247f054%'"]
-
-[campaigns.scale-laptop]
-title = "The scale campaign on the instruction measure, on the laptop (docs/HYPOTHESES.md at 1145f89, 2026-10-25)"
-select = ["where:label LIKE 'scale-%' AND git_sha LIKE '9f868af%'"]
-
-[campaigns.cpu-measure]
-title = "Calibration of the CPU measure: instructions and pace (lab/pages/cpu-measure.md)"
-select = ["cal-cpu-*"]
-
-[campaigns.s3x]
-title = "S3 Express: the calibration run and its local twin (configs/s3x-calibration*.json)"
-select = ["s3x-*"]
-
 [campaigns.micro]
 title = "Footer micro-benchmarks (JMH)"
 select = ["source:micro"]
-
-[campaigns.twins]
-title = "The calibration's twins: MoR-v3, TailCoW-C, RMoR-C, RMoR-C with footers and RMoW-C, cached-skip and GETs by size (docs/AZURE_RUNBOOK.md, docs/S3X_RUNBOOK.md)"
-select = ["azure-calibration-azurite-a96fd56de2f0/*", "s3x-calibration-local-8433ccfd4620/*"]
-
-[campaigns.cloud]
-title = "The calibration on S3 Express (us-west-2, c7a.2xlarge) and Azure Blob (westus, D8as_v6), 3 runs each on the registered build 9a69028, and the spikes from main (2026-10-28)"
-select = ["s3x-calibration-f57c86f8e3e7/*", "azure-calibration-cb4830f16cf3/*", "spike/s3x-spike-20261028T221407Z", "spike/azure-spike-20261028T233151Z"]
-
-[campaigns.sweep]
-title = "The sweeps on havoc (docker/campaigns/sweep.json, 2026-10-30): 11 configurations, one run each, every job under foreign load"
-select = ["where:label LIKE 'sweep-%' AND host = 'havoc' AND git_sha LIKE 'a5e2ee2%'"]
-
-[campaigns.base-point]
-title = "The sweeps' base point on S3 Express (c7a.4xlarge, usw2-az3) on the row reader (f51796a, 2026-10-30) and the vectorized reader (6f24575, 2026-10-31), and on Azure Blob (D8as_v6, westus) on the vectorized reader (2026-11-01), each VM's spike, and the laptop twins"
-select = ["sweep-base-s3x-89a55338cd9a/*", "spike/s3x-spike-20261030T205211Z", "spike/s3x-spike-20261031T163533Z", "sweep-base-f970149711a9/20261030T054758Z", "sweep-base-f970149711a9/20261031T083323Z", "sweep-base-azure-0c88452d93b4/*", "spike/azure-spike-20261031T234510Z"]
-
-[campaigns.cloud-sweep]
-title = "The sweeps in the cloud on the vectorized reader (6f24575, 2026-11-01): ten configurations on S3 Express (a c7a.4xlarge each, at once) and on Azure Blob (one D8as_v6, in turn), each after its VM's spike, and each configuration's twin on its S3 Express VM"
-select = ["where:regexp_matches(label, '^sweep-.*-(s3x|azure)$') AND label NOT LIKE 'sweep-base-%' AND git_sha LIKE '6f24575%'", "where:label LIKE 'sweep-%' AND host LIKE 'ip-%' AND NOT regexp_matches(label, '-(s3x|azure)$')", "spike/s3x-spike-sweep-*", "where:run_id LIKE 'spike/azure-spike-20261101T%'"]
-
-[campaigns.rmor-rerun]
-title = "RMoR with the check by range (505ba07, 2026-11-03 UTC): the sweeps' eleven configurations with MoR and RMoR alone on the laptop, the cloud runs' reference (docs/HYPOTHESES.md, 2026-11-02), and the base point with every design under both builds (6f24575 and 505ba07); then the eleven on S3 Express and Azure Blob at d30544a, one VM per store after its spike (page rmor-rerun)"
-select = ["where:label LIKE 'rmor-%' AND host = 'bearyak'", "sweep-base-f970149711a9/20261102T235620Z", "sweep-base-f970149711a9/20261103T045636Z", "where:regexp_matches(label, '^rmor-.*-(s3x|azure)$') AND git_sha LIKE 'd30544a%'", "spike/s3x-spike-20261103T184852Z", "spike/azure-spike-20261103T185155Z"]
-
-[campaigns.kept]
-select = ["kept-*"]
-
-[campaigns.split]
-title = "The two workloads apart (docs/HYPOTHESES.md, 2026-11-06, U1-U4 and I1-I3): updates only (upd-*) and inserts only (ing-base*, ing-late99-*) on havoc at aeee8e3. The runner gave upd-base's and ing-base's load samples to upd-base-scan's and ing-base-compact's runs (docker/campaign.py matched labels by prefix, fixed in a14e010); each run's load.jsonl was restored from results/campaigns/split/<job>.load.jsonl on 2026-11-08, but the job records of upd-base and ing-base still name the other run"
-select = ["where:regexp_matches(label, '^(upd-(base|base-compact|base-scan|density-p25|density-write)|ing-(base|base-compact|late99-1|late99-20))$') AND git_sha LIKE 'aeee8e3%'"]
-
-[campaigns.seal]
-title = "Inserts merged by arrival (docs/HYPOTHESES.md, 2026-11-06, J1-J3): the inserts-only workload at lateness p99 1, 5 and 20 with the tail sealed at 160 MiB, RMoR (rmor-c) and RMoW-append (rmow-c), on havoc at dcb16a1. The runner recorded ing-seal160 as failed and gave its load samples to ing-seal160-late99-20's run (docker/campaign.py, fixed in a14e010); its run finished, and its load.jsonl was restored from results/campaigns/seal/ing-seal160.load.jsonl on 2026-11-08 (the job record still says failed and names the other run)"
-select = ["where:label LIKE 'ing-seal160%' AND git_sha LIKE 'dcb16a1%'"]
 
 [campaigns.windows]
 title = "Reads of a range across the table (docs/HYPOTHESES.md, 2026-11-07, Q1-Q4): the split and seal campaigns' configurations but upd-base-scan, labelled win-*, with five windows of 1% read at each probe under every reader (by id on the updates, by event time on the inserts). On havoc at 479edb1 for requests, bytes and held memory, and on the laptop (bearyak, the same build) for instructions; the two must agree on every request and byte"
 select = ["where:label LIKE 'win-%' AND git_sha LIKE '479edb1%'"]
 
 [campaigns.tune]
-title = "Tuning write policy by simulation (docs/HYPOTHESES.md, 2026-11-08, T1-T4): a grid around the windows campaign's configurations, one knob each (MoR's compaction interval, the deferred merges' threshold, row-group size, RMoR's seal and fanout), on havoc at 7cabf65 for requests and bytes; the finalists on the laptop for instructions (analysis/tune.py)"
-select = ["where:label LIKE 'tune-%' AND host IN ('havoc', 'bearyak')"]
-
-[campaigns.tune-cloud]
-title = "The tuner's picks in the cloud (docs/HYPOTHESES.md, 2026-11-08, K1-K3): its four configurations at be8d6f1 on S3 Express (a c7a.4xlarge each in usw2-az3, at once, each after its twin on its own disk and its spike) and on Azure Blob (one D8as_v6 in westus, in turn, after one spike)"
-select = ["where:regexp_matches(label, '^tune-.*-(s3x|azure)$') AND git_sha LIKE 'be8d6f1%'", "where:label LIKE 'tune-%' AND host LIKE 'ip-%' AND git_sha LIKE 'be8d6f1%'", "spike/s3x-spike-tune-*", "spike/azure-spike-20261108T225400Z"]
+title = "Tuning write policy by simulation (docs/HYPOTHESES.md, 2026-11-08, T1-T4), the inserts' configurations (tune-ing-*), on havoc at 7cabf65 for requests and bytes and on the laptop for instructions: the workloads page's insert curves. The updates' configurations (tune-upd-*) were retired on 2026-11-12, replaced by workloads-curves (docs/EXPERIMENTS.md, Retired runs)"
+select = ["where:label LIKE 'tune-ing-%' AND host IN ('havoc', 'bearyak')"]
 
 [campaigns.workloads-ref]
 title = "The two workloads' main configurations, labelled wl-*, the references for their cloud run (docs/HYPOTHESES.md, 2026-11-10, L1-L4): the windows campaign's, with the locate pruned by each changed key and the sorted read skipping dead row groups, read through the skipping reader alone. On havoc at b49a57f for requests, bytes and held memory, and on the laptop (bearyak) at 0942497 for instructions; 0942497 adds only the fuzzer's layout.eagerBytes, which these leave unset"
@@ -105,10 +26,6 @@ select = ["where:label LIKE 'wlc-%' AND host IN ('havoc', 'bearyak')"]
 title = "The two workloads in the cloud (docs/HYPOTHESES.md, 2026-11-10, L1-L4): the five wl-* configurations at 0942497 on S3 Express (a c7a.4xlarge each in usw2-az3, four at once and wl-ing-compact after, each after its twin on its own disk and its spike) and on Azure Blob (one D8as_v6 in westus, in turn, after one spike), 2026-11-11"
 select = ["where:regexp_matches(label, '^wl-.*-(s3x|azure)$') AND git_sha LIKE '0942497%'", "where:label LIKE 'wl-%' AND host LIKE 'ip-%' AND git_sha LIKE '0942497%'", "spike/s3x-spike-wl-*", "spike/azure-spike-20261111T040817Z"]
 
-[campaigns.mor-row]
-title = "MoR alone with updateRead row at the eleven rmor-* settings, on havoc at aeee8e3: the calibration of the cloud runs' MoR (docs/HYPOTHESES.md, 2026-11-06)"
-select = ["where:label LIKE 'mor-row-%' AND git_sha LIKE 'aeee8e3%'"]
-
 [campaigns.density128]
 title = "The designs as built at 128 MiB row groups, on a table 8 times win-upd-base's, on havoc at 2025e7c: D1 and D2 (docs/HYPOTHESES.md, 2026-11-09)"
 select = ["where:label IN ('d128-upd-mor', 'd128-upd-compact', 'd128-upd-density', 'd128-upd-copies')"]
@@ -117,37 +34,6 @@ select = ["where:label IN ('d128-upd-mor', 'd128-upd-compact', 'd128-upd-density
 title = "Copies cut where a write changes, at 128 MiB row groups, on havoc at a68eda3: D3 and D4 (docs/HYPOTHESES.md, 2026-11-09)"
 select = ["where:label IN ('d128-upd-cut', 'd128-upd-density-cut')"]
 
-[[annotate]]
-select = "smoke-*"
-mark = "excluded"
-note = "in-memory smoke test of the harness"
-
-[[annotate]]
-select = "where:host = 'havoc' AND label = 'sim-validate-s3x'"
-mark = "excluded"
-note = "pipeline check of the havoc container (docker/campaigns/pipeline.json): requests and bytes match the laptop's run in 769 of 779 records, the other 10 being the split arm's stock reads, changed by the split planning"
-
-[[annotate]]
-select = "tune-upd-rg32m-a8da05757230/20261108T074406Z"
-mark = "excluded"
-note = "laptop run under the lab's re-ingest (14 cores busy): its clock 2.48 GHz against 4.6, cycles per instruction 1.5 times, so its work's pace is not the laptop's; rerun 2026-11-08"
-[[annotate]]
-select = "tune-ing-seal256-10395a5186fa/20261108T081748Z"
-mark = "excluded"
-note = "laptop run beside a lab build: its clock 4.36-4.40 GHz against 4.6; rerun 2026-11-08"
-[[annotate]]
-select = "tune-ing-seal160-f2-078f133b6441/20261108T082229Z"
-mark = "excluded"
-note = "laptop run beside a lab build: its clock 4.36-4.40 GHz against 4.6; rerun 2026-11-08"
-[[annotate]]
-select = "where:label LIKE 'wl-%' AND host = 'bearyak' AND started_at BETWEEN TIMESTAMP '2026-11-10 20:40:00' AND TIMESTAMP '2026-11-10 21:40:00'"
-mark = "excluded"
-note = "laptop runs beside another session's TLA+ model checks (load about 9): their clock 3.0-3.2 GHz against 4.5-4.6 for the windows campaign's laptop runs, and wl-upd-base's clock spin read 0.647 (others 1.000), so their work's pace is not the laptop's. Requests and bytes match havoc's exactly. Rerun 2026-11-10 on the idle laptop, from a clean worktree at 0942497"
-[[annotate]]
-select = "where:run_id IN ('wl-ing-compact-7b0b8b27829f/20261110T230425Z', 'wl-ing-seal160-b4a616b68fad/20261110T230658Z')"
-mark = "excluded"
-note = "laptop reruns beside another session's TLA+ model check (TLC with 4 workers, from 23:04:31 UTC): their clock 3.6 GHz against 4.5-4.6 for the three reruns before them; rerun again once the laptop was idle"
-[[annotate]]
-select = "where:run_id IN ('wlc-upd-mor-c12-53f3149af5ca/20261111T052007Z', 'wlc-upd-mor-c6-7da9c8210210/20261111T052304Z', 'wlc-upd-mor-c3-38f8f857087b/20261111T052612Z', 'wlc-upd-defer-p100-d1e1abe0c0e4/20261111T052917Z', 'wlc-upd-defer-p50-b894ca8b8eb5/20261111T053200Z', 'wlc-upd-rg8m-8a0b9cb4105d/20261111T054628Z', 'wlc-upd-rg32m-5792c55cbac2/20261111T055359Z')"
-mark = "excluded"
-note = "laptop runs beside other sessions' jobs (2026-11-11, 05:20-06:06 UTC): their clock 3.70-4.44 GHz against 4.5-4.6 for the windows campaign's laptop runs, so their work's pace is not the laptop's. Requests and bytes match havoc's exactly. Rerun 2026-11-11 once the laptop was idle; the other three (4.47-4.54 GHz) stand"
+[campaigns.prices]
+title = "The two latency tests (spikes) the simulated pages price requests with (analysis/tune.py SPIKES; region-cut): S3 Express from the base point's c7a.4xlarge in usw2-az3, and Azure Blob from a D8as_v6 in westus, both 2026-10-31 at 6f24575"
+select = ["spike/s3x-spike-20261031T163533Z", "spike/azure-spike-20261031T234510Z"]

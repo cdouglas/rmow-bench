@@ -6,8 +6,9 @@ project:
   title: rmow-bench results
   # The run catalog and the pages that browse runs, then the experiments in three kinds:
   # results, as a paper would show them (measured on the cloud stores, or simulated where the page
-  # says so); calibration, which tuned the benchmark and its model; and decisions, the data behind
-  # a fork in the implementation
+  # says so); decisions, the data behind a fork in the implementation; and calibration, which checks
+  # the benchmark's own measures. Pages on the runs retired on 2026-11-12 are in git at bfbdf33
+  # (docs/LESSONS.md)
   toc:
     - file: index.md
     - file: pages/experiments.md
@@ -17,31 +18,12 @@ project:
         - file: pages/workloads.md
         - file: pages/workloads-cloud.md
         - file: pages/reader-changes.md
-    - title: Calibration
-      children:
-        - file: pages/base-point.md
-        - file: pages/base-point-model.md
-        - file: pages/cloud-sweep.md
-        - file: pages/cloud-sweep-model.md
-        - file: pages/rmor-rerun.md
-        - file: pages/cloud.md
-        - file: pages/store-latency.md
-        - file: pages/cpu-measure.md
-        - file: pages/scale.md
-        - file: pages/compare.md
     - title: Decisions
       children:
         - file: pages/region-cut.md
-        - file: pages/tune.md
-        - file: pages/tune-cloud.md
-        - file: pages/vectorized-reader.md
-        - file: pages/tradeoffs.md
-        - file: pages/summary.md
-        - file: pages/sweep.md
-        - file: pages/layouts.md
-        - file: pages/layout-vs-policy.md
-        - file: pages/time-travel.md
-        - file: pages/compaction.md
+    - title: Calibration
+      children:
+        - file: pages/compare.md
         - file: pages/micro.md
   exclude:
     - NOTES.md

@@ -27,9 +27,11 @@ as updates accumulate. Ingest in rough timestamp order, where updates mostly hit
 the case of most interest. The measurement is of I/O; this does not patch Iceberg to accept the
 layout.
 
-Five documents go with this one:
-- [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md): a map of what has been run, what each experiment
+Six documents go with this one:
+- [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md): a map of the runs that stand, what each experiment
   varied and found, and where each hypothesis stands. Start here.
+- [docs/LESSONS.md](docs/LESSONS.md): what the retired experiments taught and decided, from the
+  measurement method to the results that carry over.
 - [docs/ROADMAP.md](docs/ROADMAP.md): the outstanding work, and what was decided about it.
 - [docs/PLAN.md](docs/PLAN.md): the original plan, with its milestones.
 - [docs/DESIGN.md](docs/DESIGN.md): the format-level findings and the writer's rules.
@@ -187,7 +189,7 @@ time (`user_ns`), the process's CPU time (`process_cpu_ns`), and, where the kern
 CPU's counters (`ThreadCounters`, through `perf_event_open`, with `kernel.perf_event_paranoid` at
 most 2), the thread's user-mode `instructions` and `cycles`. Thread CPU time moves with the clock
 speed and instructions do not, so instructions are a phase's work
-([lab/pages/cpu-measure.md](lab/pages/cpu-measure.md)). Every read is checked against a reference
+([docs/LESSONS.md](docs/LESSONS.md#measuring-work)). Every read is checked against a reference
 model,
 using an order-independent hash of (id, version), and a mismatch stops the run. With `verifyRows`
 (the default), every decoded row's payload is checked as well. That check is the harness's, not an
@@ -266,7 +268,7 @@ Each rule guards against a bias found in Iceberg's code:
 3. **Footers are read the same way in every arm.**
 4. **Local and in-memory runs report requests, bytes and CPU, not latency.** WSL2 and the page
    cache make local wall times meaningless. Latency is simulated from requests, bytes and CPU
-   ([lab/pages/store-latency.md](lab/pages/store-latency.md)).
+   ([docs/LESSONS.md](docs/LESSONS.md#pricing-latency)).
 5. **Every file is planned as Iceberg plans it**: one split task per row group, on the split
    offsets of the version read. A footer-cache reader reads a file of at most 1 MiB in one task,
    since Iceberg fetches such a file whole and each split would fetch it again. A split file's
@@ -443,7 +445,7 @@ For latency, a configuration can set more things, and a run can log its requests
 - **`--log-requests`** (on `bin/run.sh` and `bin/matrix.sh`) writes `requests.jsonl`: every
   request each phase issued, with its split task and each task's CPU. The lab's
   `figures.replay` times a logged run on any store, with parallel reads' critical paths
-  (lab/pages/store-latency.md); `RequestLogTest` checks the log and the injection.
+  (docs/LESSONS.md, Pricing latency); `RequestLogTest` checks the log and the injection.
 
 ## Arms
 
@@ -565,106 +567,28 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
 
 ## Status
 
-- **M0 is done.**
-- **M1 is done:**
-  - 12 arms, three tail policies, and the RMoW-DV hybrid (removed after its ablation);
-  - compaction, locate-by-scan, footer prefetch, and parallel split reads.
-
-  Every arm passes the oracle on the in-memory and local stores: full reads, recent-window
-  reads, and time travel across compactions.
-- **Done locally:** the matrix of recency and uniform keys, with compaction off and every 10
-  batches (`configs/local-m1-*`).
-- **Done locally:** a row-group size sweep under recency-skewed updates
-  ([lab/pages/sweep.md](lab/pages/sweep.md)), and the S3 store against an emulator.
-- **Done locally:** RMoW on split files, an object per version instead of appends, against
-  appendable files ([lab/pages/layouts.md](lab/pages/layouts.md)).
-- **Done locally:** store latency, simulated from the runs' requests, bytes and CPU, with endive's
-  store profiles, and validated against injected latency
-  ([lab/pages/store-latency.md](lab/pages/store-latency.md)).
-- **Done locally:** when to compact, as an outcome. Eleven compaction policies were run, and each
-  arm's cheapest one was found per store, read rate and storage weight
-  ([lab/pages/compaction.md](lab/pages/compaction.md)).
-- **Done locally:**
-  - layout against tail policy, H3
-    ([lab/pages/layout-vs-policy.md](lab/pages/layout-vs-policy.md));
-  - time travel and dead bytes, H4
-    ([lab/pages/time-travel.md](lab/pages/time-travel.md)), on the uncompacted configurations
-    rerun once time travel planned an old version with its own split offsets, as Iceberg plans
-    an old snapshot;
-  - layout against update handling, the `-dv` ablation, whose runs and arms were deleted once its
-    conclusions were recorded
-    ([docs/DESIGN.md](docs/DESIGN.md#deletion-vectors-on-an-appendable-file-an-ablation-removed)).
-- **Rerun on 2026-10-25:** every core experiment above, on the current build: writer footers
-  held per transaction, the `cached` reader models, the payload check off, and CPU in
-  instructions. Their write-ups read the reruns, and
-  [lab/pages/summary.md](lab/pages/summary.md) collects the numbers a write-up quotes.
-- **Done on havoc:** the scale campaign, the 4 MiB recency setting scaled to Iceberg's defaults
-  (128 MiB row groups, 512 MiB files), in a container (`docker/campaigns/scale.json`,
-  [docker/README.md](docker/README.md); [lab/pages/scale.md](lab/pages/scale.md)). Requests,
-  bytes and storage were decided there. Thread CPU time could not decide anything: one read's
-  CPU varied by up to 9% between identical twins. CPU was then measured in instructions on this
-  laptop ([lab/pages/cpu-measure.md](lab/pages/cpu-measure.md)), which decided P3–P5.
-- **Done in the cloud (2026-10-28):** the calibration on S3 Express (M3) and Azure (M4), three
-  runs each from a VM beside the store, deployed by [deploy/](deploy/README.md)
-  ([lab/pages/cloud.md](lab/pages/cloud.md)). Each store received exactly the model's requests
-  and bytes (C1). The stores' latencies are not the profiles': Azure is several times faster than
-  its profile, and on S3 Express the region arms' batches beat MoR-v3's, against the twins'
-  prediction.
-- **Done (2026-10-29):** under an update share, a batch's deletes fall among the rows its
-  statements change; writers stream a row group at a time, and each phase records what it holds
-  ([What is held](#what-is-held)); a sorted read (`read_sorted`).
-- **Done on havoc (2026-10-30):** the sweeps from a base point of 16 MiB row groups, one axis at a
-  time (update share, skew, row-group size, arrival window, and the ingest window as a reference),
-  eleven configurations (`configs/sweep-*.json`, `docker/campaigns/sweep.json`), against the
-  hypotheses registered 2026-10-29 in [docs/HYPOTHESES.md](docs/HYPOTHESES.md). Every job ran
-  under foreign load, so their requests, bytes and held peaks stand and their CPU decides nothing.
-- **Done in the cloud (2026-10-30):** the base point on S3 Express, where a profile that prices
-  each logged request at its size from the spikes (lab/views/65_sized.sql) put every judged mean
-  within 1–11% of its wall time (C5–C8 held).
-- **Done (2026-10-31):** every arm reads Parquet through Iceberg's vectorized reader, as Spark
-  does ([What is measured](#what-is-measured)). On the base point a full read takes about a
-  quarter of its instructions, and RMoW-C's batch goes from 3.0 to 4.5 times MoR-v3's at S3
-  Express prices (V1–V3 held); S3 Express measured 4.2 times, with the full read still 0.87 of
-  MoR-v3's (V4–V7 held, [lab/pages/base-point.md](lab/pages/base-point.md)).
-- **Done in the cloud (2026-11-01):** the base point on Azure, and the sweeps on S3 Express (nine
-  VMs at once, each also running its configuration's twin) and Azure (one VM, in turn), against the
-  hypotheses registered 2026-10-31 and 2026-11-01 in [docs/HYPOTHESES.md](docs/HYPOTHESES.md). No
-  region design's write catches MoR-v3's at any setting, but where an update changes 30% of a
-  region RMoW-C repays its write after about one full read per write
-  ([lab/pages/cloud-sweep.md](lab/pages/cloud-sweep.md), [lab/pages/base-point.md](lab/pages/base-point.md)).
-- **Done in the cloud (2026-11-04):** RMoR re-measured with its check of dead row groups by
-  range, the sweeps' eleven configurations with MoR and RMoR alone, one VM per store, against the
-  hypotheses registered 2026-11-02 (R1–R3). RMoR's full read, skipping dead row groups, is now
-  0.88–0.92 of MoR's on S3 Express and 0.96–1.31 on Azure Blob; its write still costs more than
-  RMoW-append's, by ratio over MoR's, everywhere
-  ([lab/pages/rmor-rerun.md](lab/pages/rmor-rerun.md)). The results pages take RMoR's times from
-  these runs.
-- **Done (2026-11-08):** a tuner (`analysis/tune.py`, [lab/pages/tune.md](lab/pages/tune.md))
-  that ranks write policies per read mix and store from havoc's counts and a formula for their
-  work, checked on the laptop's measured work (T1–T4 in [docs/HYPOTHESES.md](docs/HYPOTHESES.md)).
-  On S3 Express, a table with few reads a write takes MoR (compacted on the updates, with 4 MiB
-  row groups on the inserts); past a few windows or a full read a write, RMoW-append with 4 MiB
-  row groups (updates) or RMoR sealed at 256 MiB with 4 MiB row groups (inserts).
-- **Done (2026-11-09):** the tuner's picks in the cloud, on S3 Express and Azure Blob (K1–K3 in
-  [docs/HYPOTHESES.md](docs/HYPOTHESES.md), [lab/pages/tune-cloud.md](lab/pages/tune-cloud.md)):
-  every judged pick was the cheapest of the seven policies on measured time, and on S3 Express the
-  VM's own work and spike priced every policy within 3.3%.
-- **Done (2026-11-09):** the write-up of the two workloads, simulated at 16 MiB row groups
-  ([lab/pages/workloads.md](lab/pages/workloads.md)).
-- **Done (2026-11-10):** copies cut where a write changes, at Iceberg's 128 MiB row groups (D1–D4,
-  on havoc; [lab/pages/region-cut.md](lab/pages/region-cut.md)). RMoR with the cut reads 0.12 of
-  what the deferred merges read a write, with windows at 1.16 times their live bytes, and writes
-  3.04 times their bytes (D3 contradicted by that part alone).
-- **Done in the cloud (2026-11-11):** the two workloads' main points measured on S3 Express and
-  Azure Blob, with the locate by each changed key and the sorted read skipping dead row groups
-  (L1–L4 in [docs/HYPOTHESES.md](docs/HYPOTHESES.md), all held;
-  [lab/pages/workloads-cloud.md](lab/pages/workloads-cloud.md)). On the updates the region designs
-  write in 2.3–2.4 times MoR's time on S3 Express (1.5–2.2 on Azure Blob) and read a 1% range
-  1.4–3.9 times as fast (1.5–6.4); on the inserts compacting MoR or sealing RMoR's tail reads a
-  range 2.1–2.7 times as fast as appending for 0.41–0.64 s more a write. Over the 30 writes MoR's
-  range read grows 3.1–3.9 times, the region designs' 0.90–1.51 times. The simulated
-  [workloads page](lab/pages/workloads.md) uses the same configurations, with its update curves
-  rerun to match (campaign `workloads-curves`).
+- **The harness is done** (M0, M1): every arm passes the oracle on the in-memory and local
+  stores (full reads, recent-window reads, and time travel across compactions), and `bin/fuzz.sh`
+  checks random small configurations of every arm and reader (Fuzzing).
+- **The two workloads** (updates only, inserts only; [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md),
+  The two workloads), with every update reading the rows it rewrites and the locate pruned by each
+  changed key, are the standing results:
+  - simulated on S3 Express and Azure Blob from the laptop's work and havoc's requests, with every
+    policy curve ([lab/pages/workloads.md](lab/pages/workloads.md));
+  - their main points measured on both stores on 2026-11-11 (L1–L4 held;
+    [lab/pages/workloads-cloud.md](lab/pages/workloads-cloud.md)). On the updates the region
+    designs write in 2.3–2.4 times MoR's time on S3 Express (1.5–2.2 on Azure Blob) and read a 1%
+    range 1.4–3.9 times as fast (1.5–6.4); on the inserts compacting MoR or sealing RMoR's tail
+    reads a range 2.1–2.7 times as fast as appending for 0.41–0.64 s more a write. Over the 30
+    writes MoR's range read grows 3.1–3.9 times, the region designs' 0.90–1.51 times.
+- **At Iceberg's 128 MiB row groups** (D1–D4, on havoc;
+  [lab/pages/region-cut.md](lab/pages/region-cut.md)), RMoR with copies cut where a write changes
+  reads 0.12 of what the deferred merges read a write, with windows at 1.16 times their live bytes,
+  and writes 3.04 times their bytes.
+- **Earlier experiments** (the mixed workload, Iceberg's defaults, the calibrations, the base point
+  and its sweeps in the cloud, RMoR's rerun, the tuner) were retired on 2026-11-12 with their runs
+  and pages. What they taught, from the measurement method to the results that carry over, is
+  [docs/LESSONS.md](docs/LESSONS.md).
 - **Next:** the density hypothesis where density can choose: a workload of sparse changes, cold
   pieces merged back, and the locate's requests ([docs/ROADMAP.md](docs/ROADMAP.md)). GCS needs
   APPEND in the fork first; split files can also run on standard S3.

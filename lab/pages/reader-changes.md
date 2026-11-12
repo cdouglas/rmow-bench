@@ -33,7 +33,7 @@ them the same way when they scan for the rows a write changes. The sorted read s
 the deferred merges for the row groups they had copied out). Our check asks the vector's bitmap
 whether each row group's range is deleted whole, at the cost of a few of its containers. The
 results pages take RMoR's times from runs with this check; earlier runs tested each row position in
-turn, which cost RMoR seconds of each write and read ([RMoR re-measured](./rmor-rerun.md)).
+turn, which cost RMoR seconds of each write and read (RMoR re-measured, 2026-11-04: docs/LESSONS.md).
 
 **Delete files opened with their length.** Stock Iceberg's delete filter opens a delete file
 without the length the table records, so the store client asks the store for it: a HEAD per file

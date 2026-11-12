@@ -1,5 +1,5 @@
--- Store latency, simulated over the recorded requests (lab/pages/store-latency.md). A phase that
--- issues one request at a time takes about
+-- Store latency, simulated over the recorded requests (docs/LESSONS.md, Pricing latency). A
+-- phase that issues one request at a time takes about
 --   its thread CPU + sum over requests of E[latency(op)] + MiB read x read rate + MiB written x write rate
 -- where E[latency] is a lognormal's mean, median x exp(sigma^2 / 2). Phases on several threads
 -- (reader models with parallelism above 1) are left out: their critical path needs the
