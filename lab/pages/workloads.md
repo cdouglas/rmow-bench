@@ -119,7 +119,7 @@ def span(xs, fmt="{:.2f}"):
     return lo if lo == hi else f"{lo}–{hi}"
 
 
-tradeoff, twin, snapshot_chart = fig.wl_tradeoff, fig.wl_twin, fig.wl_snapshot_chart
+snapshot_chart = fig.wl_snapshot_chart
 
 
 def snapshots(spec, reads):
@@ -231,12 +231,12 @@ def i_(label, arm, col, s=S3X):
 REGION = ["rmor-c-kept", "rmor-c-footer-kept", "rmow-c"]
 reg_write = {s: [u("wl-upd-base", a, "write_s", s) / u("wl-upd-base", "mor-v3", "write_s", s) for a in REGION]
              for s in STORES}
-reg_window = [u(m, "mor-v3", "window_s", s) / u("wl-upd-base", a, "window_s", s)
-              for s in STORES for a in REGION for m in ("wl-upd-base", "wl-upd-compact")]
+reg_window = [u("wl-upd-base", "mor-v3", "window_s", s) / u("wl-upd-base", a, "window_s", s)
+              for s in STORES for a in REGION]
 
 
 # each design's latency at every write, compaction and read (the snapshot sections)
-SNU = snapshots(UPD, ["window_s", "full_s"])
+SNU = snapshots(UPD, ["window_s", "full_s", "sorted_s"])
 
 
 def at(d, name, what, step, store=S3X):
@@ -261,39 +261,105 @@ def seal_writes(name, store=S3X):
     w = SNI[(SNI.Store == store) & (SNI.name == name) & (SNI.what == "a write")]
     slow = w.s > 2 * w.s.median()
     return w[~slow].s.mean(), w[slow].s.mean(), sorted(w[slow].step)
+
+
+# The designs compared as snapshots are added, with nothing compacted: compaction has sections of
+# its own (3 and 9)
+UN = [s[5] for s in UPD if s[5]]
+UN_M = [n for n in UN if n != "MoR compacted"]
+IN_M = [n for n in IN if n != "MoR compacted"]
+SNU_M = SNU[SNU.name.isin(UN_M)]
+SNI_M = SNI[SNI.name.isin(IN_M)]
+
+# Compaction: MoR at each interval, never to every 3 writes. The inserts' intervals but every 10
+# writes are the tune campaign's runs (SIO, priced as the insert curves were)
+CU = [("wl-upd-base", "never"), ("wlc-upd-mor-c12", "every 12 writes"), ("wl-upd-compact", "every 10 writes"),
+      ("wlc-upd-mor-c6", "every 6 writes"), ("wlc-upd-mor-c3", "every 3 writes")]
+CI = [("wl-ing-base", "never"), ("tune-ing-mor-c12", "every 12 writes"), ("wl-ing-compact", "every 10 writes"),
+      ("tune-ing-mor-c6", "every 6 writes"), ("tune-ing-mor-c3", "every 3 writes")]
+S_ALL = pd.concat([S, SIO])
+
+
+def compaction(spec, reads, ref):
+    """MoR's time at every write, compaction and read probe at each interval of spec, and ref's
+    (label, arm, family, name), never compacted."""
+    sp = [(l, "mor-v3", "MoR", "", "", n, 0) for l, n in spec] + [(ref[0], ref[1], ref[2], "", "", ref[3], 0)]
+    return fig.wl_snapshots(sp, S_ALL, reads)
+
+
+def stored_of(spec):
+    return fig.wl_stored(spec)
+
+
+def costs(spec, cm, st):
+    return fig.wl_compaction_costs(spec, P, cm, st)
+
+
+def knob_chart(L, field, title, values, domain):
+    """The latency of a write, a range read and a full scan (L: Store, design, field, what, s)
+    against a knob's setting on a log axis: a row per store, a column per operation."""
+    designs = [d for d in COLOR if d in set(L.design)]
+    legend = None if len(designs) == 1 else alt.Legend(orient="bottom")
+    enc = alt.Chart().encode(
+        x=alt.X(f"{field}:Q", title=title, scale=alt.Scale(type="log", domain=domain),
+                axis=alt.Axis(values=values, format="~g")),
+        y=alt.Y("s:Q", title="latency (s)", scale=alt.Scale(zero=True)),
+        color=alt.Color("design:N", title=None, sort=designs, legend=legend,
+                        scale=alt.Scale(domain=designs, range=[COLOR[d] for d in designs])))
+    return alt.layer(
+        enc.mark_line(strokeWidth=2, opacity=0.7),
+        enc.mark_point(size=60, filled=True, opacity=1).encode(
+            shape=alt.Shape("design:N", title=None, sort=designs, legend=legend,
+                            scale=alt.Scale(domain=designs, range=[SHAPE[d] for d in designs])),
+            tooltip=["Store", "design", field, "what", alt.Tooltip("s:Q", format=".2f")]),
+        data=L).properties(width=200, height=150).facet(
+        row=alt.Row("Store:N", sort=STORES, title=None),
+        column=alt.Column("what:N", sort=["a write", READ["window_s"], READ["full_s"]], title=None)
+    ).resolve_scale(y="independent")
+
+
+CMU = compaction(CU, ["window_s", "full_s"], ("wl-upd-base", "rmow-c", "RMoW-append", "RMoW-append"))
+STU = stored_of(CU)
+TU = costs(CU, CMU, STU)
+
+
+def cu(store, name, col):
+    return TU[(TU.Store == store) & (TU.compacted == name)][col].iloc[0]
 ```
 
 ## What it shows
 
 - **Updates: the region designs take
   {eval}`span(reg_write[S3X] + reg_write[AZ], "{:.1f}")` times MoR's time to write, and read a range
-  {eval}`span(reg_window, "{:.1f}")` times as fast as MoR, compacted or not.** On S3 Express
-  RMoW-append writes in
+  {eval}`span(reg_window, "{:.1f}")` times as fast.** On S3 Express RMoW-append writes in
   {eval}`f"{u('wl-upd-base', 'rmow-c', 'write_s') / u('wl-upd-base', 'mor-v3', 'write_s'):.1f}"`
   times MoR's time, and reads 1% of the table
   {eval}`f"{u('wl-upd-base', 'mor-v3', 'window_s') / u('wl-upd-base', 'rmow-c', 'window_s'):.1f}"`
-  times as fast as MoR, or
-  {eval}`f"{u('wl-upd-compact', 'mor-v3', 'window_s') / u('wl-upd-base', 'rmow-c', 'window_s'):.1f}"`
-  times as fast as MoR compacted every 10 writes, which costs MoR no more a write. A full scan
-  gains {eval}`f"{1 - u('wl-upd-base', 'rmow-c', 'full_s') / u('wl-upd-compact', 'mor-v3', 'full_s'):.0%}"`
+  times as fast; a full scan gains
+  {eval}`f"{1 - u('wl-upd-base', 'rmow-c', 'full_s') / u('wl-upd-base', 'mor-v3', 'full_s'):.0%}"`
   and a sorted read
-  {eval}`f"{1 - u('wl-upd-base', 'rmow-c', 'sorted_s') / u('wl-upd-compact', 'mor-v3', 'sorted_s'):.0%}"`.
-- **Inserts: the designs do not differ; what matters is whether late rows are merged.**
-  Compacting MoR or sealing RMoR's tail at 160 MiB reads a range
-  {eval}`f"{i_('wl-ing-base', 'mor-v3', 'window_s') / i_('wl-ing-compact', 'mor-v3', 'window_s'):.1f}"`
-  and {eval}`f"{i_('wl-ing-base', 'mor-v3', 'window_s') / i_('wl-ing-seal160', 'rmor-c', 'window_s'):.1f}"`
-  times as fast as appending, for
-  {eval}`f"{i_('wl-ing-compact', 'mor-v3', 'write_s') - i_('wl-ing-base', 'mor-v3', 'write_s'):.2f}"`
-  and {eval}`f"{i_('wl-ing-seal160', 'rmor-c', 'write_s') - i_('wl-ing-base', 'mor-v3', 'write_s'):.2f}"`
-  s more a write; it pays only once rows arrive more than a write late.
+  {eval}`f"{1 - u('wl-upd-base', 'rmow-c', 'sorted_s') / u('wl-upd-base', 'mor-v3', 'sorted_s'):.0%}"`.
+- **As snapshots are added, MoR slows and the region designs do not:** MoR's write and range read
+  grow as its deletes pile up (its range read
+  {eval}`f"{at(SNU_M, 'MoR', READ['window_s'], 30) / at(SNU_M, 'MoR', READ['window_s'], 5):.1f}"`
+  times as long after 30 writes as after 5 on S3 Express), while RMoW-append's stay level.
+- **Compaction brings MoR's reads back in line, at the cost of storage:** compacted every 10
+  writes, its range read after 30 writes takes
+  {eval}`f2(at(CMU, "every 10 writes", READ["window_s"], 30))` s against
+  {eval}`f2(at(CMU, "never", READ["window_s"], 30))` never compacted, for no slower writes, but
+  while older snapshots are kept its table stores
+  {eval}`f2(cu(S3X, "every 10 writes", "stored ÷ live"))` times its live bytes (section 3).
+- **Inserts: the designs do not differ; what matters is whether late rows are merged.** Sealing
+  RMoR's tail at 160 MiB reads a range
+  {eval}`f"{i_('wl-ing-base', 'mor-v3', 'window_s') / i_('wl-ing-seal160', 'rmor-c', 'window_s'):.1f}"`
+  times as fast as appending for
+  {eval}`f"{i_('wl-ing-seal160', 'rmor-c', 'write_s') - i_('wl-ing-base', 'mor-v3', 'write_s'):.2f}"`
+  s more a write, as compacting MoR every 10 writes does; it pays only once rows arrive more than a
+  write late.
 - **Whole-row-group copies get dearer as row groups grow:** RMoW-append's write rises
   {eval}`f"{v(P.assign(write_s=P.write_ms), S3X, 'wlc-upd-rg32m', 'rmow-c', 'write_s') / v(P.assign(write_s=P.write_ms), S3X, 'wlc-upd-rg4m', 'rmow-c', 'write_s'):.1f}"`
   times from 4 to 32 MiB. Iceberg's default, 128 MiB, and copying parts of row groups are not
   tested here.
-- **Over 30 writes MoR slows and the region designs do not:** on the updates MoR's write and range
-  read grow as its deletes pile up (its range read
-  {eval}`f"{at(SNU, 'MoR', READ['window_s'], 30) / at(SNU, 'MoR', READ['window_s'], 5):.1f}"` times as
-  long after 30 writes as after 5 on S3 Express), while RMoW-append's stay level.
 - **Where the time goes:** on S3 Express the largest part of a region design's write is encoding
   the row groups it copies, and MoR's is mostly the store and finding the rows to delete; reads are
   mostly the store.
@@ -316,9 +382,11 @@ delta row group per region). Each copies **whole row groups**: none copies part 
 writer finds the rows a write changes by key, reading only the row groups whose statistics may hold
 a changed key ([our changes to readers and writers](./reader-changes.md)).
 
-**The knobs drawn as curves:** MoR compacted every 12, 10, 6 or 3 writes; the deferred merges at
-θ of 1 (never merging), 0.5, 0.25, 0.12 and 0.06; on the inserts, RMoR's tail sealed at 160 MiB
-with 2, 4 or 8 units merged at a time, or at 256 MiB.
+**The designs are compared with nothing compacted,** as snapshots are added. The knobs each have
+a section of their own: MoR compacted every 12, 10, 6 or 3 writes (sections 3 and 9); the deferred
+merges at θ of 1 (never merging), 0.5, 0.25, 0.12 and 0.06 (section 4); the row-group size
+(section 5); on the inserts, RMoR's tail sealed at 160 MiB with 2, 4 or 8 units merged at a time,
+or at 256 MiB (section 9).
 
 **The reads**, one at a time:
 - **a range read:** 1% of the table, by id on the updates and by event time on the inserts, timed
@@ -326,7 +394,8 @@ with 2, 4 or 8 units merged at a time, or at 256 MiB.
 - **a full scan**, skipping row groups whose rows are all dead;
 - **a sorted read:** the whole table in key order, skipping them too.
 
-Each read's time is its mean over steps 5 to 30, and a write's over the 30 writes.
+Where a section gives one time, a read's is its mean over the reads after 5 to 30 writes, and a
+write's over the 30 writes.
 
 **How the times are simulated.** Each run's requests and bytes were counted on havoc and its CPU
 on the laptop, at {eval}`", ".join(sorted(runs.build.unique()))`. A phase's time is its CPU at the
@@ -343,31 +412,44 @@ is slower than the laptop's; at the laptop's speed, as here, S3 Express times ru
 table(runs)
 ```
 
-## 1. Updates: writing against reading
+## Updates
+
+### 1. Latency as snapshots are added
 
 ```{code-cell} ipython3
 :label: workloads-updates
 :tags: [remove-input]
 :class: col-page-right
 
-tradeoff(U, ["window_s", "full_s", "sorted_s"], {
-    "MoR": ("left", -10), "MoR compacted": ("right", 0),
-    "deferred merges": {"*": ("right", 14), AZ: ("right", 30, -24)},
-    "RMoW-append": ("right", -10), "RMoW-external": ("right", 14), "RMoR": ("left", -10)})
+snapshot_chart(SNU_M, ["window_s", "full_s", "sorted_s"])
 ```
 
-Each design's write latency (with its compactions spread over the writes) against its read
-latency, simulated. The large marks are the designs, each with whiskers: across, from its 10th to
-its 90th percentile write; up, from its fastest to its slowest read over the reads after 5 to 30
-writes. MoR's line runs from never compacted through
-compaction every 12, 10 (the large mark), 6 and 3 writes; the deferred merges' from θ 1 (never
-merging) through 0.5, 0.25 and 0.12 to 0.06 (the large mark).
+Each design's simulated write latency at every write, and its read latency after every 5 writes,
+on the updates with nothing compacted (section 3 compacts MoR). Each graph has one latency axis for
+both stores.
+
+```{code-cell} ipython3
+:tags: [remove-input, hide-output]
+
+snapshot_table(SNU_M, "a write")
+```
 
 ```{code-cell} ipython3
 :tags: [remove-input]
 
-table(twin(U), caption="Simulated latency (s): the mean write (with compactions spread "
-      "over the writes), its 10th and 90th percentiles (`_lo`, `_hi`), and each read's mean, fastest and slowest")
+snapshot_table(SNU_M, READ["window_s"])
+```
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+snapshot_table(SNU_M, READ["full_s"])
+```
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+snapshot_table(SNU_M, READ["sorted_s"])
 ```
 
 ```{code-cell} ipython3
@@ -376,7 +458,6 @@ table(twin(U), caption="Simulated latency (s): the mean write (with compactions 
 B_ = "wl-upd-base"
 w = {s: {a: v(U, s, B_, a, "write_s") for a in ("mor-v3", "rmor-c-kept", "rmor-c-footer-kept", "rmow-c", "rmor-density")}
      for s in STORES}
-wc = {s: v(U, s, "wl-upd-compact", "mor-v3", "write_s") for s in STORES}
 
 
 def rd(s, label, arm, kind):
@@ -384,118 +465,66 @@ def rd(s, label, arm, kind):
 
 
 def repay(s, kind):
-    """Reads of a kind per write that repay RMoW-append's extra write against compacted MoR."""
-    extra = w[s]["rmow-c"] - wc[s]
-    saved = rd(s, "wl-upd-compact", "mor-v3", kind) - rd(s, B_, "rmow-c", kind)
+    """Reads of a kind per write that repay RMoW-append's extra write against MoR."""
+    extra = w[s]["rmow-c"] - w[s]["mor-v3"]
+    saved = rd(s, B_, "mor-v3", kind) - rd(s, B_, "rmow-c", kind)
     return extra / saved if saved > 0 else float("inf")
-
-
-dz = U[U.family == "deferred merges"]
-dz_w = {s: dz[dz.Store == s].write_s for s in STORES}
-dz1 = {s: dz[(dz.Store == s) & (dz.knob == "θ 1")].iloc[0] for s in STORES}
 ```
 
 - **The region designs take {eval}`span(reg_write[S3X], "{:.1f}")` times MoR's time to write on S3
   Express and {eval}`span(reg_write[AZ], "{:.1f}")` on Azure**, where the store's slower requests
   weigh more on MoR's write, which is mostly the store's (section 2). On S3 Express RMoW-append takes
-  {eval}`f1(w[S3X]["rmow-c"])` s a write, RMoW-external {eval}`f1(w[S3X]["rmor-c-footer-kept"])` and
-  RMoR {eval}`f1(w[S3X]["rmor-c-kept"])`, against MoR's {eval}`f1(w[S3X]["mor-v3"])` (on Azure,
+  {eval}`f1(w[S3X]["rmow-c"])` s a write on average, RMoW-external {eval}`f1(w[S3X]["rmor-c-footer-kept"])`
+  and RMoR {eval}`f1(w[S3X]["rmor-c-kept"])`, against MoR's {eval}`f1(w[S3X]["mor-v3"])` (on Azure,
   {eval}`f1(w[AZ]["rmow-c"])`, {eval}`f1(w[AZ]["rmor-c-footer-kept"])` and
   {eval}`f1(w[AZ]["rmor-c-kept"])` against {eval}`f1(w[AZ]["mor-v3"])`).
-- **Compaction makes MoR the baseline to beat.** Compacting every 10 writes costs MoR nothing
-  over the run: {eval}`f1(wc[S3X])` s a write with its compactions, against
-  {eval}`f1(w[S3X]["mor-v3"])` without, since a compacted table is cheaper to update. It halves
-  MoR's range read, from {eval}`f2(rd(S3X, B_, "mor-v3", "window_s"))` s to
-  {eval}`f2(rd(S3X, "wl-upd-compact", "mor-v3", "window_s"))`.
-- **Against compacted MoR, RMoW-append reads a range
-  {eval}`f1(rd(S3X, "wl-upd-compact", "mor-v3", "window_s") / rd(S3X, B_, "rmow-c", "window_s"))`
-  times as fast and scans
-  {eval}`f2(rd(S3X, "wl-upd-compact", "mor-v3", "full_s") / rd(S3X, B_, "rmow-c", "full_s"))`
-  times as fast** on S3 Express
-  ({eval}`f1(rd(AZ, "wl-upd-compact", "mor-v3", "window_s") / rd(AZ, B_, "rmow-c", "window_s"))`
-  and {eval}`f2(rd(AZ, "wl-upd-compact", "mor-v3", "full_s") / rd(AZ, B_, "rmow-c", "full_s"))`
-  on Azure). Its extra write is repaid by about {eval}`f"{repay(S3X, 'window_s'):.0f}"` range reads
-  or {eval}`f1(repay(S3X, 'full_s'))` full scans a write on S3 Express
-  ({eval}`f"{repay(AZ, 'window_s'):.0f}"` or {eval}`f1(repay(AZ, 'full_s'))` on Azure).
-- **The deferred merges' threshold moves their write little**
-  ({eval}`span(dz_w[S3X], "{:.1f}")` s from θ 1 to 0.06 on S3 Express). At θ 1 they never merge,
-  yet they read a range in {eval}`f2(dz1[S3X].window_s)` s against MoR's
-  {eval}`f2(rd(S3X, B_, "mor-v3", "window_s"))`, for {eval}`f1(dz1[S3X].write_s)` s a write: the gain
-  comes from the new versions waiting in a delta row group per region, not from merging.
-
-### Updates: latency as snapshots are added
-
-```{code-cell} ipython3
-:label: workloads-updates-snapshots
-:tags: [remove-input]
-:class: col-page-right
-
-snapshot_chart(SNU, ["window_s", "full_s"])
-```
-
-Each design's simulated write latency at every write, its compactions (crosses, compacted MoR's
-every 10 writes, not in its line), and its read latency after every 5 writes. Each graph has one
-latency axis for both stores.
-
-```{code-cell} ipython3
-:tags: [remove-input, hide-output]
-
-snapshot_table(SNU, "a write")
-```
-
-```{code-cell} ipython3
-:tags: [remove-input]
-
-snapshot_table(SNU, READ["window_s"])
-```
-
-```{code-cell} ipython3
-:tags: [remove-input]
-
-snapshot_table(SNU, READ["full_s"])
-```
-
 - **MoR slows as its deletes pile up, in its writes and its reads.** On S3 Express its write takes
-  {eval}`f1(avg_write(SNU, "MoR", 1, 10))` s on average over the first 10 writes and
-  {eval}`f1(avg_write(SNU, "MoR", 21, 30))` over the last 10, and its range read
-  {eval}`f2(at(SNU, "MoR", READ["window_s"], 5))` s after 5 writes and
-  {eval}`f2(at(SNU, "MoR", READ["window_s"], 30))` after 30 (on Azure
-  {eval}`f2(at(SNU, "MoR", READ["window_s"], 5, AZ))` and {eval}`f2(at(SNU, "MoR", READ["window_s"], 30, AZ))`).
-  Compacting every 10 writes keeps its range read between
-  {eval}`f2(reads_of(SNU, "MoR compacted", READ["window_s"]).min())` and
-  {eval}`f2(reads_of(SNU, "MoR compacted", READ["window_s"]).max())` s, for a compaction that grows with
-  the table: {eval}`", ".join(f2(x) for x in reads_of(SNU, "MoR compacted", "a compaction"))` s after
-  writes 10, 20 and 30.
+  {eval}`f1(avg_write(SNU_M, "MoR", 1, 10))` s on average over the first 10 writes and
+  {eval}`f1(avg_write(SNU_M, "MoR", 21, 30))` over the last 10, and its range read
+  {eval}`f2(at(SNU_M, "MoR", READ["window_s"], 5))` s after 5 writes and
+  {eval}`f2(at(SNU_M, "MoR", READ["window_s"], 30))` after 30 (on Azure
+  {eval}`f2(at(SNU_M, "MoR", READ["window_s"], 5, AZ))` and {eval}`f2(at(SNU_M, "MoR", READ["window_s"], 30, AZ))`).
 - **The region designs stay level:** RMoW-append's write takes
-  {eval}`f1(avg_write(SNU, "RMoW-append", 1, 10))` and {eval}`f1(avg_write(SNU, "RMoW-append", 21, 30))` s
+  {eval}`f1(avg_write(SNU_M, "RMoW-append", 1, 10))` and {eval}`f1(avg_write(SNU_M, "RMoW-append", 21, 30))` s
   over the first and last 10 writes, and its range read
-  {eval}`span(reads_of(SNU, "RMoW-append", READ["window_s"]))` s throughout. The deferred merges climb
-  as MoR does ({eval}`f1(avg_write(SNU, "deferred merges", 1, 10))` to
-  {eval}`f1(avg_write(SNU, "deferred merges", 21, 30))` s a write, a range read from
-  {eval}`f2(at(SNU, "deferred merges", READ["window_s"], 5))` to
-  {eval}`f2(at(SNU, "deferred merges", READ["window_s"], 30))` s), as more of their changes wait in
+  {eval}`span(reads_of(SNU_M, "RMoW-append", READ["window_s"]))` s throughout. The deferred merges climb
+  as MoR does ({eval}`f1(avg_write(SNU_M, "deferred merges", 1, 10))` to
+  {eval}`f1(avg_write(SNU_M, "deferred merges", 21, 30))` s a write, a range read from
+  {eval}`f2(at(SNU_M, "deferred merges", READ["window_s"], 5))` to
+  {eval}`f2(at(SNU_M, "deferred merges", READ["window_s"], 30))` s), as more of their changes wait in
   deletion vectors and delta row groups.
+- **Against MoR, RMoW-append reads a range
+  {eval}`f1(rd(S3X, B_, "mor-v3", "window_s") / rd(S3X, B_, "rmow-c", "window_s"))` times as fast and
+  scans {eval}`f2(rd(S3X, B_, "mor-v3", "full_s") / rd(S3X, B_, "rmow-c", "full_s"))` times as fast**
+  on S3 Express over the 30 writes
+  ({eval}`f1(rd(AZ, B_, "mor-v3", "window_s") / rd(AZ, B_, "rmow-c", "window_s"))` and
+  {eval}`f2(rd(AZ, B_, "mor-v3", "full_s") / rd(AZ, B_, "rmow-c", "full_s"))` on Azure). Its extra
+  write is repaid by about {eval}`f"{repay(S3X, 'window_s'):.0f}"` range reads or
+  {eval}`f1(repay(S3X, 'full_s'))` full scans a write on S3 Express
+  ({eval}`f"{repay(AZ, 'window_s'):.0f}"` or {eval}`f1(repay(AZ, 'full_s'))` on Azure), fewer as
+  MoR's reads slow.
 
-## 2. Updates: where the time goes
+### 2. Where the time goes
 
 ```{code-cell} ipython3
 :label: workloads-updates-parts
 :tags: [remove-input]
 :class: col-page-right
 
-UN = [s[5] for s in UPD if s[5]]
-parts_chart(UP, ["a write", READ["window_s"], READ["full_s"]], UN)
+parts_chart(UP[UP.name.isin(UN_M)], ["a write", READ["window_s"], READ["full_s"]], UN_M)
 ```
 
-Each design's simulated seconds by part: Parquet's decoding and encoding, deletion vectors and
-footers, rows and planning (the rest of the CPU: making and merging rows, planning scans), and the
-store (its client's CPU and the priced requests). Compacted MoR's write carries its compactions.
+Each design's simulated seconds by part, on average over the 30 writes and the reads after 5 to
+30: Parquet's decoding and encoding, deletion vectors and footers, rows and planning (the rest of
+the CPU: making and merging rows, planning scans), and the store (its client's CPU and the priced
+requests).
 
 ```{code-cell} ipython3
 :tags: [remove-input]
 
-table(UP.pivot_table(index=["Store", "what", "name"], columns="part", values="s", aggfunc="sum")
-      .reindex(columns=[p for p in PARTS if p in set(UP.part)]).reset_index().round(3))
+UPM = UP[UP.name.isin(UN_M)]
+table(UPM.pivot_table(index=["Store", "what", "name"], columns="part", values="s", aggfunc="sum")
+      .reindex(columns=[p for p in PARTS if p in set(UPM.part)]).reset_index().round(3))
 ```
 
 - **On S3 Express the largest part of a region design's write is encoding:** the row groups it
@@ -509,225 +538,121 @@ table(UP.pivot_table(index=["Store", "what", "name"], columns="part", values="s"
   ({eval}`f"{share_of(UP, S3X, 'MoR', 'a write', 'the store'):.0%}"` and
   {eval}`f"{share_of(UP, S3X, 'MoR', 'a write', 'decoding'):.0%}"`).
 - **A read is mostly the store:**
-  {eval}`span([share_of(UP, S3X, n, READ['full_s'], 'the store') for n in UN], "{:.0%}")` of a full
+  {eval}`span([share_of(UP, S3X, n, READ['full_s'], 'the store') for n in UN_M], "{:.0%}")` of a full
   scan on S3 Express and
-  {eval}`span([share_of(UP, AZ, n, READ['full_s'], 'the store') for n in UN], "{:.0%}")` on Azure;
-  {eval}`span([share_of(UP, S3X, n, READ['window_s'], 'the store') for n in UN], "{:.0%}")` of a range
+  {eval}`span([share_of(UP, AZ, n, READ['full_s'], 'the store') for n in UN_M], "{:.0%}")` on Azure;
+  {eval}`span([share_of(UP, S3X, n, READ['window_s'], 'the store') for n in UN_M], "{:.0%}")` of a range
   read on S3 Express.
 
-## 3. Inserts: when to merge late rows
+### 3. Compaction
+
+Compacting MoR rewrites its table without the rows its deletion vectors drop, so what MoR's reads
+lose as snapshots are added comes back after each compaction. What it costs is the compactions'
+writes, and storage while older snapshots are kept.
 
 ```{code-cell} ipython3
-:tags: [remove-cell]
-
-base = {a: {s: P[(P.label == "wl-ing-base") & (P.arm == a) & (P.Store == s)].iloc[0] for s in STORES}
-        for a in ("mor-v3", "rmor-c-kept", "rmow-c")}
-
-
-def spread(col, s=S3X):
-    xs = [base[a][s][col] for a in base]
-    return max(xs) / min(xs) - 1
-
-
-iw = {s: v(I, s, "wl-ing-base", "mor-v3", "write_s") for s in STORES}
-ir = {s: v(I, s, "wl-ing-base", "mor-v3", "window_s") for s in STORES}
-```
-
-On the inserts the designs do not differ: each appends a write's rows as new row groups, and none
-merges a late row into the row group its event time falls in. MoR, RMoR and RMoW-append come within
-{eval}`f"{max(spread(c) for c in ('window_ms', 'full_ms', 'sorted_ms')):.0%}"` of one another on every
-read on S3 Express, and their writes within {eval}`f"{spread('write_ms'):.0%}"`. What changes the
-reads is whether late rows are merged afterwards: by compacting MoR, or by sealing RMoR's or
-RMoW-append's tail in larger units.
-
-```{code-cell} ipython3
-:label: workloads-inserts
+:label: workloads-updates-compaction
 :tags: [remove-input]
 :class: col-page-right
 
-tradeoff(I, ["window_s", "sorted_s"], {
-    "appending": ("right", 0), "RMoW-append sealed": ("left", 0), "RMoR sealed": ("right", -10),
-    "MoR compacted": ("left", 14)})
+fig.wl_compaction_chart(CMU, ["window_s", "full_s"], STU, "RMoW-append")
 ```
 
-Write latency against read latency on the inserts (99% within 5 writes late), simulated, with
-whiskers as on the updates. Appending alone (any design); MoR's line runs from appending through compaction every 12, 10 (the
-large mark), 6 and 3 writes; RMoR's tail sealed at 160 MiB merging 4 units at a time (the large
-mark; small marks: 8, 2, or sealed at 256 MiB); RMoW-append's sealed at 160 MiB. A full scan takes
-about the same in every policy (table below).
+MoR's simulated read latency after every 5 writes, never compacted or compacted every 10 or 3
+writes (a read at a compaction's write reads the compacted table), beside RMoW-append's (dashed,
+never compacted); and what MoR's table stores while every snapshot is kept, over its live bytes.
+The table below has every 12 and 6 writes too.
 
 ```{code-cell} ipython3
 :tags: [remove-input]
 
-table(twin(I), caption="Simulated latency (s), as in the updates' table")
+table(TU, caption="MoR at each compaction interval, simulated latency (s): a write on average without and with "
+      "its compactions spread over the writes, a compaction on average, each read on average and after 30 "
+      "writes; and what the table stores after 30 writes, every snapshot kept, over its live bytes")
 ```
 
 ```{code-cell} ipython3
 :tags: [remove-cell]
 
-mc = {s: I[(I.Store == s) & (I.label == "wl-ing-compact")].iloc[0] for s in STORES}
-rs = {s: I[(I.Store == s) & (I.label == "wl-ing-seal160") & (I.arm == "rmor-c")].iloc[0] for s in STORES}
-ws = {s: I[(I.Store == s) & (I.label == "wl-ing-seal160") & (I.arm == "rmow-c")].iloc[0] for s in STORES}
-fulls = I[I.Store == S3X].full_s
+rw_ref = reads_of(CMU, "RMoW-append", READ["window_s"])
+rmow_stored = q("""SELECT s.arm, s.stored_bytes / s.live_bytes AS stored,
+                          (s.stored_bytes - s.reclaimable_bytes) / s.live_bytes AS kept
+                   FROM steps s JOIN canonical_runs r USING (run_id)
+                   WHERE r.host = 'havoc' AND r.label = 'wl-upd-base' AND s.phase = 'state' AND s.step = 30""").set_index("arm")
 ```
 
-- **Merging late rows buys range reads for a fraction of a second a write.** Appending writes in
-  {eval}`f2(iw[S3X])` s and reads a range in {eval}`f2(ir[S3X])` s on S3 Express. Compacting MoR
-  every 10 writes costs {eval}`f2(mc[S3X].write_s - iw[S3X])` s more a write and reads a range in
-  {eval}`f2(mc[S3X].window_s)` s; RMoR sealed at 160 MiB costs {eval}`f2(rs[S3X].write_s - iw[S3X])` s
-  more and reads in {eval}`f2(rs[S3X].window_s)` s. On Azure: {eval}`f2(ir[AZ])` s appending,
-  {eval}`f2(mc[AZ].window_s)` compacted, {eval}`f2(rs[AZ].window_s)` sealed.
-- **RMoW-append gains little from its seal:** {eval}`f2(ws[S3X].window_s)` s a range read on S3
-  Express and {eval}`f2(ws[AZ].window_s)` on Azure, against appending's {eval}`f2(ir[S3X])` and
-  {eval}`f2(ir[AZ])`. Its merged unit is one row group, which stretches back to its oldest late row
-  as a single write's did.
-- **A full scan does not care:** {eval}`span(fulls, "{:.1f}")` s in every policy on S3 Express.
+- **Compaction brings MoR's range read back down.** Never compacted, it grows from
+  {eval}`f2(at(CMU, "never", READ["window_s"], 5))` s after 5 writes to
+  {eval}`f2(at(CMU, "never", READ["window_s"], 30))` after 30 on S3 Express. Compacted every 10
+  writes it stays between {eval}`f2(reads_of(CMU, "every 10 writes", READ["window_s"]).min())` and
+  {eval}`f2(reads_of(CMU, "every 10 writes", READ["window_s"]).max())` s, and every 3 writes between
+  {eval}`f2(reads_of(CMU, "every 3 writes", READ["window_s"]).min())` and
+  {eval}`f2(reads_of(CMU, "every 3 writes", READ["window_s"]).max())`, against RMoW-append's
+  {eval}`span(rw_ref)` s with no compaction. A full scan moves less: from
+  {eval}`f2(cu(S3X, "never", "full scan"))` s on average never compacted to
+  {eval}`f2(cu(S3X, "every 3 writes", "full scan"))` every 3 writes.
+- **The writes barely pay for it.** With its compactions spread over the writes, MoR's write takes
+  {eval}`f2(cu(S3X, "every 10 writes", "write with compactions"))` s compacted every 10 writes and
+  {eval}`f2(cu(S3X, "every 3 writes", "write with compactions"))` every 3, against
+  {eval}`f2(cu(S3X, "never", "write"))` never compacted, on S3 Express: a compacted table is
+  cheaper to update, which pays for most of the compactions
+  ({eval}`span([cu(S3X, n, "a compaction") for n in fig.WL_INTERVALS[1:]])` s each on average).
+- **Storage pays, while older snapshots are kept.** After 30 writes MoR's table stores
+  {eval}`f2(cu(S3X, "every 10 writes", "stored ÷ live"))` times its live bytes compacted every 10
+  writes and {eval}`f2(cu(S3X, "every 3 writes", "stored ÷ live"))` every 3, against
+  {eval}`f2(cu(S3X, "never", "stored ÷ live"))` never compacted: each compaction writes the table
+  again. Once older snapshots expire, every interval keeps only its live bytes. Never compacted,
+  RMoW-append stores {eval}`f1(rmow_stored.loc["rmow-c", "stored"])` times its live bytes and keeps
+  all of it after expiry ({eval}`f1(rmow_stored.loc["rmow-c", "kept"])` times), since its old row
+  groups stay in the objects its current snapshot reads; RMoW-external and RMoR give theirs back
+  on expiry ({eval}`f2(rmow_stored.loc["rmor-c-footer-kept", "kept"])` and
+  {eval}`f2(rmow_stored.loc["rmor-c-kept", "kept"])` times).
 
-```{code-cell} ipython3
-:label: workloads-lateness
-:tags: [remove-input]
-
-LATE = {"win-ing-late99-1": 1, "win-ing-base": 5, "win-ing-late99-20": 20,
-        "win-ing-seal160-late99-1": 1, "win-ing-seal160": 5, "win-ing-seal160-late99-20": 20,
-        "win-ing-base-compact": 5}
-POLICY = {("win-ing", "mor-v3"): "appending", ("win-ing-seal160", "rmor-c"): "RMoR sealed",
-          ("win-ing-seal160", "rmow-c"): "RMoW-append sealed", ("compact", "mor-v3"): "MoR compacted"}
-
-
-def late_policy(label, arm):
-    if label == "win-ing-base-compact":
-        return "MoR compacted"
-    key = ("win-ing-seal160" if label.startswith("win-ing-seal160") else "win-ing", arm)
-    return POLICY.get(key)
-
-
-Lt = P[P.label.isin(LATE)].copy()
-Lt["policy"] = [late_policy(l, a) for l, a in zip(Lt.label, Lt.arm)]
-Lt = Lt[Lt.policy.notna()].assign(lateness=lambda d: d.label.map(LATE), range_read_s=lambda d: d.window_ms / 1e3,
-                                  write_s=lambda d: (d.write_ms + d.compact_ms) / 1e3)
-LP = ["appending", "MoR compacted", "RMoR sealed", "RMoW-append sealed"]
-lc = alt.Color("policy:N", title=None, sort=LP,
-               scale=alt.Scale(domain=LP, range=[COLOR["appending"], COLOR["MoR"], COLOR["RMoR"], COLOR["RMoW-append"]]))
-ls = alt.Shape("policy:N", title=None, sort=LP,
-               scale=alt.Scale(domain=LP, range=[SHAPE["appending"], SHAPE["MoR"], SHAPE["RMoR"], SHAPE["RMoW-append"]]))
-lx = alt.X("lateness:Q", title="lateness, p99 (writes)", scale=alt.Scale(type="log", domain=[0.8, 25]),
-           axis=alt.Axis(values=[1, 5, 20], format="~g"))
-ly = alt.Y("range_read_s:Q", title="range read latency (s)", scale=alt.Scale(zero=True))
-lb = alt.Chart().encode(x=lx, y=ly, color=lc)
-alt.layer(lb.mark_line(strokeWidth=1.5, opacity=0.6),
-          lb.mark_point(size=80, filled=True, opacity=1).encode(
-              shape=ls, tooltip=["Store", "policy", "lateness", alt.Tooltip("range_read_s:Q", format=".2f"),
-                                 alt.Tooltip("write_s:Q", format=".2f")]),
-          data=Lt[["Store", "policy", "lateness", "range_read_s", "write_s"]]).properties(
-    width=260, height=180).facet(column=alt.Column("Store:N", sort=STORES, title=None))
-```
-
-A range read's simulated seconds against how late the inserts arrive (the 99th percentile, in
-writes); MoR compacted every 10 writes ran at 5 only.
-
-```{code-cell} ipython3
-:tags: [remove-input]
-
-table(Lt[["Store", "policy", "lateness", "write_s", "range_read_s"]].sort_values(["Store", "policy", "lateness"]).round(3))
-```
+### 4. The deferred merges' threshold
 
 ```{code-cell} ipython3
 :tags: [remove-cell]
 
-def lt(s, policy, late):
-    return Lt[(Lt.Store == s) & (Lt.policy == policy) & (Lt.lateness == late)].range_read_s.iloc[0]
+THETA = {"θ 1": 1.0, "0.5": 0.5, "0.25": 0.25, "0.12": 0.12, "0.06": 0.06}
+TH = U[U.family == "deferred merges"].assign(theta=lambda d: d.knob.map(THETA), design="deferred merges")
+THL = TH.assign(**{"a write": TH.write_s, READ["window_s"]: TH.window_s, READ["full_s"]: TH.full_s}).melt(
+    id_vars=["Store", "design", "theta"], value_vars=["a write", READ["window_s"], READ["full_s"]],
+    var_name="what", value_name="s")
+
+
+def th(s, theta, what):
+    return THL[(THL.Store == s) & (THL.theta == theta) & (THL.what == what)].s.iloc[0]
 ```
 
-- **How late the rows are decides whether merging is worth it.** When 99% arrive within a write,
-  appending reads a range in {eval}`f2(lt(S3X, "appending", 1))` s on S3 Express, about what
-  compacted MoR reads at 5 writes ({eval}`f2(lt(S3X, "MoR compacted", 5))`). At 5 or 20 writes it
-  takes {eval}`f2(lt(S3X, "appending", 5))` and {eval}`f2(lt(S3X, "appending", 20))` s: a few late
-  rows widen every row group's event-time range.
-- **RMoR's seal holds at every lateness:** {eval}`f2(lt(S3X, "RMoR sealed", 1))`,
-  {eval}`f2(lt(S3X, "RMoR sealed", 5))` and {eval}`f2(lt(S3X, "RMoR sealed", 20))` s.
-
-### Inserts: latency as snapshots are added
-
 ```{code-cell} ipython3
-:label: workloads-inserts-snapshots
+:label: workloads-theta
 :tags: [remove-input]
 :class: col-page-right
 
-snapshot_chart(SNI, ["window_s", "sorted_s"])
+knob_chart(THL, "theta", "θ", [0.06, 0.12, 0.25, 0.5, 1], [0.05, 1.2])
 ```
 
-Each merge policy's simulated write latency at every write, its compactions (crosses), and its
-read latency after every 5 writes, at lateness p99 5.
-
-```{code-cell} ipython3
-:tags: [remove-input, hide-output]
-
-snapshot_table(SNI, "a write")
-```
+The deferred merges on the updates at five thresholds θ, the share of a row group's rows a write's
+changes must reach before the row group is merged, simulated: the latency of a write, a range read
+and a full scan, on average over the 30 writes and the reads after 5 to 30. At θ 1 a row group is
+never merged; θ 0.06 is the deferred merges of the sections above.
 
 ```{code-cell} ipython3
 :tags: [remove-input]
 
-snapshot_table(SNI, READ["window_s"])
+table(TH[["Store", "theta", "write_s", "window_s", "full_s", "sorted_s"]].sort_values(
+    ["Store", "theta"]).round(3), caption="The deferred merges at each θ, simulated latency (s) on average")
 ```
 
-```{code-cell} ipython3
-:tags: [remove-input]
+- **The threshold moves their write little:**
+  {eval}`span([th(S3X, t, "a write") for t in THETA.values()], "{:.1f}")` s from θ 1 to 0.06 on S3
+  Express.
+- **They read a range faster than MoR even when they never merge:** at θ 1 in
+  {eval}`f2(th(S3X, 1.0, READ["window_s"]))` s against MoR's
+  {eval}`f2(rd(S3X, B_, "mor-v3", "window_s"))`, for {eval}`f1(th(S3X, 1.0, "a write"))` s a write.
+  The gain comes from the new versions waiting in a delta row group per region, not from merging.
 
-snapshot_table(SNI, READ["sorted_s"])
-```
-
-- **Unmerged, a range read slows with every write:** appending's takes
-  {eval}`f2(at(SNI, "appending", READ["window_s"], 5))` s after 5 writes and
-  {eval}`f2(at(SNI, "appending", READ["window_s"], 30))` after 30 on S3 Express, as late rows widen
-  more row groups' event-time ranges. With RMoR's seal it goes from
-  {eval}`f2(at(SNI, "RMoR sealed", READ["window_s"], 5))` to
-  {eval}`f2(at(SNI, "RMoR sealed", READ["window_s"], 30))` s; compacted MoR's drops back after each
-  compaction, to {eval}`", ".join(f2(at(SNI, "MoR compacted", READ["window_s"], k)) for k in (10, 20, 30))` s
-  after writes 10, 20 and 30, for {eval}`span(reads_of(SNI, "MoR compacted", "a compaction"), "{:.1f}")` s a
-  compaction.
-- **A seal makes one write in four slow:** RMoR's sealed tail writes in
-  {eval}`f2(seal_writes("RMoR sealed")[0])` s, and in {eval}`f2(seal_writes("RMoR sealed")[1])` s at
-  writes {eval}`", ".join(str(k) for k in seal_writes("RMoR sealed")[2])`, when four units merge.
-- **The sorted read slows in every policy**, from
-  {eval}`span([at(SNI, n, READ["sorted_s"], 5) for n in IN], "{:.1f}")` s after 5 writes to
-  {eval}`span([at(SNI, n, READ["sorted_s"], 30) for n in IN], "{:.1f}")` s after 30 on S3 Express.
-
-## 4. Inserts: where the time goes
-
-```{code-cell} ipython3
-:label: workloads-inserts-parts
-:tags: [remove-input]
-:class: col-page-right
-
-IN = [s[5] for s in ING if s[5]]
-parts_chart(IP, ["a write", READ["window_s"], READ["sorted_s"]], IN)
-```
-
-Each merge policy's simulated seconds by part (as in section 2), on the inserts at lateness p99 5.
-
-```{code-cell} ipython3
-:tags: [remove-input]
-
-table(IP.pivot_table(index=["Store", "what", "name"], columns="part", values="s", aggfunc="sum")
-      .reindex(columns=[p for p in PARTS if p in set(IP.part)]).reset_index().round(3))
-```
-
-- **An appended write is mostly CPU:** encoding
-  ({eval}`f"{share_of(IP, S3X, 'appending', 'a write', 'encoding'):.0%}"`) and making the rows
-  ({eval}`f"{share_of(IP, S3X, 'appending', 'a write', 'rows and planning'):.0%}"`), with the store
-  {eval}`f"{share_of(IP, S3X, 'appending', 'a write', 'the store'):.0%}"` on S3 Express. RMoR's seal
-  adds {eval}`f2(seal_add.sum())` s a write, spread over the same parts
-  ({eval}`", ".join(f"{p} {s:.2f} s" for p, s in seal_add.sort_values(ascending=False).items() if s >= 0.01)`).
-- **A range read is mostly the store** in every policy
-  ({eval}`span([share_of(IP, S3X, n, READ['window_s'], 'the store') for n in IN], "{:.0%}")` on S3
-  Express). Merging cuts the store's time and the decoding alike: compacted MoR's range read takes
-  {eval}`f2(part_s(IP, S3X, 'MoR compacted', READ['window_s'], 'the store'))` s at the store and
-  {eval}`f2(part_s(IP, S3X, 'MoR compacted', READ['window_s'], 'decoding'))` s decoding, against
-  {eval}`f2(part_s(IP, S3X, 'appending', READ['window_s'], 'the store'))` and
-  {eval}`f2(part_s(IP, S3X, 'appending', READ['window_s'], 'decoding'))` s appending.
-
-## 5. Row-group size, 4 to 32 MiB (updates)
+### 5. Row-group size, 4 to 32 MiB
 
 ```{code-cell} ipython3
 :tags: [remove-cell]
@@ -750,24 +675,11 @@ def rg(s, design, mib, what):
 :tags: [remove-input]
 :class: col-page-right
 
-RD = ["RMoW-append", "deferred merges"]
-rb = alt.Chart().encode(
-    x=alt.X("rg_mib:Q", title="row-group size (MiB)", scale=alt.Scale(type="log", base=2, domain=[3.5, 36]),
-            axis=alt.Axis(values=[4, 8, 16, 32], format="~g")),
-    y=alt.Y("s:Q", title="seconds", scale=alt.Scale(zero=True)),
-    color=alt.Color("design:N", title=None, sort=RD, scale=alt.Scale(domain=RD, range=[COLOR[d] for d in RD])))
-alt.layer(rb.mark_line(strokeWidth=1.5, opacity=0.6),
-          rb.mark_point(size=60, filled=True, opacity=1).encode(
-              shape=alt.Shape("design:N", title=None, sort=RD, scale=alt.Scale(domain=RD, range=[SHAPE[d] for d in RD])),
-              tooltip=["Store", "design", "rg_mib", "what", alt.Tooltip("s:Q", format=".2f")]),
-          data=RL).properties(width=200, height=150).facet(
-    row=alt.Row("Store:N", sort=STORES, title=None),
-    column=alt.Column("what:N", sort=["a write", READ["window_s"], READ["full_s"]], title=None)
-).resolve_scale(y="independent")
+knob_chart(RL, "rg_mib", "row-group size (MiB)", [4, 8, 16, 32], [3.5, 36])
 ```
 
 RMoW-append and the deferred merges (θ 0.06) on the updates at four row-group sizes, simulated:
-the latency of a write, a range read and a full scan.
+the latency of a write, a range read and a full scan, on average.
 
 ```{code-cell} ipython3
 :tags: [remove-input]
@@ -792,6 +704,261 @@ table(R[["Store", "design", "rg_mib", "a write", READ["window_s"], READ["full_s"
   row groups pays for the whole row group whatever share of it a write changes; the deferred merges
   could copy only the part a write changed, but as built they cannot.
 
+## Inserts
+
+```{code-cell} ipython3
+:tags: [remove-cell]
+
+base = {a: {s: P[(P.label == "wl-ing-base") & (P.arm == a) & (P.Store == s)].iloc[0] for s in STORES}
+        for a in ("mor-v3", "rmor-c-kept", "rmow-c")}
+
+
+def spread(col, s=S3X):
+    xs = [base[a][s][col] for a in base]
+    return max(xs) / min(xs) - 1
+
+
+iw = {s: v(I, s, "wl-ing-base", "mor-v3", "write_s") for s in STORES}
+ir = {s: v(I, s, "wl-ing-base", "mor-v3", "window_s") for s in STORES}
+rs = {s: I[(I.Store == s) & (I.label == "wl-ing-seal160") & (I.arm == "rmor-c")].iloc[0] for s in STORES}
+ws = {s: I[(I.Store == s) & (I.label == "wl-ing-seal160") & (I.arm == "rmow-c")].iloc[0] for s in STORES}
+fulls = I[(I.Store == S3X) & I.main & (I.name != "MoR compacted")].full_s
+```
+
+On the inserts the designs do not differ: each appends a write's rows as new row groups, and none
+merges a late row into the row group its event time falls in. MoR, RMoR and RMoW-append come within
+{eval}`f"{max(spread(c) for c in ('window_ms', 'full_ms', 'sorted_ms')):.0%}"` of one another on every
+read on S3 Express, and their writes within {eval}`f"{spread('write_ms'):.0%}"`; "appending" below
+is any of them. What changes the reads is whether late rows are merged afterwards: by sealing
+RMoR's or RMoW-append's tail in larger units, or by compacting MoR (section 9).
+
+### 6. Latency as snapshots are added
+
+```{code-cell} ipython3
+:label: workloads-inserts
+:tags: [remove-input]
+:class: col-page-right
+
+snapshot_chart(SNI_M, ["window_s", "sorted_s"])
+```
+
+Each policy's simulated write latency at every write, and its read latency after every 5 writes,
+on the inserts (99% within 5 writes late) with nothing compacted: appending, and RMoR's and
+RMoW-append's tails sealed at 160 MiB.
+
+```{code-cell} ipython3
+:tags: [remove-input, hide-output]
+
+snapshot_table(SNI_M, "a write")
+```
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+snapshot_table(SNI_M, READ["window_s"])
+```
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+snapshot_table(SNI_M, READ["sorted_s"])
+```
+
+- **Unmerged, a range read slows with every write:** appending's takes
+  {eval}`f2(at(SNI_M, "appending", READ["window_s"], 5))` s after 5 writes and
+  {eval}`f2(at(SNI_M, "appending", READ["window_s"], 30))` after 30 on S3 Express, as late rows widen
+  more row groups' event-time ranges. With RMoR's seal it goes from
+  {eval}`f2(at(SNI_M, "RMoR sealed", READ["window_s"], 5))` to
+  {eval}`f2(at(SNI_M, "RMoR sealed", READ["window_s"], 30))` s.
+- **Sealing buys range reads for a fraction of a second a write.** Appending writes in
+  {eval}`f2(iw[S3X])` s on average and reads a range in {eval}`f2(ir[S3X])` s on S3 Express; RMoR
+  sealed at 160 MiB costs {eval}`f2(rs[S3X].write_s - iw[S3X])` s more a write and reads in
+  {eval}`f2(rs[S3X].window_s)` s (on Azure {eval}`f2(ir[AZ])` s appending,
+  {eval}`f2(rs[AZ].window_s)` sealed).
+- **A seal makes one write in four slow:** RMoR's sealed tail writes in
+  {eval}`f2(seal_writes("RMoR sealed")[0])` s, and in {eval}`f2(seal_writes("RMoR sealed")[1])` s at
+  writes {eval}`", ".join(str(k) for k in seal_writes("RMoR sealed")[2])`, when four units merge.
+- **RMoW-append gains little from its seal:** {eval}`f2(ws[S3X].window_s)` s a range read on S3
+  Express and {eval}`f2(ws[AZ].window_s)` on Azure, against appending's {eval}`f2(ir[S3X])` and
+  {eval}`f2(ir[AZ])`. Its merged unit is one row group, which stretches back to its oldest late row
+  as a single write's did.
+- **The sorted read slows in every policy**, from
+  {eval}`span([at(SNI_M, n, READ["sorted_s"], 5) for n in IN_M], "{:.1f}")` s after 5 writes to
+  {eval}`span([at(SNI_M, n, READ["sorted_s"], 30) for n in IN_M], "{:.1f}")` s after 30 on S3 Express,
+  and **a full scan does not care:** {eval}`span(fulls, "{:.1f}")` s in every policy.
+
+### 7. How late the rows arrive
+
+```{code-cell} ipython3
+:label: workloads-lateness
+:tags: [remove-input]
+
+LATE = {"win-ing-late99-1": 1, "win-ing-base": 5, "win-ing-late99-20": 20,
+        "win-ing-seal160-late99-1": 1, "win-ing-seal160": 5, "win-ing-seal160-late99-20": 20}
+POLICY = {("win-ing", "mor-v3"): "appending", ("win-ing-seal160", "rmor-c"): "RMoR sealed",
+          ("win-ing-seal160", "rmow-c"): "RMoW-append sealed"}
+
+
+def late_policy(label, arm):
+    key = ("win-ing-seal160" if label.startswith("win-ing-seal160") else "win-ing", arm)
+    return POLICY.get(key)
+
+
+Lt = P[P.label.isin(LATE)].copy()
+Lt["policy"] = [late_policy(l, a) for l, a in zip(Lt.label, Lt.arm)]
+Lt = Lt[Lt.policy.notna()].assign(lateness=lambda d: d.label.map(LATE), range_read_s=lambda d: d.window_ms / 1e3,
+                                  write_s=lambda d: (d.write_ms + d.compact_ms) / 1e3)
+LP = ["appending", "RMoR sealed", "RMoW-append sealed"]
+lc = alt.Color("policy:N", title=None, sort=LP,
+               scale=alt.Scale(domain=LP, range=[COLOR["appending"], COLOR["RMoR"], COLOR["RMoW-append"]]))
+ls = alt.Shape("policy:N", title=None, sort=LP,
+               scale=alt.Scale(domain=LP, range=[SHAPE["appending"], SHAPE["RMoR"], SHAPE["RMoW-append"]]))
+lx = alt.X("lateness:Q", title="lateness, p99 (writes)", scale=alt.Scale(type="log", domain=[0.8, 25]),
+           axis=alt.Axis(values=[1, 5, 20], format="~g"))
+ly = alt.Y("range_read_s:Q", title="range read latency (s)", scale=alt.Scale(zero=True))
+lb = alt.Chart().encode(x=lx, y=ly, color=lc)
+alt.layer(lb.mark_line(strokeWidth=1.5, opacity=0.6),
+          lb.mark_point(size=80, filled=True, opacity=1).encode(
+              shape=ls, tooltip=["Store", "policy", "lateness", alt.Tooltip("range_read_s:Q", format=".2f"),
+                                 alt.Tooltip("write_s:Q", format=".2f")]),
+          data=Lt[["Store", "policy", "lateness", "range_read_s", "write_s"]]).properties(
+    width=260, height=180).facet(column=alt.Column("Store:N", sort=STORES, title=None))
+```
+
+A range read's simulated seconds, on average over the reads after 5 to 30 writes, against how late
+the inserts arrive (the 99th percentile, in writes).
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(Lt[["Store", "policy", "lateness", "write_s", "range_read_s"]].sort_values(["Store", "policy", "lateness"]).round(3))
+```
+
+```{code-cell} ipython3
+:tags: [remove-cell]
+
+def lt(s, policy, late):
+    return Lt[(Lt.Store == s) & (Lt.policy == policy) & (Lt.lateness == late)].range_read_s.iloc[0]
+```
+
+- **How late the rows are decides whether merging is worth it.** When 99% arrive within a write,
+  appending reads a range in {eval}`f2(lt(S3X, "appending", 1))` s on S3 Express, about what RMoR
+  sealed reads at 5 writes ({eval}`f2(lt(S3X, "RMoR sealed", 5))`). At 5 or 20 writes it takes
+  {eval}`f2(lt(S3X, "appending", 5))` and {eval}`f2(lt(S3X, "appending", 20))` s: a few late rows
+  widen every row group's event-time range.
+- **RMoR's seal holds at every lateness:** {eval}`f2(lt(S3X, "RMoR sealed", 1))`,
+  {eval}`f2(lt(S3X, "RMoR sealed", 5))` and {eval}`f2(lt(S3X, "RMoR sealed", 20))` s.
+
+### 8. Where the time goes
+
+```{code-cell} ipython3
+:label: workloads-inserts-parts
+:tags: [remove-input]
+:class: col-page-right
+
+parts_chart(IP[IP.name.isin(IN_M)], ["a write", READ["window_s"], READ["sorted_s"]], IN_M)
+```
+
+Each policy's simulated seconds by part (as in section 2), on the inserts at lateness p99 5.
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+IPM = IP[IP.name.isin(IN_M)]
+table(IPM.pivot_table(index=["Store", "what", "name"], columns="part", values="s", aggfunc="sum")
+      .reindex(columns=[p for p in PARTS if p in set(IPM.part)]).reset_index().round(3))
+```
+
+- **An appended write is mostly CPU:** encoding
+  ({eval}`f"{share_of(IP, S3X, 'appending', 'a write', 'encoding'):.0%}"`) and making the rows
+  ({eval}`f"{share_of(IP, S3X, 'appending', 'a write', 'rows and planning'):.0%}"`), with the store
+  {eval}`f"{share_of(IP, S3X, 'appending', 'a write', 'the store'):.0%}"` on S3 Express. RMoR's seal
+  adds {eval}`f2(seal_add.sum())` s a write, spread over the same parts
+  ({eval}`", ".join(f"{p} {s:.2f} s" for p, s in seal_add.sort_values(ascending=False).items() if s >= 0.01)`).
+- **A range read is mostly the store** in every policy
+  ({eval}`span([share_of(IP, S3X, n, READ['window_s'], 'the store') for n in IN_M], "{:.0%}")` on S3
+  Express). Merging cuts the store's time and the decoding alike: RMoR sealed's range read takes
+  {eval}`f2(part_s(IP, S3X, 'RMoR sealed', READ['window_s'], 'the store'))` s at the store and
+  {eval}`f2(part_s(IP, S3X, 'RMoR sealed', READ['window_s'], 'decoding'))` s decoding, against
+  {eval}`f2(part_s(IP, S3X, 'appending', READ['window_s'], 'the store'))` and
+  {eval}`f2(part_s(IP, S3X, 'appending', READ['window_s'], 'decoding'))` s appending.
+
+### 9. Compaction, and the seal's size
+
+```{code-cell} ipython3
+:tags: [remove-cell]
+
+CMI = compaction(CI, ["window_s"], ("wl-ing-seal160", "rmor-c", "RMoR", "RMoR sealed"))
+STI = stored_of(CI)
+TI = costs(CI, CMI, STI)
+```
+
+Compacting MoR merges late rows after the fact, every N writes, as RMoR's seal does as they arrive.
+
+```{code-cell} ipython3
+:label: workloads-inserts-compaction
+:tags: [remove-input]
+:class: col-page-right
+
+fig.wl_compaction_chart(CMI, ["window_s"], STI, "RMoR sealed")
+```
+
+MoR's simulated range-read latency after every 5 writes on the inserts, appending (never compacted)
+or compacted every 10 or 3 writes, beside RMoR's tail sealed at 160 MiB (dashed); and what MoR's
+table stores while every snapshot is kept, over its live bytes. The table below has every 12 and 6
+writes too.
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(TI, caption="MoR at each compaction interval on the inserts, as in section 3")
+```
+
+```{code-cell} ipython3
+:tags: [remove-cell]
+
+def ci(store, name, col):
+    return TI[(TI.Store == store) & (TI.compacted == name)][col].iloc[0]
+
+
+SEAL = {"tune-ing-seal160-f2": "160 MiB, 2 units", "wl-ing-seal160": "160 MiB, 4 units",
+        "tune-ing-seal160-f8": "160 MiB, 8 units", "tune-ing-seal256": "256 MiB, 4 units"}
+SL = I[I.label.isin(SEAL) & (I.arm == "rmor-c")].assign(seal=lambda d: d.label.map(SEAL))
+SL = SL[["Store", "seal", "write_s", "window_s", "full_s", "sorted_s"]].sort_values(
+    ["Store", "seal"], key=lambda c: c.map(list(SEAL.values()).index) if c.name == "seal" else c)
+
+
+def sl(store, seal, col):
+    return SL[(SL.Store == store) & (SL.seal == seal)][col].iloc[0]
+```
+
+- **Compaction brings appending's range read back down, as the seal does.** Compacted every 10
+  writes, MoR's range read drops back after each compaction, to
+  {eval}`", ".join(f2(at(CMI, "every 10 writes", READ["window_s"], k)) for k in (10, 20, 30))` s
+  after writes 10, 20 and 30 on S3 Express, against
+  {eval}`f2(at(CMI, "never", READ["window_s"], 30))` s appending after 30 writes and
+  {eval}`span(reads_of(CMI, "RMoR sealed", READ["window_s"]))` s with RMoR's seal. Its compactions
+  take {eval}`span(reads_of(CMI, "every 10 writes", "a compaction"), "{:.1f}")` s each, or
+  {eval}`f2(ci(S3X, "every 10 writes", "write with compactions") - ci(S3X, "never", "write"))` s a
+  write spread over the writes, against {eval}`f2(rs[S3X].write_s - iw[S3X])` s for the seal.
+- **Storage pays while older snapshots are kept:** after 30 writes the compacted table stores
+  {eval}`f2(ci(S3X, "every 10 writes", "stored ÷ live"))` times its live bytes compacted every 10
+  writes and {eval}`f2(ci(S3X, "every 3 writes", "stored ÷ live"))` every 3, against
+  {eval}`f2(ci(S3X, "never", "stored ÷ live"))` appending.
+- **A larger seal reads faster for a slower write.** RMoR's tail sealed at 256 MiB reads a range in
+  {eval}`f2(sl(S3X, "256 MiB, 4 units", "window_s"))` s for
+  {eval}`f2(sl(S3X, "256 MiB, 4 units", "write_s"))` s a write on S3 Express, against
+  {eval}`f2(sl(S3X, "160 MiB, 4 units", "window_s"))` and
+  {eval}`f2(sl(S3X, "160 MiB, 4 units", "write_s"))` at 160 MiB; merging 2 units at a time instead
+  of 4 reads in {eval}`f2(sl(S3X, "160 MiB, 2 units", "window_s"))` s, 8 in
+  {eval}`f2(sl(S3X, "160 MiB, 8 units", "window_s"))` (table below).
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(SL.round(3), caption="RMoR's seal at each size and fanout, simulated latency (s) on average")
+```
+
 ## Limits
 
 - **One row-group size for the comparison, 16 MiB, on a narrow table.** The update regions are
@@ -801,7 +968,8 @@ table(R[["Store", "design", "rg_mib", "a write", READ["window_s"], READ["full_s"
 - **The deferred merges copy whole row groups.** They choose when to copy, from the deletion
   vector's share of the row group, but not what: no part of a row group, no splitting or merging of
   row groups.
-- **The inserts' curves and lateness twins are earlier runs**, from the tune and windows campaigns,
+- **The inserts' compaction intervals (but every 10 writes), seal settings and lateness twins are
+  earlier runs**, from the tune and windows campaigns,
   before the locate by key and the sorted read's skip. On the inserts' main points those changes
   moved no time by more than {eval}`f"{ing_moved:.1%}"`.
 - **Simulated**, from one seed and 30 writes, CPU at the laptop's speed; reads one at a time on one

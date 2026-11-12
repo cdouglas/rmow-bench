@@ -1685,8 +1685,8 @@ def tune_map(pm, W, F, width=300, height=250, min_cells=6):
     for facet in sorted(d.facet.unique()):
         cells = alt.Chart(d[d.facet == facet][["design", "policy", "w0", "w1", "f0", "f1", "margin"]]) \
             .mark_rect(strokeWidth=0.8).encode(
-                x=alt.X("w0:Q", scale=xs, title="windows a write"), x2="w1",
-                y=alt.Y("f0:Q", scale=ys, title="full reads a write"), y2="f1", color=color,
+                x=alt.X("w0:Q", scale=xs, title="windows per write"), x2="w1",
+                y=alt.Y("f0:Q", scale=ys, title="full reads per write"), y2="f1", color=color,
                 stroke=alt.Stroke("design:N", scale=dscale, legend=None),
                 tooltip=["policy", alt.Tooltip("margin:Q", format=".3f", title="runner-up over it")])
         layers = [cells]
@@ -1897,6 +1897,88 @@ def wl_snapshot_table(d, what, basis="simulated"):
     t = t.reindex(columns=[(st, n) for st in WL_STORES for n in names if (st, n) in t.columns])
     t.columns = [f"{st}: {n}" for st, n in t.columns]
     return table(t.reset_index().round(2), caption=f"{what[0].upper() + what[1:]}: {basis} latency (s) at each snapshot")
+
+
+# Compaction, apart from the designs: MoR at each interval, light (never) to dark (every 3 writes),
+# one hue (validated as an ordinal ramp: the dataviz skill's validate_palette.js --ordinal)
+WL_INTERVALS = ["never", "every 12 writes", "every 10 writes", "every 6 writes", "every 3 writes"]
+WL_INTERVAL_COLORS = ["#86b6ef", "#5598e7", "#2a78d6", "#1c5cab", "#104281"]
+
+
+def wl_compaction_chart(d, reads, stored, ref, shown=("never", "every 10 writes", "every 3 writes"),
+                        width=300, height=150):
+    """MoR at the `shown` compaction intervals as snapshots are added: each kind of read's latency
+    at every probe, a column per store, beside `ref` (a design's name in d, dashed, uncompacted);
+    and what the table stores with every snapshot kept, over its live bytes (`stored`: name, step,
+    stored). d is wl_snapshots()'s frame, its names the intervals (WL_INTERVALS) and ref. More than
+    three intervals tangle: reads every 5 writes catch each at another point of its cycle."""
+    names = [n for n in WL_INTERVALS if n in set(d.name) and n in shown]
+    fam = d.drop_duplicates("name").set_index("name").family
+    ref_name = f"{ref}, no compaction"
+    series = [f"MoR, {n}" if n == "never" else f"MoR compacted {n}" for n in names]
+    label = dict(zip(names, series)) | {ref: ref_name}
+    color = alt.Color("series:N", title=None, sort=[*series, ref_name],
+                      legend=alt.Legend(orient="bottom", direction="horizontal", symbolStrokeWidth=2),
+                      scale=alt.Scale(domain=[*series, ref_name],
+                                      range=[*[WL_INTERVAL_COLORS[WL_INTERVALS.index(n)] for n in names],
+                                             WL_COLOR[fam[ref]]]))
+    dash = alt.StrokeDash("series:N", legend=None, scale=alt.Scale(
+        domain=[*series, ref_name], range=[[1, 0]] * len(series) + [[5, 3]]))
+    x = alt.X("step:Q", title="snapshots (writes since the initial load)",
+              scale=alt.Scale(domain=[0, 30], nice=False), axis=alt.Axis(values=list(range(0, 31, 5))))
+    tip = ["Store", "series", "what", "step", alt.Tooltip("s:Q", format=".2f")]
+
+    def graph(what):
+        g = d[(d.what == what) & d.name.isin([*names, ref])].assign(series=lambda x: x.name.map(label))
+        y = alt.Y("s:Q", title="read latency (s)", scale=alt.Scale(zero=True))
+        lines = alt.Chart(g).mark_line(strokeWidth=2, point=alt.OverlayMarkDef(size=40)).encode(
+            x=x, y=y, color=color, strokeDash=dash, tooltip=tip)
+        title = what[0].upper() + what[1:]
+        return (lines.properties(width=width, height=height)
+                .facet(column=alt.Column("Store:N", title=None, sort=WL_STORES))
+                .properties(title=alt.Title(title, anchor="start")))
+
+    st = stored[stored.name.isin(names)].assign(series=lambda x: x.name.map(label))
+    sc = alt.Chart(st).mark_line(strokeWidth=2, point=alt.OverlayMarkDef(size=30)).encode(
+        x=x, y=alt.Y("stored:Q", title="stored ÷ live bytes", scale=alt.Scale(zero=True)), color=color,
+        tooltip=["series", "step", alt.Tooltip("stored:Q", format=".2f")]).properties(
+        width=width, height=height,
+        title=alt.Title("What the table stores, every snapshot kept (the same on both stores)", anchor="start"))
+    return alt.vconcat(*[graph(WL_READ[r]) for r in reads], sc)
+
+
+def wl_stored(spec):
+    """What MoR's table stores after every write, every snapshot kept, over its live bytes, for each
+    (configuration, interval name) of spec: havoc's runs, whose table states every cloud run and
+    twin repeats exactly."""
+    d = q("""SELECT r.label, s.step, s.stored_bytes / s.live_bytes AS stored
+             FROM steps s JOIN canonical_runs r USING (run_id)
+             WHERE r.host = 'havoc' AND s.phase = 'state' AND s.arm = 'mor-v3' AND list_contains($l, r.label)
+             ORDER BY 1, 2""", l=[l for l, _ in spec])
+    return d.assign(name=d.label.map(dict(spec)))
+
+
+def wl_compaction_costs(spec, P, cm, st):
+    """Each compaction interval's costs per store, for spec's (configuration, interval name): P's
+    means (tune.policies() or tune.per_write(), with Store; a write without and with its compactions
+    spread over the writes, each read), a compaction's mean and the range read after 30 writes
+    (cm, wl_snapshots()), and what the table stores after 30 writes over its live bytes (st,
+    wl_stored())."""
+    rows = []
+    for label, name in spec:
+        stored = st[(st.label == label) & (st.step == 30)].stored.iloc[0]
+        for _, r in P[(P.label == label) & (P.arm == "mor-v3")].iterrows():
+            g = cm[(cm.Store == r.Store) & (cm.name == name)]
+            comp = g[g.what == "a compaction"].s
+            rows.append({"Store": r.Store, "compacted": name, "write": r.write_ms / 1e3,
+                         "write with compactions": (r.write_ms + r.compact_ms) / 1e3,
+                         "a compaction": comp.mean() if len(comp) else np.nan,
+                         "range read": r.window_ms / 1e3,
+                         "range read after 30": g[(g.what == WL_READ["window_s"]) & (g.step == 30)].s.iloc[0],
+                         "full scan": r.full_ms / 1e3, "stored ÷ live": stored})
+    out = pd.DataFrame(rows)
+    out["_s"] = out.Store.map(WL_STORES.index)
+    return out.sort_values("_s", kind="stable").drop(columns="_s").round(3)
 
 
 def wl_parts_chart(d, whats, names, parts=WL_PARTS, colors=None):

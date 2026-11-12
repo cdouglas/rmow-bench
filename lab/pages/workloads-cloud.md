@@ -179,8 +179,36 @@ def parts_table(d):
             .reindex(columns=[p for p in PARTS if p in set(d.part)]).reset_index().round(3))
 
 
-SNU = fig.wl_snapshots(UPD, S, ["window_s", "full_s"])
+SNU = fig.wl_snapshots(UPD, S, ["window_s", "full_s", "sorted_s"])
 SNI = fig.wl_snapshots(ING, S, ["window_s", "sorted_s"])
+
+# The designs compared as snapshots are added, with nothing compacted: compaction has sections of
+# its own (3 and 6)
+UN_M = [n for n in UN if n != "MoR compacted"]
+IN_M = [n for n in IN if n != "MoR compacted"]
+SNU_M, SNI_M = SNU[SNU.name.isin(UN_M)], SNI[SNI.name.isin(IN_M)]
+
+# Compaction, measured: MoR never compacted and every 10 writes (the interval the cloud ran), beside
+# the design that reads a range fastest with nothing compacted
+CU = [("wl-upd-base", "never"), ("wl-upd-compact", "every 10 writes")]
+CI = [("wl-ing-base", "never"), ("wl-ing-compact", "every 10 writes")]
+
+
+def compaction(spec, reads, ref):
+    """MoR's measured time at every write, compaction and read probe at each interval of spec, and
+    ref's (label, arm, family, name), never compacted."""
+    sp = [(l, "mor-v3", "MoR", "", "", n, 0) for l, n in spec] + [(ref[0], ref[1], ref[2], "", "", ref[3], 0)]
+    return fig.wl_snapshots(sp, S, reads)
+
+
+CMU = compaction(CU, ["window_s", "full_s"], ("wl-upd-base", "rmow-c", "RMoW-append", "RMoW-append"))
+CMI = compaction(CI, ["window_s"], ("wl-ing-seal160", "rmor-c", "RMoR", "RMoR sealed"))
+STU, STI = fig.wl_stored(CU), fig.wl_stored(CI)
+TU, TI = fig.wl_compaction_costs(CU, PM, CMU, STU), fig.wl_compaction_costs(CI, PM, CMI, STI)
+
+
+def ct(T, st, name, col):
+    return T[(T.Store == st) & (T.compacted == name)][col].iloc[0]
 
 runs = q("""SELECT run_id, label, host, left(git_sha, 7) AS build, round(elapsed_s / 60) AS minutes
             FROM runs WHERE list_contains(campaigns, $c) ORDER BY label, run_id""", c=CLOUD)
@@ -341,6 +369,15 @@ COL_WHAT = {"write_s": "a write", **READ}
 
 def pspan(xs):
     return span([100 * x for x in xs], "{:.0f}") + "%"
+
+
+# The designs against MoR never compacted, and RMoR's seal against appending
+reg_write_mor = {st: [m(U, st, r) / m(U, st, "MoR") for r in REG] for st in STORES}
+seal_r = {st: dict(window=m(I, st, "appending", "window_s") / m(I, st, "RMoR sealed", "window_s"),
+                   extra=m(I, st, "RMoR sealed") - m(I, st, "appending")) for st in STORES}
+ref_late = {st: at30 for st, at30 in ((st, CMU[(CMU.Store == st) & (CMU.name == "RMoW-append")
+                                                & (CMU.what == WIN) & (CMU.step == 30)].s.iloc[0])
+                                      for st in STORES)}
 ```
 
 What each design costs a writer and its readers on the two workloads, **measured** in the cloud on
@@ -349,16 +386,23 @@ beside each store, with that page's forecast for them beside each measurement.
 
 ## What it shows
 
-- **The trade-offs hold on both stores, measured.** On the updates, RMoR, RMoW-external and
-  RMoW-append take {eval}`span(l2[S3X]["write"], "{:.1f}")` times as long as MoR and MoR compacted
-  to write on S3 Express ({eval}`span(l2[AZ]["write"], "{:.1f}")` on Azure Blob). In return they
-  read a 1% range {eval}`span(win_mor[S3X], "{:.1f}")` times as fast as MoR and
-  {eval}`span(win_morc[S3X], "{:.1f}")` times as fast as MoR compacted
-  ({eval}`span(win_mor[AZ], "{:.1f}")` and {eval}`span(win_morc[AZ], "{:.1f}")` on Azure Blob).
-  On the inserts, compacting MoR or sealing RMoR's tail reads a range
-  {eval}`span(l3[S3X]["window"], "{:.1f}")` times as fast as appending
-  ({eval}`span(l3[AZ]["window"], "{:.1f}")` on Azure Blob), for
-  {eval}`span(l3[S3X]["extra"])` s more a write ({eval}`span(l3[AZ]["extra"])` s).
+- **The trade-offs hold on both stores, measured.** On the updates, with nothing compacted, RMoR,
+  RMoW-external and RMoW-append take {eval}`span(reg_write_mor[S3X], "{:.1f}")` times as long as MoR
+  to write on S3 Express ({eval}`span(reg_write_mor[AZ], "{:.1f}")` on Azure Blob), and read a 1%
+  range {eval}`span(win_mor[S3X], "{:.1f}")` times as fast
+  ({eval}`span(win_mor[AZ], "{:.1f}")` on Azure Blob). On the inserts, sealing RMoR's tail reads a
+  range {eval}`f1(seal_r[S3X]["window"])` times as fast as appending
+  ({eval}`f1(seal_r[AZ]["window"])` on Azure Blob), for {eval}`f2(seal_r[S3X]["extra"])` s more a
+  write ({eval}`f2(seal_r[AZ]["extra"])` s).
+- **Compaction brings MoR's range read back in line, at the cost of storage.** Compacted every 10
+  writes, MoR read a range after 30 writes in
+  {eval}`f2(ct(TU, S3X, "every 10 writes", "range read after 30"))` s against
+  {eval}`f2(ct(TU, S3X, "never", "range read after 30"))` never compacted on S3 Express
+  ({eval}`f2(ct(TU, AZ, "every 10 writes", "range read after 30"))` and
+  {eval}`f2(ct(TU, AZ, "never", "range read after 30"))` on Azure Blob), and wrote, its compactions
+  spread over the writes, in {eval}`f2(ct(TU, S3X, "every 10 writes", "write with compactions"))` s
+  against {eval}`f2(ct(TU, S3X, "never", "write"))`; while older snapshots are kept, its table
+  stores {eval}`f2(ct(TU, S3X, "every 10 writes", "stored ÷ live"))` times its live bytes.
 - **MoR's costs grow as its changes pile up; the region designs' grow far less.** From the first
   five writes to the last five, MoR's update write grew {eval}`f2(grow[(S3X, "MoR", "a write")])`
   times on S3 Express ({eval}`f2(grow[(AZ, "MoR", "a write")])` on Azure Blob), and from the 5th
@@ -428,128 +472,197 @@ table(runs, caption="The cloud runs, twins and latency tests")
 table(refs, caption="The reference runs the forecast simulates")
 ```
 
-## 1. Updates: writing against reading
+## Updates
+
+### 1. Latency as snapshots are added
 
 ```{code-cell} ipython3
 :label: workloads-cloud-updates
 :tags: [remove-input]
 :class: col-page-right
 
-fig.wl_tradeoff(U, ["window_s", "full_s", "sorted_s"], {
-    "MoR": ("left", -10), "MoR compacted": ("right", 0), "deferred merges": ("right", 14),
-    "RMoW-append": ("right", -10), "RMoW-external": ("right", 14), "RMoR": ("left", -10)}, width=240)
+fig.wl_snapshot_chart(SNU_M, ["window_s", "full_s", "sorted_s"])
 ```
 
-Each design's measured write latency (with its compactions spread over the writes) against its
-measured read latency. The filled marks are the measurements, with whiskers: across, from the 10th
-to the 90th percentile write; up, from the fastest to the slowest read after 5 to 30 writes. The
-hollow marks, joined to them by dashed lines, are the forecast.
-
-```{code-cell} ipython3
-:tags: [remove-input]
-
-table(fig.wl_twin(U), caption="Measured latency (s): the mean write (with compactions spread over the writes), "
-      "its 10th and 90th percentiles (`_lo`, `_hi`), each read's mean, fastest and slowest; `pred_` the forecast")
-```
-
-### Updates: latency as snapshots are added
-
-```{code-cell} ipython3
-:label: workloads-cloud-updates-snapshots
-:tags: [remove-input]
-:class: col-page-right
-
-fig.wl_snapshot_chart(SNU, ["window_s", "full_s"])
-```
-
-Each design's measured write latency at every write, its compactions (crosses), and its read
-latency after every 5 writes.
+Each design's measured write latency at every write, and its read latency after every 5 writes, on
+the updates with nothing compacted (section 3 compacts MoR). Section 7 sets each design's mean
+beside its forecast.
 
 ```{code-cell} ipython3
 :tags: [remove-input, hide-output]
 
-fig.wl_snapshot_table(SNU, "a write", "measured")
+fig.wl_snapshot_table(SNU_M, "a write", "measured")
+```
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+fig.wl_snapshot_table(SNU_M, READ["window_s"], "measured")
 ```
 
 ```{code-cell} ipython3
 :tags: [remove-input, hide-output]
 
-fig.wl_snapshot_table(SNU, READ["window_s"], "measured")
+fig.wl_snapshot_table(SNU_M, READ["full_s"], "measured")
 ```
 
-### Updates: where the time goes
+```{code-cell} ipython3
+:tags: [remove-input, hide-output]
+
+fig.wl_snapshot_table(SNU_M, READ["sorted_s"], "measured")
+```
+
+- **The region designs write slower:** on average over the 30 writes,
+  {eval}`span(reg_write_mor[S3X], "{:.1f}")` times MoR's time on S3 Express and
+  {eval}`span(reg_write_mor[AZ], "{:.1f}")` on Azure Blob.
+- **MoR's reads slow as snapshots are added, theirs do not:** from the 5th write to the 30th MoR's
+  range read grew {eval}`f2(grow[(S3X, "MoR", WIN)])` times on S3 Express
+  ({eval}`f2(grow[(AZ, "MoR", WIN)])` on Azure Blob), the region designs'
+  {eval}`span([grow[(S3X, r, WIN)] for r in REG])` times
+  ({eval}`span([grow[(AZ, r, WIN)] for r in REG])`). After 30 writes they read a range
+  {eval}`span(late_win[S3X], "{:.1f}")` times as fast as MoR
+  ({eval}`span(late_win[AZ], "{:.1f}")`).
+
+### 2. Where the time goes
 
 ```{code-cell} ipython3
 :label: workloads-cloud-updates-parts
 :tags: [remove-input]
 :class: col-page-right
 
-fig.wl_parts_chart(UP, ["a write", READ["window_s"], READ["full_s"]], UN, PARTS, PCOL)
+fig.wl_parts_chart(UP[UP.name.isin(UN_M)], ["a write", READ["window_s"], READ["full_s"]], UN_M, PARTS, PCOL)
 ```
 
 Each design's measured time split by what its thread was doing: CPU by kind, the store (its
-client's CPU and the wait for its requests), and paused (garbage collection, the JIT); a write's
-compactions spread over the writes.
+client's CPU and the wait for its requests), and paused (garbage collection, the JIT).
 
 ```{code-cell} ipython3
 :tags: [remove-input, hide-output]
 
-table(parts_table(UP), caption="Measured time (s) by part")
+table(parts_table(UP[UP.name.isin(UN_M)]), caption="Measured time (s) by part")
 ```
 
-## 2. Inserts: writing against reading
+### 3. Compaction
+
+```{code-cell} ipython3
+:label: workloads-cloud-updates-compaction
+:tags: [remove-input]
+:class: col-page-right
+
+fig.wl_compaction_chart(CMU, ["window_s", "full_s"], STU, "RMoW-append")
+```
+
+MoR's measured read latency after every 5 writes, never compacted and compacted every 10 writes
+(the interval the cloud ran; a read at a compaction's write reads the compacted table), beside
+RMoW-append's (dashed, never compacted); and what MoR's table stores while every snapshot is kept,
+over its live bytes, the same in every run.
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(TU, caption="MoR compacted and not, measured latency (s): a write on average without and with its "
+      "compactions spread over the writes, a compaction on average, each read on average and after 30 "
+      "writes; and what the table stores after 30 writes, every snapshot kept, over its live bytes")
+```
+
+- **Compaction brings MoR's range read back down:** after 30 writes it took
+  {eval}`f2(ct(TU, S3X, "every 10 writes", "range read after 30"))` s compacted every 10 writes
+  against {eval}`f2(ct(TU, S3X, "never", "range read after 30"))` never compacted on S3 Express
+  ({eval}`f2(ct(TU, AZ, "every 10 writes", "range read after 30"))` and
+  {eval}`f2(ct(TU, AZ, "never", "range read after 30"))` on Azure Blob), against RMoW-append's
+  {eval}`f2(ref_late[S3X])` ({eval}`f2(ref_late[AZ])`) with nothing compacted.
+- **The writes barely pay for it:** with its compactions spread over the writes, MoR's write took
+  {eval}`f2(ct(TU, S3X, "every 10 writes", "write with compactions"))` s against
+  {eval}`f2(ct(TU, S3X, "never", "write"))` never compacted on S3 Express
+  ({eval}`f2(ct(TU, AZ, "every 10 writes", "write with compactions"))` and
+  {eval}`f2(ct(TU, AZ, "never", "write"))` on Azure Blob), a compaction
+  {eval}`f2(ct(TU, S3X, "every 10 writes", "a compaction"))` s on average
+  ({eval}`f2(ct(TU, AZ, "every 10 writes", "a compaction"))`).
+- **Storage pays while older snapshots are kept:** after 30 writes the compacted table stores
+  {eval}`f2(ct(TU, S3X, "every 10 writes", "stored ÷ live"))` times its live bytes, against
+  {eval}`f2(ct(TU, S3X, "never", "stored ÷ live"))` never compacted; once they expire, both keep
+  only their live bytes.
+
+## Inserts
+
+### 4. Latency as snapshots are added
 
 ```{code-cell} ipython3
 :label: workloads-cloud-inserts
 :tags: [remove-input]
 :class: col-page-right
 
-fig.wl_tradeoff(I, ["window_s", "sorted_s"], {
-    "appending": ("left", -10), "MoR compacted": ("right", -10),
-    "RMoR sealed": ("left", 14), "RMoW-append sealed": ("right", 14)})
+fig.wl_snapshot_chart(SNI_M, ["window_s", "sorted_s"])
 ```
 
-As for the updates: measured, with whiskers, and the forecast hollow.
-
-```{code-cell} ipython3
-:tags: [remove-input]
-
-table(fig.wl_twin(I, ("window_s", "sorted_s")), caption="Measured latency (s), as in the updates' table")
-```
-
-### Inserts: latency as snapshots are added
-
-```{code-cell} ipython3
-:label: workloads-cloud-inserts-snapshots
-:tags: [remove-input]
-:class: col-page-right
-
-fig.wl_snapshot_chart(SNI, ["window_s", "sorted_s"])
-```
+Each policy's measured write latency at every write, and its read latency after every 5 writes, on
+the inserts with nothing compacted: appending, and RMoR's and RMoW-append's tails sealed at 160 MiB.
 
 ```{code-cell} ipython3
 :tags: [remove-input, hide-output]
 
-fig.wl_snapshot_table(SNI, "a write", "measured")
+fig.wl_snapshot_table(SNI_M, "a write", "measured")
 ```
 
-### Inserts: where the time goes
+```{code-cell} ipython3
+:tags: [remove-input]
+
+fig.wl_snapshot_table(SNI_M, READ["window_s"], "measured")
+```
+
+- **Sealing RMoR's tail reads a range {eval}`f1(seal_r[S3X]["window"])` times as fast as appending**
+  on S3 Express ({eval}`f1(seal_r[AZ]["window"])` on Azure Blob), for
+  {eval}`f2(seal_r[S3X]["extra"])` s more a write on average ({eval}`f2(seal_r[AZ]["extra"])` s);
+  RMoW-append's seal reads {eval}`f2(seal_win[S3X])` and {eval}`f2(seal_win[AZ])` times as fast.
+
+### 5. Where the time goes
 
 ```{code-cell} ipython3
 :label: workloads-cloud-inserts-parts
 :tags: [remove-input]
 :class: col-page-right
 
-fig.wl_parts_chart(IP, ["a write", READ["window_s"], READ["sorted_s"]], IN, PARTS, PCOL)
+fig.wl_parts_chart(IP[IP.name.isin(IN_M)], ["a write", READ["window_s"], READ["sorted_s"]], IN_M, PARTS, PCOL)
 ```
 
 ```{code-cell} ipython3
 :tags: [remove-input, hide-output]
 
-table(parts_table(IP), caption="Measured time (s) by part")
+table(parts_table(IP[IP.name.isin(IN_M)]), caption="Measured time (s) by part")
 ```
 
-## 3. Forecast against measured
+### 6. Compaction
+
+```{code-cell} ipython3
+:label: workloads-cloud-inserts-compaction
+:tags: [remove-input]
+:class: col-page-right
+
+fig.wl_compaction_chart(CMI, ["window_s"], STI, "RMoR sealed")
+```
+
+MoR's measured range-read latency after every 5 writes on the inserts, appending (never compacted)
+and compacted every 10 writes, beside RMoR's tail sealed at 160 MiB (dashed); and what MoR's table
+stores while every snapshot is kept, over its live bytes.
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(TI, caption="MoR compacted and not on the inserts, as in section 3")
+```
+
+- **Compacting merges late rows after the fact, as the seal does as they arrive:** after 30 writes
+  MoR read a range in {eval}`f2(ct(TI, S3X, "every 10 writes", "range read after 30"))` s compacted
+  every 10 writes and {eval}`f2(ct(TI, S3X, "never", "range read after 30"))` appending on S3
+  Express ({eval}`f2(ct(TI, AZ, "every 10 writes", "range read after 30"))` and
+  {eval}`f2(ct(TI, AZ, "never", "range read after 30"))` on Azure Blob), for
+  {eval}`f2(ct(TI, S3X, "every 10 writes", "write with compactions") - ct(TI, S3X, "never", "write"))` s
+  more a write with its compactions spread over the writes
+  ({eval}`f2(ct(TI, AZ, "every 10 writes", "write with compactions") - ct(TI, AZ, "never", "write"))` s),
+  and {eval}`f2(ct(TI, S3X, "every 10 writes", "stored ÷ live"))` times its live bytes stored after
+  30 writes while older snapshots are kept.
+
+## 7. Forecast against measured
 
 ```{code-cell} ipython3
 :label: workloads-cloud-forecast
