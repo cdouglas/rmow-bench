@@ -80,8 +80,8 @@ def panel(df, y, title, unit, log=False, by_reader=False):
 
 
 alt.vconcat(
-    alt.hconcat(panel(write, "mb_written", "Bytes written a write", "MB", log=True),
-                panel(write, "requests", "Requests a write", "requests", log=True)),
+    alt.hconcat(panel(write, "mb_written", "Bytes written per write", "MB", log=True),
+                panel(write, "requests", "Requests per write", "requests", log=True)),
     alt.hconcat(panel(full, "gets", "Full scan: GETs", "GETs", log=True, by_reader=True),
                 panel(full, "mb_read", "Full scan: bytes", "MB", by_reader=True),
                 panel(window, "mb_read", "A 1% range read: bytes", "MB", by_reader=True)),

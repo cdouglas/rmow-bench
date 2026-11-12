@@ -156,9 +156,8 @@ bin/matrix.sh --build configs/local-compact-*.json   # several, from a build sna
 
    Queries worth reusing go in `lab/views/`. Build with `lab build --strict` and look at the
    charts in `lab/_build/charts/`.
-6. Update `docs/EXPERIMENTS.md`. Its run table and findings are written by hand; the lab's
-   Experiments page regenerates the run table from the runs to check against. Update the README's
-   Status too.
+6. Update `docs/EXPERIMENTS.md`. Its run table and findings are written by hand; check its run
+   counts against the campaigns table on the lab's front page. Update the README's Status too.
 
 ## Working here
 

@@ -181,7 +181,7 @@ J = pd.DataFrame([judged(n) for n in NAMES if n in present])
 ```{code-cell} ipython3
 :tags: [remove-input]
 
-table(J.round(2), caption="MB written and read a write (mean over the run's writes, its first 40 "
+table(J.round(2), caption="MB written and read per write (mean over the run's writes, its first 40 "
       "and last 40), and the windows and the full read over live bytes at the last write; "
       "`_model` the layout model's forecast")
 ```
@@ -203,7 +203,7 @@ long = pw.melt(id_vars=["name", "step"], value_vars=["written (10-write mean)", 
 
 alt.Chart(long).mark_line().encode(
     x=alt.X("step:Q", title="write"),
-    y=alt.Y("mb:Q", scale=alt.Scale(type="log"), title="MB a write"),
+    y=alt.Y("mb:Q", scale=alt.Scale(type="log"), title="MB per write"),
     color=alt.Color("name:N", scale=COLOR, title="design"),
 ).properties(width=300, height=220).facet(column=alt.Column("what:N", title=None))
 ```
@@ -217,7 +217,7 @@ table(pw.groupby("name", sort=False).apply(
                         | {f"writes {a}–{b}: read": g[(g.step >= a) & (g.step <= b)]["read"].mean()
                            for a, b in [(1, 40), (81, 120), (201, 240)]}),
     include_groups=False).round(1).reset_index().rename(columns={"name": "design"}),
-      caption="MB a write, by span of writes (the whole copies ran 30 writes)")
+      caption="MB per write, by span of writes (the whole copies ran 30 writes)")
 ```
 
 ```{code-cell} ipython3
@@ -463,7 +463,7 @@ whose metrics overlap a window, as the region designs' windows did at 16 MiB.
 ```{code-cell} ipython3
 :tags: [remove-input]
 
-table(L.round(1), caption="Requests a write by phase, and the MB the locate reads, over writes "
+table(L.round(1), caption="Requests per write by phase, and the MB the locate reads, over writes "
       "201–240 (the whole copies: none)")
 ```
 

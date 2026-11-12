@@ -26,7 +26,7 @@ For the trade-off in one frame, start with the
 | [docs/ROADMAP.md](ROADMAP.md) | The outstanding work, and the decisions that shaped it. |
 | [docs/DESIGN.md](DESIGN.md) | The format-level findings: writer rules, footer order, split files, compaction. |
 | [docs/PLAN.md](PLAN.md) | The plan as approved on 2026-10-20. Its default matrix is not what ran. |
-| `lab/` | The results database and pages (labbook). `lab serve` shows the pages as a site; `lab/pages/experiments.md` regenerates the parameter tables from the runs. |
+| `lab/` | The results database and pages (labbook). `lab serve` shows the pages as a site, whose front page lists the campaigns and every run. |
 | `results/` | The raw runs, one directory per configuration (`<label>-<hash>/<start>/`). Not in git. |
 | `docs/measurements/` | The footer micro-benchmarks' JMH output (2026-10-20), the source of the README's footer cost. |
 
