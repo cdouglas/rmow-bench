@@ -80,6 +80,9 @@ FROM sized_points;
 -- so a Parquet PUT by an arm that appends in the run is taken as one: RMoW-C's new files and
 -- RMoR-C with footers' data files (each later takes a footer, or may). No other arm appends. Not
 -- requests: task, abort (a stream closed early) and stream_bytes. A table, made once per ingest.
+-- Every join condition is an equality between the two sides, the request's kind folded into a key:
+-- a LEFT JOIN that tests r.kind in its ON runs as a nested loop (labbook's troubleshooting, A slow
+-- ingest), which took 332 s against 1.8 s on 2.4 million requests, with the same rows.
 CREATE TABLE request_ops AS
 WITH streams AS (
     SELECT run_id, arm, step, phase, reader, task, object, seq, kind, length, dur_ns,
@@ -95,7 +98,7 @@ stream_sizes AS (
            sum(dur_ns) AS dur_ns
     FROM streams WHERE stream > 0 GROUP BY ALL
 ),
-appending AS (SELECT DISTINCT run_id, arm FROM requests WHERE kind = 'append')
+appending AS (SELECT DISTINCT run_id, arm, 'put' AS kind FROM requests WHERE kind = 'append')
 SELECT r.run_id, r.arm, r.step, r.phase, r.reader, r.seq, r.kind,
        CASE r.kind WHEN 'get_range' THEN 'get' WHEN 'get_stream' THEN 'get'
                    WHEN 'put' THEN CASE WHEN a.arm IS NOT NULL AND r.object LIKE '%.parquet'
@@ -104,9 +107,9 @@ SELECT r.run_id, r.arm, r.step, r.phase, r.reader, r.seq, r.kind,
        CASE WHEN r.kind = 'get_stream' THEN ss.bytes ELSE greatest(r.length, 0) END AS bytes,
        CASE WHEN r.kind = 'get_stream' THEN ss.dur_ns ELSE r.dur_ns END AS dur_ns
 FROM requests r
-LEFT JOIN appending a ON r.kind = 'put' AND a.run_id = r.run_id AND a.arm = r.arm
-LEFT JOIN stream_sizes ss ON r.kind = 'get_stream' AND ss.run_id = r.run_id AND ss.arm = r.arm
-                         AND ss.seq = r.seq
+LEFT JOIN appending a ON a.run_id = r.run_id AND a.arm = r.arm AND a.kind = r.kind
+LEFT JOIN stream_sizes ss ON ss.run_id = r.run_id AND ss.arm = r.arm
+                         AND ss.seq = CASE WHEN r.kind = 'get_stream' THEN r.seq END
 WHERE r.kind IN ('get_range', 'get_stream', 'head', 'put', 'append');
 
 -- Each logged request of a run priced with a spike's sizes: an append or create past the cap is
