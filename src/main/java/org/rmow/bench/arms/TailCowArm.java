@@ -73,6 +73,14 @@ import org.rmow.bench.workload.Rows;
  * merge-read and write: a row group is read, rewritten, encoded and its rows dropped before the
  * next is read. RMoR-C's file streams to the store as it is encoded; with footers, the file is
  * held to its single create, as before.
+ *
+ * <p>With the event-time merge ({@code layout.inserts} {@code event-time}, {@link
+ * EventTimeRegions}; keep only, without the cleaner) inserts do not go to the tail: each joins the
+ * row group whose event-time range holds it, which the batch rewrites into its new file as it
+ * rewrites a row group an update changes (a DV, or with footers a new footer, hides the old copy),
+ * cut in pieces once it passes the cap; the tail policy is unused. With deferred merges, a row
+ * group merges once the rows that join it, those waiting for it included, reach θ of its rows;
+ * until then they wait in delta row groups, as updated rows do.
  */
 public final class TailCowArm extends MorArm {
 
@@ -136,6 +144,16 @@ public final class TailCowArm extends MorArm {
   private final Set<Long> folded = new HashSet<>();
   // with keep: where a rewritten row group is cut into row groups (null: it stays one)
   private final LayoutSpec.CutSpec cut;
+  // the event-time merge: whether it is on; its index of the live row groups, by key (file << 32
+  // | first row), made at the load; the batch's newest row group's key (-1: none); each row
+  // group's inserts this batch, by key (-1: an empty table's); with deferred merges, the inserts
+  // that wait this batch, each with its region, and how many wait for each region
+  private final boolean byEventTime;
+  private EventTimeRegions eventTime;
+  private long newestKey = -1;
+  private Map<Long, List<Long>> joining = Map.of();
+  private final Map<Long, Integer> waitIn = new HashMap<>();
+  private final Map<Integer, Integer> waitingInserts = new HashMap<>();
 
   public TailCowArm(ArmContext ctx, TailPolicy.Kind kind) {
     this(ctx, kind, Double.POSITIVE_INFINITY);
@@ -224,6 +242,15 @@ public final class TailCowArm extends MorArm {
           "Unknown cut: at " + cut.at + ", minStrides " + cut.minStrides + ", strideRows "
               + cut.strideRows);
     }
+    this.byEventTime = EventTimeRegions.wanted(ctx);
+    if (byEventTime && (!keep || clean != null)) {
+      throw new IllegalArgumentException(
+          "The event-time merge is built for the arms that keep row groups, without the cleaner");
+    }
+  }
+
+  private static long key(int k, long first) {
+    return ((long) k << 32) | first;
   }
 
   @Override
@@ -234,6 +261,9 @@ public final class TailCowArm extends MorArm {
   @Override
   public void load(List<InitialLoad.InitialFile> initial) {
     super.load(initial);
+    if (byEventTime) {
+      indexInitial(initial);
+    }
     if (elide) {
       for (int k = 0; k < initial.size(); k++) {
         InitialLoad.InitialFile f = initial.get(k);
@@ -244,6 +274,139 @@ public final class TailCowArm extends MorArm {
         idsOf.put(k, ids);
       }
     }
+  }
+
+  /**
+   * The event-time merge's index of the initial load's row groups, from their footers, read as
+   * setup (untraced); the cap is the rows of the largest.
+   */
+  private void indexInitial(List<InitialLoad.InitialFile> initial) {
+    List<long[]> ranges = new ArrayList<>(); // {key, min ts, max ts}
+    long largest = 0;
+    try {
+      for (int k = 0; k < initial.size(); k++) {
+        InitialLoad.InitialFile f = initial.get(k);
+        FileMetaData footer =
+            RmowFile.adopt(ctx.setupIo(), f.location(), f.length(), () -> 0).footer();
+        long first = 0;
+        for (RowGroup rg : footer.getRow_groups()) {
+          long[] range = {key(k, first), Long.MAX_VALUE, Long.MIN_VALUE};
+          for (long id = f.firstId() + first; id < f.firstId() + first + rg.getNum_rows(); id++) {
+            range[1] = Math.min(range[1], ctx.log().ts(id));
+            range[2] = Math.max(range[2], ctx.log().ts(id));
+          }
+          ranges.add(range);
+          largest = Math.max(largest, rg.getNum_rows());
+          first += rg.getNum_rows();
+        }
+      }
+    } catch (IOException e) {
+      throw new java.io.UncheckedIOException(e);
+    }
+    eventTime = new EventTimeRegions(largest > 0 ? largest : ctx.layout().rowGroupBytes / 40);
+    for (long[] r : ranges) {
+      eventTime.add(r[0], r[1], r[2]);
+    }
+  }
+
+  /**
+   * The event-time merge's locate: the writer finds the row group each insert joins from its index
+   * of them, and reads the footer of each live file whose event-time bounds (its manifest entry)
+   * overlap the range those row groups and inserts span ({@link EventTimeRegions#searchRange}),
+   * once in the batch, checking every placement against the row groups the footers list: a file of
+   * one row group is that row group, whose range its bounds give.
+   */
+  private void locateInserts(OpLog.Batch b) throws IOException {
+    if (b.insertIds().length == 0 || eventTime.newest() == null) {
+      return;
+    }
+    OpLog log = ctx.log();
+    long[] ts = new long[b.insertIds().length];
+    for (int i = 0; i < ts.length; i++) {
+      ts[i] = log.ts(b.insertIds()[i]);
+    }
+    Arrays.sort(ts);
+    Map<Integer, long[]> bounds = new TreeMap<>();
+    for (int k = live.nextSetBit(0); k >= 0; k = live.nextSetBit(k + 1)) {
+      bounds.put(k, EventTimeRegions.bounds(files.get(k)));
+    }
+    long[] range = eventTime.searchRange(ts);
+    Map<Long, long[]> found = new HashMap<>(); // key -> {min ts, max ts}
+    for (Map.Entry<Integer, long[]> e : bounds.entrySet()) {
+      int k = e.getKey();
+      long[] fb = e.getValue();
+      if (fb != null && (fb[1] < range[0] || fb[0] > range[1])) {
+        continue;
+      }
+      List<long[]> groups = rowGroups(k);
+      if (groups.size() == 1) {
+        if (fb != null) {
+          found.put(key(k, 0), fb);
+        }
+        continue;
+      }
+      byte[] tail = tailOf(k);
+      FooterCodec.Tail t = FooterCodec.locate(tail, tail.length);
+      List<RowGroup> rgs = FooterCodec.read(tail, t.footerStart(), t.footerLength()).getRow_groups();
+      for (int i = 0; i < rgs.size(); i++) {
+        org.apache.parquet.format.Statistics st =
+            rgs.get(i).getColumns().get(1).getMeta_data().getStatistics();
+        found.put(key(k, groups.get(i)[0]), new long[] {le64(st.getMin_value()), le64(st.getMax_value())});
+      }
+    }
+    for (long id : b.insertIds()) {
+      EventTimeRegions.Region r = eventTime.of(log.ts(id));
+      long[] s = found.get(r.key());
+      if (s == null || s[0] != r.minTs() || s[1] != r.maxTs()) {
+        throw new IllegalStateException(
+            "Statistics do not place insert " + id + " in row group " + r.key() + " ("
+                + r.minTs() + ".." + r.maxTs() + ", read "
+                + (s == null ? "nothing" : s[0] + ".." + s[1]) + ")");
+      }
+    }
+  }
+
+  /** A little-endian integer of up to 8 bytes (Parquet's plain encoding of INT32/INT64). */
+  private static long le64(byte[] b) {
+    long v = 0;
+    for (int i = b.length - 1; i >= 0; i--) {
+      v = (v << 8) | (b[i] & 0xFF);
+    }
+    return b.length == 4 ? (int) v : v;
+  }
+
+  /**
+   * The event-time merge's rewrites: each row group inserts join, unless, with deferred merges,
+   * the rows that join it, those waiting for it included, stay under θ of its rows; then its
+   * inserts wait ({@link #waitIn}).
+   */
+  private List<Rewrite> joinRewrites() throws IOException {
+    List<Rewrite> out = new ArrayList<>();
+    for (Map.Entry<Long, List<Long>> e : new TreeMap<>(joining).entrySet()) {
+      long key = e.getKey();
+      if (key < 0) {
+        continue;
+      }
+      int k = (int) (key >>> 32);
+      long[] g = rowGroupOf(k, key & 0xFFFFFFFFL);
+      if (g[0] != (key & 0xFFFFFFFFL)) {
+        throw new IllegalStateException("No row group starts at " + key);
+      }
+      if (defer != null) {
+        int region = regionOf(k, g[0]);
+        long deadRows =
+            dead.getOrDefault(k, new BitSet()).get((int) g[0], (int) (g[0] + g[1])).cardinality();
+        long joined = e.getValue().size() + waitingInserts.getOrDefault(region, 0);
+        if (deadRows + joined < rewriteShare * g[1]) {
+          for (long id : e.getValue()) {
+            waitIn.put(id, region);
+          }
+          continue;
+        }
+      }
+      out.add(new Rewrite(k, false, g[0], g[1], 0, g[2], g[3], -1, null));
+    }
+    return out;
   }
 
   @Override
@@ -291,9 +454,19 @@ public final class TailCowArm extends MorArm {
     deltaReads.clear();
     folded.clear();
     long seq = batchSeq(b);
-    locate(b);
+    if (byEventTime) {
+      // each insert joins its row group, and none goes to the tail
+      if (ctx.layout().locatesByScan()) {
+        ctx.phases().run("locate", () -> locateInserts(b));
+      }
+      joining = eventTime.assign(b.insertIds(), ctx.log());
+      newestKey = eventTime.newest() == null ? -1 : eventTime.newest().key();
+      waitIn.clear();
+    } else {
+      locate(b);
+    }
     TailPolicy.Plan plan =
-        b.insertIds().length > 0
+        b.insertIds().length > 0 && !byEventTime
             ? policy.plan((long) (b.insertIds().length * bytesPerRow))
             : new TailPolicy.Plan(List.of(), 0);
     Set<Integer> merge = new HashSet<>();
@@ -343,6 +516,9 @@ public final class TailCowArm extends MorArm {
       Map<Integer, List<Rewrite>> sealed = sealedRewrites(rewrites, dvPositions);
       if (!sealed.isEmpty()) {
         ctx.phases().run("delete-write", () -> elide(sealed));
+      }
+      if (byEventTime) {
+        checkMovedKeys();
       }
       endBatch();
       return;
@@ -455,7 +631,8 @@ public final class TailCowArm extends MorArm {
     Map<Integer, List<long[]>> mergedRows = new HashMap<>();
     List<Rewrite> rewrites = new ArrayList<>();
     boolean planRegions = !dvPositions.isEmpty();
-    if (!merge.isEmpty() || planRegions) {
+    boolean planJoins = byEventTime && joining.keySet().stream().anyMatch(x -> x >= 0);
+    if (!merge.isEmpty() || planRegions || planJoins) {
       ctx.phases()
           .part(
               "merge-read",
@@ -465,6 +642,9 @@ public final class TailCowArm extends MorArm {
                 }
                 if (planRegions) {
                   rewrites.addAll(rewrites(dvPositions, false));
+                }
+                if (planJoins) {
+                  rewrites.addAll(joinRewrites());
                 }
               });
     }
@@ -510,7 +690,21 @@ public final class TailCowArm extends MorArm {
                     foldedRows.get(at) == null ? List.of() : changed(foldedRows.get(at), versions);
                 foldedRows.set(at, null);
                 int region = defer == null ? -1 : regionOf(r.k(), r.first());
-                if (cut == null) {
+                if (byEventTime) {
+                  // the row group with its inserts and the rows that waited for it, in pieces
+                  long key = key(r.k(), r.first());
+                  List<Long> ins = joining.getOrDefault(key, List.of());
+                  rowsHeld.hold(Held.Kind.ROWS, ins.size(), "inserts joining a row group");
+                  rows.addAll(fold);
+                  for (long id : ins) {
+                    rows.add(new long[] {id, 0});
+                  }
+                  for (List<long[]> piece : eventTime.pieces(rows, ctx.log(), key == newestKey)) {
+                    out.add(piece, false, piece.isEmpty() ? -1 : region);
+                    region = piece.isEmpty() ? region : -1;
+                  }
+                  rowsHeld.release(Held.Kind.ROWS, ins.size(), "inserts joining a row group encoded");
+                } else if (cut == null) {
                   rows.addAll(fold);
                   out.add(rows, false, region);
                 } else {
@@ -544,6 +738,10 @@ public final class TailCowArm extends MorArm {
     Set<Long> inRegions = rewrittenUpdates(b, rewrites, replaced);
     if (clean != null) {
       carry(b, rewrites, merge, out);
+    }
+    if (byEventTime) {
+      ctx.phases().part("write", () -> finishByEventTime(b, seq, rewrites, replaced, out));
+      return rewrites;
     }
     ctx.phases()
         .part(
@@ -579,6 +777,43 @@ public final class TailCowArm extends MorArm {
               rowsHeld.close(); // the batch's files are written
             });
     return rewrites;
+  }
+
+  /**
+   * The event-time merge's end of the batch's file: the inserts no row group took (those of an
+   * empty table, as the newest row group, cut as one), and with deferred merges the delta row
+   * groups of those that wait. The rewritten row groups leave the index, and the file's other row
+   * groups join it ({@link KeptFile#finish}).
+   */
+  private void finishByEventTime(
+      OpLog.Batch b, long seq, List<Rewrite> rewrites, Set<Long> replaced, KeptFile out)
+      throws IOException {
+    Set<Long> joined = new HashSet<>();
+    for (Rewrite r : rewrites) {
+      joined.addAll(joining.getOrDefault(key(r.k(), r.first()), List.of()));
+    }
+    List<long[]> rows = new ArrayList<>();
+    for (long id : b.insertIds()) {
+      if (!joined.contains(id)) {
+        rows.add(new long[] {id, 0});
+      }
+    }
+    rowsHeld.hold(Held.Kind.ROWS, rows.size(), "the batch's inserts no row group took");
+    List<List<long[]>> deltas = defer == null ? List.of() : deltas(b, rows, replaced);
+    if (!waitIn.isEmpty() && !rows.isEmpty() && rows.stream().anyMatch(r -> waitIn.containsKey(r[0]))) {
+      throw new IllegalStateException("An insert that waits is not in a delta row group");
+    }
+    for (List<long[]> piece : eventTime.pieces(rows, ctx.log(), true)) {
+      out.add(piece, false, -1);
+    }
+    for (List<long[]> d : deltas) {
+      out.add(d, true, -1);
+    }
+    for (Rewrite r : rewrites) {
+      eventTime.remove(key(r.k(), r.first()));
+    }
+    out.finish(seq);
+    rowsHeld.close(); // the batch's files are written
   }
 
   /** The updated rows, outside the merged files, whose regions this batch rewrites. */
@@ -792,6 +1027,7 @@ public final class TailCowArm extends MorArm {
     long base = 0;
     final List<long[]> deltaSpans = new ArrayList<>(); // its delta row groups: {first row, rows}
     final List<long[]> regionFirsts = new ArrayList<>(); // its merged regions: {first row, region}
+    final List<long[]> groupSpans = new ArrayList<>(); // its other row groups: {first row, rows}
     PositionOutputStream stream; // without footers: opened with the first row group
 
     KeptFile(String name) {
@@ -815,6 +1051,8 @@ public final class TailCowArm extends MorArm {
       }
       if (delta) {
         deltaSpans.add(new long[] {n, rows.size()});
+      } else {
+        groupSpans.add(new long[] {n, rows.size()});
       }
       if (region >= 0) {
         regionFirsts.add(new long[] {n, region});
@@ -879,6 +1117,16 @@ public final class TailCowArm extends MorArm {
       for (long[] r : regionFirsts) {
         regionAt.put(((long) k << 32) | r[0], (int) r[1]);
       }
+      if (byEventTime) {
+        // the event-time merge's row groups; a delta row group waits for one, and overlaps it
+        for (long[] g : groupSpans) {
+          List<Long> rowIds = new ArrayList<>((int) g[1]);
+          for (long pos = g[0]; pos < g[0] + g[1]; pos++) {
+            rowIds.add(ids[(int) pos]);
+          }
+          eventTime.addIds(key(k, g[0]), rowIds, ctx.log());
+        }
+      }
       return k;
     }
   }
@@ -900,7 +1148,8 @@ public final class TailCowArm extends MorArm {
     }
     Set<Integer> covered = new HashSet<>(sealed.keySet());
     covered.addAll(whole);
-    if (!covered.equals(dvPositions.keySet())) {
+    // every file with a changed row is rewritten; with the event-time merge others are too
+    if (!covered.containsAll(dvPositions.keySet())) {
       throw new IllegalStateException("A changed row's region was not rewritten");
     }
     return sealed;
@@ -965,9 +1214,48 @@ public final class TailCowArm extends MorArm {
     appendedBytes.put(k, newTail.length);
     kept = Arrays.copyOf(kept, n);
     idsOf.put(k, kept);
+    if (byEventTime) {
+      // the row groups after a hidden one move up: the index follows them
+      List<EventTimeRegions.Region> moved = new ArrayList<>();
+      long oldFirst = 0;
+      long newFirst = 0;
+      for (int i = 0; i < groups.size(); i++) {
+        long rows = groups.get(i).getNum_rows();
+        if (!drop.contains(i)) {
+          EventTimeRegions.Region r = eventTime.region(key(k, oldFirst));
+          if (oldFirst != newFirst && r != null) {
+            eventTime.remove(r.key());
+            moved.add(new EventTimeRegions.Region(key(k, newFirst), r.minTs(), r.maxTs()));
+          }
+          newFirst += rows;
+        }
+        oldFirst += rows;
+      }
+      for (EventTimeRegions.Region r : moved) {
+        eventTime.add(r.key(), r.minTs(), r.maxTs());
+      }
+    }
     for (int pos = 0; pos < kept.length; pos++) {
       if (fileOfId[(int) kept[pos]] == k) {
         posOfId[(int) kept[pos]] = pos;
+      }
+    }
+  }
+
+  /**
+   * With footers and the event-time merge: every row group the index holds starts, in its file's
+   * rows, at a row of its earliest event time (each is written in event-time order), so the index
+   * followed the row groups a footer moved up.
+   */
+  private void checkMovedKeys() {
+    for (EventTimeRegions.Region r : eventTime.regions()) {
+      int k = (int) (r.key() >>> 32);
+      long first = r.key() & 0xFFFFFFFFL;
+      long[] ids = idsOf.get(k);
+      if (ids == null || first >= ids.length || ctx.log().ts(ids[(int) first]) != r.minTs()) {
+        throw new IllegalStateException(
+            "The event-time index puts a row group at row " + first + " of data file " + k
+                + ", which does not start one: " + r);
       }
     }
   }
@@ -1096,6 +1384,7 @@ public final class TailCowArm extends MorArm {
       Map<Integer, List<Integer>> dvPositions)
       throws IOException {
     List<Long> entered = waitingFor.remove(region);
+    waitingInserts.remove(region);
     if (entered == null) {
       return List.of();
     }
@@ -1179,6 +1468,9 @@ public final class TailCowArm extends MorArm {
             deltaGroups.getOrDefault(k, Set.of()).contains(first) ? regionOf[id] : regionOf(k, first);
       } else if (inDelta.get(id)) {
         region = regionOf[id]; // waited in a merged tail file
+      } else if (waitIn.containsKey(row[0])) {
+        region = waitIn.get(row[0]); // an insert whose row group the event-time merge defers
+        waitingInserts.merge(region, 1, Integer::sum);
       } else {
         continue;
       }

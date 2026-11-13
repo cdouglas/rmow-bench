@@ -235,14 +235,27 @@ Each fixed, most with a test that pins it:
 - `bin/matrix.sh --store-root` replaced Azure roots with local paths; `docker/campaign.py`
   matched labels by prefix and gave one job's load samples to another (a14e010).
 - The fuzzer (2026-11-08) found two RMoR-family bugs in settings no run used.
+- RMoW-external's footprint (found 2026-11-12): a row group hidden by a footer appended to its
+  file was counted reclaimable, though the file stays in use, so the state records of every run
+  of `rmor-c-footer` and `rmor-c-footer-kept` before the fix overstate what expiring old snapshots
+  frees (0.75 GB kept after 30 update writes, where RMoR, with the same data files, keeps 3.2).
+  Requests, bytes and every other field were right (`RmorTest.footersHideTheOldRowGroups`).
 
 ## How results are reported
 
 - Results pages show what a paper would: measured on the cloud stores, or simulated where the page
-  says so; the model's accuracy and the controls go to calibration pages.
+  says so; the model's accuracy and the controls (forecast against measured, the cloud runs' work
+  against havoc's) go to calibration pages.
 - The measured phase is "a write"; "batch" names only the workload's unit. Axes read "write
-  latency (s)" and "read latency (s)".
-- Read latency against write latency, with whiskers (the spread over writes, which is the table
-  aging, not noise), where the time goes by part, and latency as writes accumulate.
+  latency (s)" and "read latency (s)"; panels "snapshot write latency", "1% range read latency",
+  "full scan latency"; the x axis of anything over time "snapshot".
+- One name per strategy, the same on every workload: MoR, MoR (compacted), RMoR, RMoW-external,
+  RMoW-append, RMoR-density (2026-11-12; earlier records say "the deferred merges", "appending",
+  "RMoR sealed").
+- Read latency against write latency, one point per design with nothing compacted, with whiskers
+  (the spread over writes, which is the table aging, not noise); latency and data written as
+  snapshots are added; where the time goes by part (decode, encode, DVs and footers, other CPU,
+  I/O); compaction and each knob in sections of their own. Data written, not stored over live
+  bytes: no run expires a snapshot, so the store holds the initial load plus everything written.
 - Enhancements over stock Iceberg go to every design, MoR included (the locate by key mostly
   helps MoR): the question is the designs' trade-off, not beating Iceberg's code.

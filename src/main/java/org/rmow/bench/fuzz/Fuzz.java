@@ -55,6 +55,7 @@ import org.rmow.bench.workload.WorkloadSpec;
  *   bin/fuzz.sh --seed S [--out DIR]       # one seed, its outcome on stdout
  *   bin/fuzz.sh --print S                  # the configuration seed S draws
  *   ... --profile heavy                    # draws that favour nearly dead row groups
+ *   ... --profile event-time               # inserts only, placed by the event-time merge
  * </pre>
  *
  * Worker K of W runs seeds S + K, S + K + W, ... Each outcome is a line of {@code
@@ -92,6 +93,15 @@ public final class Fuzz {
   static final Set<String> MAIN =
       Set.of("mor-v3", "rmor-c", "rmor-c-kept", "rmor-c-footer-kept", "rmow-c", "rmor-density");
 
+  /**
+   * The region arms the event-time merge refuses ({@code layout.inserts} {@code event-time}): the
+   * TailCoW family's mixed files, the cleaner, and split files.
+   */
+  static final Set<String> NOT_EVENT_TIME =
+      Set.of(
+          "tailcow-b", "tailcow-c", "rmor-c", "rmor-c-footer", "rmor-c-clean", "rmow-a-split",
+          "rmow-b-split", "rmow-c-split");
+
   /** The arms that rewrite every region they change, so need {@code rmorRewriteShare} 0. */
   static final Set<String> SHARE_ZERO = Set.of("rmor-c-footer", "rmor-c-kept", "rmor-c-footer-kept");
 
@@ -99,11 +109,14 @@ public final class Fuzz {
    * What the draws favour. {@code mixed}: everything, a share of each. {@code heavy}: every seed
    * changes rows in heavy statements (a share of 0.8 to 1 of a region's rows), with regions about
    * a row group or a few and a reader that skips dead row groups, so row groups go dead but for a
-   * few rows, where skipping them is easiest to get wrong.
+   * few rows, where skipping them is easiest to get wrong. {@code event_time}: every seed inserts
+   * only, onto an initial load in event-time order, and the region arms place the inserts by the
+   * event-time merge ({@code layout.inserts} {@code event-time}).
    */
   enum Profile {
     MIXED,
-    HEAVY
+    HEAVY,
+    EVENT_TIME
   }
 
   /**
@@ -126,6 +139,7 @@ public final class Fuzz {
 
   static Trial draw(long seed, Profile profile) {
     boolean heavy = profile == Profile.HEAVY;
+    boolean byEventTime = profile == Profile.EVENT_TIME;
     // not seed times SplittableRandom's own gamma: consecutive seeds would draw shifted copies
     SplittableRandom r = new SplittableRandom(seed ^ 0x632BE59BD9B4E019L);
     BenchConfig cfg = new BenchConfig();
@@ -144,7 +158,7 @@ public final class Fuzz {
     int ins;
     int upd;
     int del;
-    switch (heavy ? 2 * r.nextInt(2) : r.nextInt(3)) {
+    switch (heavy ? 2 * r.nextInt(2) : byEventTime ? 1 : r.nextInt(3)) {
       case 0 -> { // updates and deletes
         ins = 0;
         del = (int) (ops * r.nextDouble(0, 0.4));
@@ -182,7 +196,7 @@ public final class Fuzz {
     w.keyDist = WorkloadSpec.KeyDist.values()[r.nextInt(WorkloadSpec.KeyDist.values().length)];
     w.recencyMeanBatches = r.nextDouble(0.1, 5);
     w.tsStepMicros = pick(r, 1L, 10L, 1_000L);
-    w.initialJitterRows = chance(r, 0.5) ? 0 : r.nextDouble(0, 2_000);
+    w.initialJitterRows = chance(r, 0.5) || byEventTime ? 0 : r.nextDouble(0, 2_000);
     w.lateMedianBatches = logUniform(r, 0.01, 1.0);
     w.lateP99Batches = w.lateMedianBatches * logUniform(r, 1.0, 100.0);
     w.regionRows = logUniform(r, 50, 50_000);
@@ -258,6 +272,23 @@ public final class Fuzz {
     if (chance(re, 0.5)) {
       l.eagerBytes = logUniform(re, 8 << 10, 256 << 10);
     }
+    // the event-time merge (2026-11-12), from a stream of its own: on an inserts-only workload
+    // whose initial load is in event-time order, without compaction, which it refuses, and with
+    // the region arms built for it (the MoR family ignores it)
+    SplittableRandom rt = new SplittableRandom(seed ^ 0xD1B54A32D192ED03L);
+    boolean eventTime =
+        upd + del == 0 && w.initialJitterRows == 0 && (chance(rt, 0.7) || byEventTime);
+    if (eventTime) {
+      l.inserts = "event-time";
+      l.compactEvery = 0;
+    }
+    // the 128 MiB suite's knobs (2026-11-12), from a stream of their own: MoR's compaction planned
+    // as Iceberg's bin-pack, and range reads between the probes
+    SplittableRandom rs = new SplittableRandom(seed ^ 0xA0761D6478BD642FL);
+    if (l.compactEvery > 0 && chance(rs, 0.4)) {
+      l.compactMinInputFiles = rs.nextInt(2, 8);
+    }
+    Integer rangeEvery = chance(rs, 0.3) ? Integer.valueOf(rs.nextInt(1, 3)) : null;
     // A heavy statement empties most of a region only if the batch changes that many rows, and
     // leaves a row group dead but for a few rows only if its region spans the row group: regions
     // of about a row group or a few, and batches that change at least a region's rows.
@@ -295,12 +326,22 @@ public final class Fuzz {
     if (arms.isEmpty()) {
       arms.add(pick(r, "mor-v3", "rmor-c", "rmow-c", "rmor-density"));
     }
+    if (eventTime) {
+      arms.removeAll(NOT_EVENT_TIME);
+      if (arms.isEmpty()) {
+        arms.add(
+            l.rmorRewriteShare == 0
+                ? pick(rt, "rmor-c-kept", "rmor-c-footer-kept", "rmow-c", "rmor-density")
+                : pick(rt, "rmow-c", "rmor-density"));
+      }
+    }
     cfg.arms = arms;
 
     BenchConfig.ReadSpec reads = cfg.reads;
     reads.every = r.nextInt(1, 5);
     reads.recentFraction = logUniform(r, 0.001, 0.5);
     reads.travelBack = r.nextInt(1, 9);
+    reads.rangeEvery = rangeEvery;
     if (chance(r, 0.6)) {
       BenchConfig.WindowSpec ws = new BenchConfig.WindowSpec();
       ws.by = pick(r, List.of("id"), List.of("ts"), List.of("id", "ts"));
@@ -690,7 +731,8 @@ public final class Fuzz {
         case "--resume" -> resume = true;
         case "--seed" -> one = Long.parseLong(args[++i]);
         case "--print" -> print = Long.parseLong(args[++i]);
-        case "--profile" -> profile = Profile.valueOf(args[++i].toUpperCase(java.util.Locale.ROOT));
+        case "--profile" ->
+            profile = Profile.valueOf(args[++i].toUpperCase(java.util.Locale.ROOT).replace('-', '_'));
         default -> throw new IllegalArgumentException("Unknown argument: " + args[i]);
       }
     }

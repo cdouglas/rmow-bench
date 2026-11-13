@@ -80,16 +80,17 @@ class FooterCodecTest {
     FileMetaData v2 = FooterCodec.merge(v0, Set.of(1), List.of(), Arrays.asList(), 2000, 2);
     assertThat(v2.getRow_groupsSize()).isEqualTo(1);
 
-    // a region can take only a dropped row group's place, once
+    // a region can take only a dropped row group's place
     assertThatThrownBy(
             () ->
                 FooterCodec.merge(v0, Set.of(), footers(rs.subList(2, 3)), Arrays.asList(0), 1, 1))
         .isInstanceOf(IllegalArgumentException.class);
-    assertThatThrownBy(
-            () ->
-                FooterCodec.merge(
-                    v0, Set.of(0), footers(rs.subList(1, 3)), Arrays.asList(0, 0), 1, 1))
-        .isInstanceOf(IllegalArgumentException.class);
+    // several regions take one place in their order (a row group the event-time merge cut)
+    FileMetaData v3 =
+        FooterCodec.merge(v0, Set.of(0, 1), footers(rs.subList(1, 3)), Arrays.asList(0, 0), 1, 1);
+    assertThat(v3.getRow_groups())
+        .extracting(FooterCodec::startOffset)
+        .containsExactly(start(rs.get(1)), start(rs.get(2)));
   }
 
   private static long start(Region r) {

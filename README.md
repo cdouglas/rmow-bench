@@ -104,13 +104,17 @@ bin/fuzz.sh --print 1234                                           # the configu
 bin/fuzz.sh --parallel 8 --out results/fuzz/<name> --profile heavy  # nearly dead row groups
 bin/fuzz-mutants.py --seeds 60 --workers 8                         # calibration: planted bugs
 bin/fuzz-mutants.py --seeds 60 --workers 8 --profile heavy         # and on the heavy draws
+bin/fuzz.sh --parallel 8 --out results/fuzz/<name> --profile event-time  # the event-time merge
+bin/fuzz-mutants.py --seeds 60 --workers 8 --profile event-time    # and its planted bugs
 docker/run.sh fuzz <name> --minutes 180                            # on havoc (docker/README.md)
 ```
 
 The `heavy` profile makes every seed change rows in heavy statements (most of a region's rows),
 with regions of about a row group and a reader that skips dead row groups, so row groups go dead
 but for a few rows, where skipping them is easiest to get wrong; the default profile draws such
-seeds now and then.
+seeds now and then. The `event-time` profile makes every seed insert only, onto an initial load in
+event-time order, with the region arms placing the inserts by the event-time merge
+(`layout.inserts`); the default profile draws it on about a third of its inserts-only seeds.
 
 A failing seed writes `fail-<seed>/`: its configuration (runnable with `bin/run.sh`), the error, and
 the run's records. `bin/fuzz-mutants.py` plants each of a set of known bugs in a copy of the
@@ -407,7 +411,12 @@ arms on stand-ins (`EmulatorAppenders`, above); a store on a cloud endpoint neve
 
 The fork's own contract (`SupportsAtomicOperationsContractTest`, from its test jar) runs against
 both local stores (`LocalAtomicContractTest`): creates, replaces and appends pinned to the
-version a snapshot saw, and serial and concurrent races with one winner. `AtomicAppenderTest`
+version a snapshot saw, serial and concurrent races with one winner, and, since the fork's reads of
+one version (7b948d51ce), reads of the version a file saw. A file that looked an object up reads
+that version or fails with `StaleReadException`: after an append, the local stores keep the older
+bytes as a prefix and read them; after a replace (a CAS, or a rename onto a local file), they fail,
+as S3 and ADLS answer a read conditioned on a version that is gone (2026-11-12; no run reads
+through a file after a replace). `AtomicAppenderTest`
 checks the appender, and that it sends no lookup. Against the services, `S3ExpressTest` and
 `AzureTest` check it; the spikes time it against the stores' own requests.
 
@@ -499,7 +508,10 @@ has what they showed.
 | `locate` | `oracle` (the default) takes row positions from an in-memory index, at no cost. `scan` finds them the way a MERGE would, in a timed `locate` phase checked against the index. MoR scans `id` and `_pos` of every file whose `id` bounds may hold a target, with row groups pruned to the targets' one `id` range; RMoW looks the ids up in its footers' row-group statistics. `keys` (since 2026-11-10) is `scan` with the MoR family's row groups pruned by each target, as files are: a writer reads only the row groups whose `id` statistics, in the footer it holds under `writerFooters` `transaction`, may hold one. Iceberg's filters stop pruning by a list of values past 200 of them (`IN_PREDICATE_LIMIT`), so a MERGE of thousands of changes prunes at best to their range; `keys` is an enhancement an engine could make (lab page reader-changes, Writers). Files of at most 1 MiB, fetched whole, are pruned as under `scan`. |
 | `reads.windows` | Windows read at each probe under every reader (`read_window`; docs/HYPOTHESES.md, 2026-11-07): for each column in `by` (`id`, `ts`), `count` windows (default 5) of `fraction` (default 0.01) of the column's span at the probe, centred at (i + 1/2) / `count` of it, each a read of its own, checked against the oracle. The newest-rows read covers the end of the event time, these the rest. Off when absent, and then left out of the configuration's hash. |
 | `reads.readers` | The reader models every probe runs under, on the same table state. The first is primary; the default is `one-footer`, then `stock`. `one-footer` opens each file at one version and reads that version's one footer once, in one request (a 64 KiB prefetch), then only the row groups it needs. `stock` is stock Iceberg today: one split per row group (`FileScanTask.split`), each split re-reading the footer with two requests. Each model also sets `splitTargetBytes` and `parallelism`, the threads a read's split tasks run on. With `sortedRead`, the model also reads the table in event-time order at each probe (`read_sorted`), on one thread: a merge of the table's row groups, each a sorted run, opened when the merge reaches its smallest `ts`, so it holds every row group whose event times overlap. A file of at most 1 MiB, which Iceberg fetches whole, is decoded and sorted in memory. It needs `footerCache`, and every run sorted: sorted writes and an initial load in event-time order (`initialJitterRows` 0); a row out of order stops the run. Under `skipDeadRowGroups` (since 2026-11-10) it leaves out each row group the file's deletes cover whole, as the full read does; before, it skipped only whole files. Left out of the configuration's hash when off. |
+| `reads.rangeEvery` | Also read the newest 1% (`read_recent`) and the windows (`read_window`) after every this many batches, between the probes, which add the full, time-travel and sorted reads (since 2026-11-12; absent: only at the probes, and then left out of the configuration's hash). The range reads are cheap, so a run can take them at every snapshot; they change no write's request or byte (`SuiteKnobsTest`). |
 | `compactEvery` | Check the compaction triggers every this many batches (0 means never). MoR-family arms bin-pack files smaller than `compactSmallFileFraction` of the target and files whose delete ratio is at least `compactDeleteRatio`, as Iceberg's `RewriteDataFiles` does. RMoW triggers on space and on reads separately: it rewrites an appendable file, or moves the live row groups out of a split file's objects, whose dead bytes are at least `compactGarbageRatio` of their length; and it packs small sealed row groups once a file holds `compactSmallRowGroups` of them ([docs/DESIGN.md](docs/DESIGN.md#compaction)). When to compact is an outcome: see `analysis/compaction.py`. |
+| `compactMinInputFiles` | The MoR family's compaction as Iceberg's `RewriteDataFiles` plans a bin-pack, for a schedule that checks it after every write (`compactEvery` 1; since 2026-11-12). The files the two rules above pick form one group (Iceberg's reach 100 GB), rewritten into files of up to the target size only when it holds at least this many files (Iceberg's `min-input-files`, default 5) and more than one, or more than one and over the target size, or a file with `compactDeleteRatio` of its rows deleted; otherwise nothing is rewritten. Absent: groups of up to the target size, each rewritten unless it is one file with few deletes, as before (and left out of the configuration's hash). |
+| `inserts` | Where the region designs put inserts (since 2026-11-12). Absent (or `tail`): into the tail, as the tail policy merges it, as before (and left out of the configuration's hash). `event-time`: each into the live row group whose event-time range holds it (in a gap, the one before; before the first, the first), which the batch rewrites as it rewrites one an update changes, so no two row groups overlap in event time (`EventTimeRegions`; docs/HYPOTHESES.md, 2026-11-12). A row group grown past the rows of the initial load's largest is cut, never between two rows of one event time: the newest, which rows on time join, into full row groups and the rest; an older one once it holds two full ones' rows, into equal parts. RMoW keeps a cut row group's pieces in its place, and puts the newest piece in the tail file. `rmor-density` merges a row group once the rows that join it, those waiting included, reach θ of its rows, and until then they wait in delta row groups. The writer finds the row groups from its index of them and reads the footers of the files whose event-time bounds overlap them (`locate`, under `scan` or `keys`). Read by `rmow-*` (not split), `rmor-c-kept`, `rmor-c-footer-kept` and `rmor-density`; refused by the other region arms; ignored by the MoR family and `cow`. Moot without inserts; refused with a workload that also updates or deletes, and with compaction. Needs an initial load in event-time order (`initialJitterRows` 0). |
 | `rmorRewriteShare` | `rmor-c`'s θ: a batch rewrites a region it changes (a sealed file's row group, or an open tail file) when it updates or deletes at least this share of the region's live rows, counted per batch, and otherwise puts DVs on the rows. 0 (the default) rewrites every region a batch changes; above 1 none, which is `tailcow-c`. |
 | `writerSkipsDeadRowGroups` | The MoR family's writers (their scans to locate rows, merge reads and compaction) read no row group the file's deletes cover whole, nor any file whose DV covers every row, as the `skipDeadRowGroups` reader does. Off (the default) is Iceberg's MERGE scan, which fetches such row groups and drops their rows. In practice only RMoR-C has them: on two configurations, it changed no other arm's request or byte. Configurations that report RMoR set it, with the `cached-skip` reader beside a stock one. |
 | `updateRead` | What a write reads of the rows it updates; a new version is its old row with some columns set. Absent (or `id`): nothing beyond the locate's `id` and `_pos`, so the MoR family's new versions are made blind, as before 2026-11-05. `row`: every column of each row group holding a row the batch updates, deletes applied, once: the row groups and files a write rewrites are read whole anyway (`merge-read`), the others in phase `update-read`, after the locate, as Spark plans a copy-on-write MERGE (find the rows by key, then read). `scan`: MoR (v2, v3) reads every column in its locate scan, one pass, as Spark plans a MERGE on a merge-on-read table; the arms that rewrite regions plan as under `row`. RMoW and CoW read the row groups or files they change whole under any setting. Left out of the configuration's hash when absent. |
@@ -573,8 +585,8 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
 - **The two workloads** (updates only, inserts only; [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md),
   The two workloads), with every update reading the rows it rewrites and the locate pruned by each
   changed key, are the standing results:
-  - simulated on S3 Express and Azure Blob from the laptop's work and havoc's requests, with every
-    policy curve ([lab/pages/workloads.md](lab/pages/workloads.md));
+  - simulated on S3 Express and Azure Blob from the laptop's work and havoc's requests
+    ([lab/pages/workloads.md](lab/pages/workloads.md));
   - their main points measured on both stores on 2026-11-11 (L1–L4 held;
     [lab/pages/workloads-cloud.md](lab/pages/workloads-cloud.md)). On the updates the region
     designs write in 2.3–2.4 times MoR's time on S3 Express (1.5–2.2 on Azure Blob) and read a 1%
@@ -583,12 +595,16 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
     writes MoR's range read grows 3.1–3.9 times, the region designs' 0.90–1.51 times.
 - **At Iceberg's 128 MiB row groups** (D1–D4, on havoc;
   [lab/pages/region-cut.md](lab/pages/region-cut.md)), RMoR with copies cut where a write changes
-  reads 0.12 of what the deferred merges read a write, with windows at 1.16 times their live bytes,
+  reads 0.12 of what RMoR-density reads a write, with windows at 1.16 times their live bytes,
   and writes 3.04 times their bytes.
 - **Earlier experiments** (the mixed workload, Iceberg's defaults, the calibrations, the base point
   and its sweeps in the cloud, RMoR's rerun, the tuner) were retired on 2026-11-12 with their runs
   and pages. What they taught, from the measurement method to the results that carry over, is
   [docs/LESSONS.md](docs/LESSONS.md).
-- **Next:** the density hypothesis where density can choose: a workload of sparse changes, cold
-  pieces merged back, and the locate's requests ([docs/ROADMAP.md](docs/ROADMAP.md)). GCS needs
-  APPEND in the fork first; split files can also run on standard S3.
+- **Next: every design on both workloads at Iceberg's sizes** (registered 2026-11-12, W1–W3 in
+  [docs/HYPOTHESES.md](docs/HYPOTHESES.md); campaign `docker/campaigns/w128.json`, not yet run):
+  one definition of each design, the inserts placed by the event-time merge (`layout.inserts`),
+  MoR compacted as Iceberg plans its bin-pack, and range reads after every write. Then the density
+  hypothesis where density can choose: a workload of sparse changes, cold pieces merged back, and
+  the locate's requests ([docs/ROADMAP.md](docs/ROADMAP.md)). GCS needs APPEND in the fork first;
+  split files can also run on standard S3.

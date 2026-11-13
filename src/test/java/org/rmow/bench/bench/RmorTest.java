@@ -192,6 +192,20 @@ class RmorTest {
     assertThat(sum(steps, "rmor-c-footer", "read_full", "stock", "gets"))
         .as("stock reads fetch no dead row group")
         .isLessThan(sum(steps, "rmor-c", "read_full", "stock", "gets"));
+    // A hidden row group stays inside a file the current version still reads: dead bytes, not
+    // reclaimable once old snapshots expire (until 2026-11-12 the state counted them reclaimable)
+    JsonNode state =
+        steps.stream()
+            .filter(r -> r.get("arm").asText().equals("rmor-c-footer"))
+            .filter(r -> r.get("phase").asText().equals("state"))
+            .reduce((a, b) -> b)
+            .orElseThrow();
+    assertThat(
+            state.get("stored_bytes").asLong()
+                - state.get("live_bytes").asLong()
+                - state.get("reclaimable_bytes").asLong())
+        .as("dead bytes inside live files")
+        .isPositive();
   }
 
   /**

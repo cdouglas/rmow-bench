@@ -111,6 +111,17 @@ public final class LayoutSpec {
   /** MoR family: bin-pack files smaller than this fraction of the target file size. */
   public double compactSmallFileFraction = 0.75;
   /**
+   * MoR family: compaction as Iceberg's RewriteDataFiles plans a bin-pack (its {@code
+   * min-input-files}, default 5), for a schedule that checks it after every write. The files the
+   * two rules above pick form one group, rewritten into files of up to the target size only when
+   * it holds at least this many files, or more than one and over the target size, or a file with
+   * {@code compactDeleteRatio} of its rows deleted; otherwise nothing is rewritten. Null: as
+   * before, groups of up to the target size, each rewritten unless it is one file with few
+   * deletes. Left out of the configuration's hash when null.
+   */
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  public Integer compactMinInputFiles = null;
+  /**
    * RMoW, for space: rewrite an appendable file whose dead bytes are at least this fraction of its
    * length; in a split file, move the live row groups out of each object whose dead bytes are at
    * least this fraction of its length. Above 1: never.
@@ -224,6 +235,31 @@ public final class LayoutSpec {
      * page. Smaller only for the fuzzer, whose row groups hold fewer rows than a page limit.
      */
     public int strideRows = Cut.STRIDE_ROWS;
+  }
+
+  /**
+   * Where the region designs put inserts (docs/HYPOTHESES.md, 2026-11-12). Null or {@code tail}:
+   * into the tail, as {@link TailPolicy} merges it, as before. {@code event-time}: each into the
+   * row group whose event-time range holds it, which the write rewrites as it rewrites a row group
+   * an update changes, so row groups stay disjoint in event time ({@link EventTimeRegions}). Read by
+   * RMoW ({@code rmow-*}, not split) and the arms that keep row groups ({@code rmor-c-kept}, {@code
+   * rmor-c-footer-kept}, {@code rmor-density}); refused by the other region arms, and ignored by
+   * the MoR family, which appends. Moot on a workload without inserts; refused with one that
+   * inserts and also updates or deletes, and with compaction. Left out of the configuration's hash
+   * when null.
+   */
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  public String inserts = null;
+
+  /** Whether {@link #inserts} asks for the event-time merge. */
+  public boolean eventTime() {
+    if (inserts == null || "tail".equals(inserts)) {
+      return false;
+    }
+    if (!"event-time".equals(inserts)) {
+      throw new IllegalArgumentException("layout.inserts: tail or event-time, not " + inserts);
+    }
+    return true;
   }
 
   /** Whether writers find their rows by reading the table: {@code locate} {@code scan} or {@code keys}. */

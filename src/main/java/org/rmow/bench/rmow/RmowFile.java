@@ -184,16 +184,17 @@ public final class RmowFile implements LogicalFile {
   /** The row group ids of the next footer, in its order. */
   static List<Long> nextIds(
       List<Long> rgIds, Set<Integer> drop, List<Integer> slots, List<Long> newRgIds) {
-    Map<Integer, Long> slotted = new HashMap<>(); // position -> the new row group taking it
+    // position -> the new row groups taking it, in order (a row group cut in pieces takes several)
+    Map<Integer, List<Long>> slotted = new HashMap<>();
     for (int j = 0; slots != null && j < slots.size(); j++) {
       if (slots.get(j) != null) {
-        slotted.put(slots.get(j), newRgIds.get(j));
+        slotted.computeIfAbsent(slots.get(j), s -> new ArrayList<>()).add(newRgIds.get(j));
       }
     }
     List<Long> ids = new ArrayList<>();
     for (int i = 0; i < rgIds.size(); i++) {
       if (slotted.containsKey(i)) {
-        ids.add(slotted.get(i));
+        ids.addAll(slotted.get(i));
       } else if (!drop.contains(i)) {
         ids.add(rgIds.get(i));
       }

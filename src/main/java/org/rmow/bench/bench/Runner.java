@@ -261,7 +261,7 @@ public final class Runner {
       requestsOut = requests;
       heldOut = held;
       Held.logEvents(held != null);
-      probe(out, arms, model, 0, tsBounds, idBounds);
+      probe(out, arms, model, 0, tsBounds, idBounds, true);
       for (ArmRun a : arms) {
         emitState(out, a, 0);
       }
@@ -281,7 +281,9 @@ public final class Runner {
           widen(idBounds, id);
         }
         if (step % cfg.reads.every == 0 || step == log.batches().size()) {
-          probe(out, arms, model, step, tsBounds, idBounds);
+          probe(out, arms, model, step, tsBounds, idBounds, true);
+        } else if (cfg.reads.rangeEvery != null && step % cfg.reads.rangeEvery == 0) {
+          probe(out, arms, model, step, tsBounds, idBounds, false);
         }
         for (ArmRun a : arms) {
           emitState(out, a, step);
@@ -352,25 +354,33 @@ public final class Runner {
   }
 
   /** Full, recent-window, window, time-travel and sorted reads, each checked against the model. */
+  /**
+   * Reads every arm under every reader: the newest rows and the windows, and with {@code all} the
+   * whole table, the table as it was ({@code travelBack} batches before) and the sorted read.
+   */
   private void probe(
       BufferedWriter out,
       List<ArmRun> arms,
       ReferenceModel model,
       int step,
       long[] tsBounds,
-      long[] idBounds)
+      long[] idBounds,
+      boolean all)
       throws IOException {
     long lo = tsBounds[1] - (long) (cfg.reads.recentFraction * (tsBounds[1] - tsBounds[0]));
     Expression recent = Expressions.greaterThanOrEqual("ts", lo);
-    TableHash wantFull = model.expected();
+    TableHash wantFull = all ? model.expected() : null;
     TableHash wantRecent = model.expectedTsAtLeast(lo);
     int oldSteps = step - cfg.reads.travelBack;
-    TableHash wantOld = oldSteps >= 0 ? model.expectedAfter(oldSteps) : null;
+    TableHash wantOld = all && oldSteps >= 0 ? model.expectedAfter(oldSteps) : null;
     List<Window> windows = windows(model, tsBounds, idBounds);
 
     for (ArmRun a : shuffled(arms, -step - 1)) {
       for (Reader r : readers) {
-        checkedRead(a, r, "read_full", step, () -> a.arm().read(Expressions.alwaysTrue(), r), wantFull);
+        if (all) {
+          checkedRead(
+              a, r, "read_full", step, () -> a.arm().read(Expressions.alwaysTrue(), r), wantFull);
+        }
         checkedRead(a, r, "read_recent", step, () -> a.arm().read(recent, r), wantRecent);
         for (Window w : windows) {
           checkedRead(a, r, "read_window", step, () -> a.arm().read(w.filter(), r), w.want(), w);
@@ -378,7 +388,7 @@ public final class Runner {
         if (wantOld != null) {
           checkedRead(a, r, "read_old", step, () -> a.arm().readAfter(oldSteps, r), wantOld);
         }
-        if (sortedReaders.contains(r)) {
+        if (all && sortedReaders.contains(r)) {
           checkedRead(a, r, "read_sorted", step, () -> a.arm().readSorted(r), wantFull);
         }
       }
