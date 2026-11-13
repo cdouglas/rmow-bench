@@ -17,9 +17,9 @@ alt.data_transformers.disable_max_rows()  # every canonical run's steps, filtere
 # The designs by their results names (figures.py WL_COLOR, WL_SHAPE): RMoR is rmor-c-kept on the
 # updates and rmor-c (sealed) on the inserts; no run holds both
 NAMES = {"mor-v3": "MoR", "rmor-c-kept": "RMoR", "rmor-c": "RMoR", "rmor-c-footer-kept": "RMoW-external",
-         "rmow-c": "RMoW-append", "rmor-density": "deferred merges"}
+         "rmow-c": "RMoW-append", "rmor-density": "RMoR-density"}
 ARMS = ", ".join(f"('{a}', '{n}')" for a, n in NAMES.items())
-DOMAIN = ["MoR", "RMoR", "RMoW-external", "RMoW-append", "deferred merges"]
+DOMAIN = ["MoR", "RMoR", "RMoW-external", "RMoW-append", "RMoR-density"]
 color = alt.Color("design:N", title="design", sort=DOMAIN,
                   scale=alt.Scale(domain=DOMAIN, range=[fig.WL_COLOR[d] for d in DOMAIN]))
 shape = alt.Shape("design:N", title="design", sort=DOMAIN,
@@ -105,6 +105,6 @@ table(q(f"""
            s.objects
     FROM arm_summary s JOIN canonical_runs r USING (run_id) JOIN d USING (arm)
     WHERE list_contains(r.campaigns, 'workloads-ref') AND r.host = 'havoc'
-    ORDER BY r.label, list_position(['MoR', 'RMoR', 'RMoW-external', 'RMoW-append', 'deferred merges'],
+    ORDER BY r.label, list_position(['MoR', 'RMoR', 'RMoW-external', 'RMoW-append', 'RMoR-density'],
                                     d.design)"""))
 ```

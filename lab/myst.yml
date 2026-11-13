@@ -22,6 +22,7 @@ project:
         - file: pages/region-cut.md
     - title: Calibration
       children:
+        - file: pages/simulation-cloud.md
         - file: pages/compare.md
         - file: pages/micro.md
   exclude:

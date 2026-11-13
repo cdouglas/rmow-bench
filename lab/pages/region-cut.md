@@ -21,12 +21,12 @@ CAMPAIGNS = ["density128", "density128-cut"]
 # (configuration, arm, design, short name)
 DESIGNS = [
     ("d128-upd-mor", "mor-v3", "MoR", "MoR"),
-    ("d128-upd-compact", "mor-v3", "MoR, compacted every 10 writes", "MoR compacted"),
-    ("d128-upd-density", "rmor-density", "RMoR, deferred merges as built (θ 0.06)", "deferred merges"),
+    ("d128-upd-compact", "mor-v3", "MoR, compacted every 10 writes", "MoR (compacted)"),
+    ("d128-upd-density", "rmor-density", "RMoR-density as built (θ 0.06)", "RMoR-density"),
     ("d128-upd-copies", "rmor-c-kept", "RMoR, row groups copied whole", "RMoR whole"),
     ("d128-upd-copies", "rmow-c", "RMoW-append, row groups copied whole", "RMoW-append"),
     ("d128-upd-cut", "rmor-c-kept", "RMoR, copies cut (θ 0)", "cut θ 0"),
-    ("d128-upd-density-cut", "rmor-density", "RMoR, deferred merges cut (θ 0.06)", "cut θ 0.06"),
+    ("d128-upd-density-cut", "rmor-density", "RMoR-density cut (θ 0.06)", "cut θ 0.06"),
 ]
 NAMES = [d[3] for d in DESIGNS]
 COLOR = alt.Scale(domain=NAMES, range=["#2a78d6", "#7fb2ea", "#b8478f", "#eda100", "#1baf7a",
@@ -106,15 +106,15 @@ def summary(name):
 S = pd.DataFrame({n: summary(n) for n in NAMES if n in present}).T
 S = S.join(end[["window_amp", "full_amp", "window_mb", "window_req", "full_mb", "full_req",
                 "row_groups", "data_files"]])
-# the deferred merges over the whole copies' 30 writes, for D2
-dm30 = per_write[(per_write.name == "deferred merges") & (per_write.step <= 30)].written.mean()
+# RMoR-density over the whole copies' 30 writes, for D2
+dm30 = per_write[(per_write.name == "RMoR-density") & (per_write.step <= 30)].written.mean()
 
 # The model's forecasts (docs/HYPOTHESES.md, 2026-11-09): MB written a write (mean, first 40, last
 # 40), MB read a write (mean, last 40), windows and full read over live bytes at the last write
 MODEL = {
     "MoR": (3.6, None, None, 1594, 1939, 16.7, 1.18),
-    "MoR compacted": (3.6, None, None, 1640, 2069, 7.0, 1.15),
-    "deferred merges": (55, 15, 74, 1304, 1413, 3.3, 1.03),
+    "MoR (compacted)": (3.6, None, None, 1640, 2069, 7.0, 1.15),
+    "RMoR-density": (55, 15, 74, 1304, 1413, 3.3, 1.03),
     "RMoR whole": (861, None, None, None, None, 3.3, None),
     "RMoW-append": (861, None, None, None, None, 3.3, None),
     "cut θ 0": (218, 369, 162, 231, 173, 1.01, 1.00),
@@ -248,28 +248,28 @@ table(reads[["name", "step", "window_amp", "window_mb", "window_req", "full_amp"
 :tags: [remove-cell]
 
 V = {}
-if has("MoR", "MoR compacted", "deferred merges"):
+if has("MoR", "MoR (compacted)", "RMoR-density"):
     d1 = {n: (s(n, "read"), s(n, "read") / s(n, "written"), s(n, "window_amp"))
-          for n in ["MoR", "MoR compacted", "deferred merges"]}
+          for n in ["MoR", "MoR (compacted)", "RMoR-density"]}
     V["D1"] = all(r >= 1000 and x >= 15 for r, x, _ in d1.values()) and \
-        d1["MoR"][2] >= 8 and d1["MoR compacted"][2] >= 4 and d1["deferred merges"][2] >= 2.5
-if has("RMoR whole", "RMoW-append", "deferred merges"):
+        d1["MoR"][2] >= 8 and d1["MoR (compacted)"][2] >= 4 and d1["RMoR-density"][2] >= 2.5
+if has("RMoR whole", "RMoW-append", "RMoR-density"):
     d2 = {n: (s(n, "written") / dm30, s(n, "window_amp")) for n in ["RMoR whole", "RMoW-append"]}
     V["D2"] = all(x >= 30 and a >= 2.5 for x, a in d2.values())
-if has("cut θ 0", "deferred merges"):
+if has("cut θ 0", "RMoR-density"):
     c = "cut θ 0"
-    d3 = dict(read=s(c, "read_last40") / s("deferred merges", "read_last40"),
-              written=s(c, "written_last40") / s("deferred merges", "written_last40"),
+    d3 = dict(read=s(c, "read_last40") / s("RMoR-density", "read_last40"),
+              written=s(c, "written_last40") / s("RMoR-density", "written_last40"),
               warm=s(c, "written_first40") / s(c, "written_last40"),
               window=s(c, "window_amp"), full=s(c, "full_amp"))
     d3_parts = {"its reads": d3["read"] <= 0.2, "its writes": d3["written"] <= 3,
                 "its warm-up": d3["warm"] >= 1.8, "its windows": d3["window"] <= 1.3,
                 "its full read": d3["full"] <= 1.05}
     V["D3"] = all(d3_parts.values())
-if has("cut θ 0.06", "deferred merges"):
+if has("cut θ 0.06", "RMoR-density"):
     c = "cut θ 0.06"
-    d4 = dict(read=s(c, "read_last40") / s("deferred merges", "read_last40"),
-              written=s(c, "written_last40") / s("deferred merges", "written_last40"),
+    d4 = dict(read=s(c, "read_last40") / s("RMoR-density", "read_last40"),
+              written=s(c, "written_last40") / s("RMoR-density", "written_last40"),
               window=s(c, "window_amp"))
     V["D4"] = d4["read"] <= 0.5 and 0.5 <= d4["written"] <= 1.2 and d4["window"] <= 2.2
 
@@ -299,35 +299,35 @@ def pct(x):
 ```
 
 **D1 (whole row groups read, as built): {eval}`verdict("D1")`.** Over the 240 writes MoR reads
-{eval}`f0(d1["MoR"][0])` MB a write, compacted MoR {eval}`f0(d1["MoR compacted"][0])` and the
-deferred merges {eval}`f0(d1["deferred merges"][0])` (predicted at least 1,000), which is
-{eval}`f0(d1["MoR"][1])`, {eval}`f0(d1["MoR compacted"][1])` and
-{eval}`f0(d1["deferred merges"][1])` times what each writes (at least 15). After the 240th write
-their windows read {eval}`f1(d1["MoR"][2])`, {eval}`f1(d1["MoR compacted"][2])` and
-{eval}`f1(d1["deferred merges"][2])` times their live bytes (at least 8, 4 and 2.5). MoR writes
+{eval}`f0(d1["MoR"][0])` MB a write, compacted MoR {eval}`f0(d1["MoR (compacted)"][0])` and
+RMoR-density {eval}`f0(d1["RMoR-density"][0])` (predicted at least 1,000), which is
+{eval}`f0(d1["MoR"][1])`, {eval}`f0(d1["MoR (compacted)"][1])` and
+{eval}`f0(d1["RMoR-density"][1])` times what each writes (at least 15). After the 240th write
+their windows read {eval}`f1(d1["MoR"][2])`, {eval}`f1(d1["MoR (compacted)"][2])` and
+{eval}`f1(d1["RMoR-density"][2])` times their live bytes (at least 8, 4 and 2.5). MoR writes
 {eval}`f1(s("MoR", "written"))` MB a write where the model forecast 3.6: the model leaves out the
 deletion vectors' files.
 
 **D2 (whole row groups copied, 30 writes): {eval}`verdict("D2")`.** RMoR with row groups kept
 writes {eval}`f0(s("RMoR whole", "written"))` MB a write and RMoW-append
 {eval}`f0(s("RMoW-append", "written"))`, {eval}`f0(d2["RMoR whole"][0])` and
-{eval}`f0(d2["RMoW-append"][0])` times the deferred merges' {eval}`f1(dm30)` over the same 30
+{eval}`f0(d2["RMoW-append"][0])` times RMoR-density's {eval}`f1(dm30)` over the same 30
 writes (at least 30). Their windows read {eval}`f2(d2["RMoR whole"][1])` and
 {eval}`f2(d2["RMoW-append"][1])` times their live bytes (at least 2.5).
 
 **D3 (the cut, θ 0): {eval}`verdict("D3", d3_parts)`.** Over writes 201–240 a write reads
-{eval}`f0(s("cut θ 0", "read_last40"))` MB, {eval}`f2(d3["read"])` of the deferred merges'
-{eval}`f0(s("deferred merges", "read_last40"))` (at most 0.2), and writes
+{eval}`f0(s("cut θ 0", "read_last40"))` MB, {eval}`f2(d3["read"])` of RMoR-density's
+{eval}`f0(s("RMoR-density", "read_last40"))` (at most 0.2), and writes
 {eval}`f0(s("cut θ 0", "written_last40"))` MB, {eval}`f2(d3["written"])` times theirs
-{eval}`f1(s("deferred merges", "written_last40"))` (at most 3; the model forecast 162 against 74).
-The cut wrote {eval}`pct(s("cut θ 0", "written_last40") / 162 - 1)` more than forecast there, the
-deferred merges {eval}`pct(1 - s("deferred merges", "written_last40") / 74)` less.
+{eval}`f1(s("RMoR-density", "written_last40"))` (at most 3; the model forecast 162 against 74).
+The cut wrote {eval}`pct(s("cut θ 0", "written_last40") / 162 - 1)` more than forecast there,
+RMoR-density {eval}`pct(1 - s("RMoR-density", "written_last40") / 74)` less.
 Its first 40 writes write {eval}`f1(d3["warm"])` times its last 40 (at least 1.8). After the 240th
 write its windows read {eval}`f2(d3["window"])` times their live bytes (at most 1.3) and its full
 read {eval}`f2(d3["full"])` times (at most 1.05).
 
 **D4 (the cut, θ 0.06): {eval}`verdict("D4")`.** Over writes 201–240 a write reads
-{eval}`f0(s("cut θ 0.06", "read_last40"))` MB, {eval}`f2(d4["read"])` of the deferred merges'
+{eval}`f0(s("cut θ 0.06", "read_last40"))` MB, {eval}`f2(d4["read"])` of RMoR-density's
 (at most 0.5), and writes {eval}`f0(s("cut θ 0.06", "written_last40"))` MB,
 {eval}`f2(d4["written"])` times theirs (0.5 to 1.2). After the 240th write its windows read
 {eval}`f2(d4["window"])` times their live bytes (at most 2.2).
@@ -447,15 +447,15 @@ az = T[T.store == "Azure Blob"].set_index("design")
 **Where a write's time goes.** Every design's write first finds the rows its statements change
 (the locate, `layout.locate` `scan`): it reads the key column of each live row group between
 the write's smallest and largest changed key, which here spans most of the table, about
-{eval}`f0(lmb("deferred merges"))` MB a write for the deferred merges and
+{eval}`f0(lmb("RMoR-density"))` MB a write for RMoR-density and
 {eval}`f0(lmb("cut θ 0"))` for the cut, in a request a row group. The cut keeps more row groups
 live, so its locate sends {eval}`f0(lreq("cut θ 0"))` requests a write over writes 201–240,
-against the deferred merges' {eval}`f0(lreq("deferred merges"))` and compacted MoR's
-{eval}`f0(lreq("MoR compacted"))`. The model left the locate out. On S3 Express the cut's write
-takes {eval}`f1(s3.loc["cut θ 0", "write_s"])` s against the deferred merges'
-{eval}`f1(s3.loc["deferred merges", "write_s"])` (the forecast: 7.0 against 16.4). On Azure
+against RMoR-density's {eval}`f0(lreq("RMoR-density"))` and compacted MoR's
+{eval}`f0(lreq("MoR (compacted)"))`. The model left the locate out. On S3 Express the cut's write
+takes {eval}`f1(s3.loc["cut θ 0", "write_s"])` s against RMoR-density's
+{eval}`f1(s3.loc["RMoR-density", "write_s"])` (the forecast: 7.0 against 16.4). On Azure
 Blob, where a small GET costs more, it takes {eval}`f1(az.loc["cut θ 0", "write_s"])` s against
-{eval}`f1(az.loc["deferred merges", "write_s"])`, of which
+{eval}`f1(az.loc["RMoR-density", "write_s"])`, of which
 {eval}`f1(az.loc["cut θ 0", "write_store_s"])` s are requests. Its windows send
 {eval}`f0(s("cut θ 0", "window_req"))` requests (the model counted 14): the footers of the files
 whose metrics overlap a window, as the region designs' windows did at 16 MiB.

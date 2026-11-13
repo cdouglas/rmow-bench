@@ -19,7 +19,7 @@ title = "The two workloads' main configurations, labelled wl-*, the references f
 select = ["where:label LIKE 'wl-%' AND host IN ('havoc', 'bearyak')"]
 
 [campaigns.workloads-curves]
-title = "The workloads page's update curves with the reader changes of 6db916a, labelled wlc-upd-* (docker/campaigns/workloads-curves.json): MoR compacted every 3, 6 and 12 writes, the deferred merges at theta 1, 0.5, 0.25 and 0.12, and row groups of 4, 8 and 32 MiB, each the tune or windows campaign's configuration with workloads-ref's readers. On havoc for requests, bytes and held memory, and on the laptop (bearyak) for instructions"
+title = "The workloads page's update curves with the reader changes of 6db916a, labelled wlc-upd-* (docker/campaigns/workloads-curves.json): MoR compacted every 3, 6 and 12 writes, RMoR-density at theta 1, 0.5, 0.25 and 0.12, and row groups of 4, 8 and 32 MiB, each the tune or windows campaign's configuration with workloads-ref's readers. On havoc for requests, bytes and held memory, and on the laptop (bearyak) for instructions"
 select = ["where:label LIKE 'wlc-%' AND host IN ('havoc', 'bearyak')"]
 
 [campaigns.workloads-cloud]
