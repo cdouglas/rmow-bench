@@ -27,6 +27,17 @@ row group 59 of 60 seeds, a cut losing a row 39, a cut splitting one event time 
 file taking the joined inserts 46, and RMoW-external's index left behind by the rows its footers
 move up 1 (by the check after each such write; none of 60 before it).
 
+All of them at 9ff9176, on havoc (2026-11-13, results/fuzz/cal-9ff9176-<profile>; each pair's
+seeds split among 4 workers): every required mutant caught under each profile, and `none` clean.
+The event-time profile caught its five as above, seed for seed. The default draws, which reach the
+event-time merge only in their inserts-only runs, caught four of its five in 2 to 4 seeds of 60
+(the index left behind in none); the heavy draws never run inserts alone, so they never reach it.
+The others, default and heavy: RMoR dropping version 0 36 and 57 of 60, its DV missing a last row
+35 and 57, the folded DVs inverted 9 and 14, compaction keeping the old file 13 and 13,
+nondeterministic 6 and 14 of 240, the reader's off-by-one 2 and 4, ends-only 5 and 16, the cut's
+two 8 and 22, 2 and 5, the sorted read's skip 1 and 5, the locate by key 1 and none, MoR's stats
+missing deletes 41 and 54. RMoW packing open row groups and the second-row skip: none, as before.
+
 Each mutant is an exact-text replacement anchored in the code as this file's last commit left it;
 a replacement that no longer matches is reported, not skipped. Results: DIR/<mutant>/summary-*.jsonl
 and DIR/calibration.txt.
