@@ -545,8 +545,12 @@ lower.
   D1–D4's 128 MiB row groups: `configs/w128-*.json`, campaign `docker/campaigns/w128.json` on
   havoc (the user's runs). Built for it: the event-time merge (above), MoR compacted as Iceberg
   plans its bin-pack after every write (`compactMinInputFiles`), and range reads after every
-  write (`reads.rangeEvery`). Before the runs: a fuzz round with the final build on havoc, and
-  the mutants (started 2026-11-12 at 9ff9176). RMoW-append on the updates runs 30 writes, since it
+  write (`reads.rangeEvery`). Before the runs, at 9ff9176 on havoc (2026-11-13): fuzz rounds
+  `w128-mixed`, `w128-event-time` and `w128-heavy` (two hours each from seed 1001; 5,423 seeds),
+  no wrong result. Their six failures were timeouts under a load average near 200, and each passed
+  on the laptop, in 3 to 13 minutes. Every mutant's calibration (`results/fuzz/cal-9ff9176-*`,
+  bin/fuzz-mutants.py's docstring): every required mutant caught under each profile, the five
+  event-time ones as on the laptop. RMoW-append on the updates runs 30 writes, since it
   copies whole row groups. On the inserts RMoR, RMoW-external and RMoW-append are projected, not
   run (revised 2026-11-12, W4–W5; lab/pages/inserts-128.md): the event-time merge at θ 0 would
   write 2.3 GB a write. The runs of MoR, MoR (compacted) and RMoR-density check the projection.
