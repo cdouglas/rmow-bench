@@ -1692,3 +1692,38 @@ the harness at a small scale, which it matched within 10%):
   for RMoW-append.
 - **The writer's index:** the region designs find their row groups from an index of them, as RMoW
   keeps its footers; an engine without one would read more footers.
+
+## The inserts at 128 MiB: projected where they cannot run (revised 2026-11-12)
+
+**What changes:** W1–W3 above stand, but RMoR, RMoW-external and RMoW-append do not run on the
+inserts. Even their 30 writes would store about 70 GB each, and their 240 the model's 553 GB; the
+user judged that no experiment, on havoc or in the cloud. Their data written is projected by the
+model instead and plotted beside the runs (lab/pages/inserts-128.md, Decisions). So W1's first half
+(their bytes over 30 writes) is not judged; its second (RMoR-density at most 10 times MoR's bytes a
+write) is. `configs/w128-ing-{rmor,external,append}.json` are deleted, and the campaign has nine
+jobs.
+
+**The question this adds:** is RMoR-density an alternative to MoR (compacted) on the inserts? The
+model (`analysis/event_time_model.py`, now with MoR, MoR compacted by Iceberg's rule, and each
+design's row groups by event-time range, so it projects reads as well as writes) says, over the 240
+writes: MoR (compacted) writes 68 MB a write and RMoR-density 63, against MoR's 10.5. After the
+240th write a 1% range by event time reads 5.1 to 11 times its live bytes under compaction and 1.2 to
+2.5 under RMoR-density (MoR 10.5 to 31), and the sorted read holds 0.87 GB against 0.11 (MoR 2.6).
+RMoR-density then has 5,080 row groups, nearly all small delta row groups, against compaction's 89.
+
+**Predicted** (`w128-ing-compact` against `w128-ing-density`, judged as W1–W3):
+- **W4 (writes): over the 240 writes RMoR-density writes 0.75 to 1.25 times MoR (compacted)'s bytes
+  a write** (model 0.93).
+- **W5 (reads): after the 240th write, RMoR-density's five windows read at most half the bytes of
+  MoR (compacted)'s, in total, and its sorted read holds at most a third of theirs** (model 0.23 and
+  0.13).
+
+**The model's check:** the projection stands beside the runs only if, for `w128-ing-mor`,
+`w128-ing-compact` and `w128-ing-density`, the model's bytes written a write come within 20% of each
+run's, and its windows' bytes over live and its sorted read's peak within a factor of 1.5 at the
+240th write. Otherwise the model is revised first, in a section of its own. (Its rows are the
+initial load's 30.1 bytes; the inserts took 33.7 a row at 16 MiB, so it may read low by about a
+tenth.)
+
+**Measured, not judged:** requests, above all RMoR-density's for its delta row groups, which the model
+leaves out: each one a read touches is a request of its own, and every footer lists them.

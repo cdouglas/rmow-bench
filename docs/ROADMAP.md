@@ -546,7 +546,10 @@ lower.
   havoc (the user's runs). Built for it: the event-time merge (above), MoR compacted as Iceberg
   plans its bin-pack after every write (`compactMinInputFiles`), and range reads after every
   write (`reads.rangeEvery`). Before the runs: a fuzz round with the final build on havoc, and
-  the mutants. The designs that copy whole row groups every write run 30 writes, not 240.
+  the mutants (started 2026-11-12 at 9ff9176). RMoW-append on the updates runs 30 writes, since it
+  copies whole row groups. On the inserts RMoR, RMoW-external and RMoW-append are projected, not
+  run (revised 2026-11-12, W4–W5; lab/pages/inserts-128.md): the event-time merge at θ 0 would
+  write 2.3 GB a write. The runs of MoR, MoR (compacted) and RMoR-density check the projection.
 - [ ] **Reads at every snapshot, in a final cloud run** (decided 2026-11-12): every run so far
   reads the table only after every 5th write (`reads.every` 5, one setting for every kind of read;
   `Runner.java`, the probe). Writes are measured at every snapshot. So the workloads pages'

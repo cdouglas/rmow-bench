@@ -604,7 +604,9 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
 - **Next: every design on both workloads at Iceberg's sizes** (registered 2026-11-12, W1–W3 in
   [docs/HYPOTHESES.md](docs/HYPOTHESES.md); campaign `docker/campaigns/w128.json`, not yet run):
   one definition of each design, the inserts placed by the event-time merge (`layout.inserts`),
-  MoR compacted as Iceberg plans its bin-pack, and range reads after every write. Then the density
+  MoR compacted as Iceberg plans its bin-pack, and range reads after every write. On the inserts,
+  the designs that merge every late row at once are projected, not run
+  ([lab/pages/inserts-128.md](lab/pages/inserts-128.md)). Then the density
   hypothesis where density can choose: a workload of sparse changes, cold pieces merged back, and
   the locate's requests ([docs/ROADMAP.md](docs/ROADMAP.md)). GCS needs APPEND in the fork first;
   split files can also run on standard S3.

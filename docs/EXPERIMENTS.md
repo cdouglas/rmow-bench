@@ -50,9 +50,11 @@ these arms:
 On the inserts, RMoR is `rmor-c` with its tail sealed at 160 MiB (inserts merged by arrival into
 data files cut into row groups) and RMoW-append is `rmow-c` sealed the same way; "appending" is
 MoR, which writes each write's inserts as a file. The next suite (registered 2026-11-12,
-HYPOTHESES.md W1–W3, not yet run) runs every design above on both workloads, the inserts placed by
+HYPOTHESES.md W1–W5, not yet run) runs every design above on both workloads, the inserts placed by
 the event-time merge (`layout.inserts` `event-time`): each into the row group its event time falls
-in, so no two row groups overlap in event time. Every design finds a write's rows by each
+in, so no two row groups overlap in event time. On the inserts, RMoR, RMoW-external and RMoW-append
+are projected rather than run ([inserts-128.md](../lab/pages/inserts-128.md)): merging every late
+row at once would write 2.3 GB a write. Every design finds a write's rows by each
 changed key (`layout.locate` `keys`) and reads through the reader that skips dead row groups
 (`cached-skip`), except the windows and tune campaigns' runs, which locate by scan and also read
 through the other readers. The changes to stock Iceberg's readers and writers are
