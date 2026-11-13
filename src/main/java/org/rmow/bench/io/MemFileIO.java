@@ -36,6 +36,11 @@ import org.apache.iceberg.io.SupportsAtomicOperations;
  * only if no object exists. An APPEND lands only on that version at the snapshot's length, and
  * from a snapshot that has seen none looks the object up when it writes. {@code prepare} computes
  * the CRC32C the cloud stores' does.
+ *
+ * <p>Reads are of one version, as the fork's contract has them: a stream reads the object it opened
+ * on, and a snapshot that has seen a version reads it while the object holds it or extends it (an
+ * append keeps the bytes before it), and fails with {@link StaleReadException} once a write has
+ * replaced it, as S3 and ADLS answer a read conditioned on a version that is gone.
  */
 public final class MemFileIO implements SupportsAtomicOperations {
 
@@ -45,12 +50,12 @@ public final class MemFileIO implements SupportsAtomicOperations {
 
   @Override
   public InputFile newInputFile(String path) {
-    return new MemInputFile(path, -1, -1);
+    return new MemInputFile(path, -1, -1, null);
   }
 
   @Override
   public InputFile newInputFile(String path, long length) {
-    return new MemInputFile(path, length, -1);
+    return new MemInputFile(path, length, -1, null);
   }
 
   @Override
@@ -63,7 +68,10 @@ public final class MemFileIO implements SupportsAtomicOperations {
     if (!(replace instanceof MemInputFile snapshot) || snapshot.io() != this) {
       throw new IllegalArgumentException("Not a snapshot of this store: " + replace);
     }
-    return new MemAtomicOutputFile(snapshot.location(), snapshot.length, snapshot.version);
+    synchronized (snapshot) {
+      return new MemAtomicOutputFile(
+          snapshot.location(), snapshot.length, snapshot.version, snapshot.seen);
+    }
   }
 
   @Override
@@ -161,16 +169,22 @@ public final class MemFileIO implements SupportsAtomicOperations {
     }
   }
 
-  /** A snapshot: a length (-1 until known) and the version it has seen (-1: none). */
+  /**
+   * A snapshot: a length (-1 until known), the version it has seen (-1: none) and the object that
+   * held it (null: none). An append keeps the object, so the version's bytes stay its prefix; a
+   * replace makes another.
+   */
   private final class MemInputFile implements InputFile {
     private final String path;
     private long length;
     private long version;
+    private MemObject seen;
 
-    MemInputFile(String path, long length, long version) {
+    MemInputFile(String path, long length, long version, MemObject seen) {
       this.path = path;
       this.length = length;
       this.version = version;
+      this.seen = seen;
     }
 
     MemFileIO io() {
@@ -184,6 +198,7 @@ public final class MemFileIO implements SupportsAtomicOperations {
       if (obj != null && version < 0) {
         synchronized (obj) {
           version = obj.version();
+          seen = obj;
           if (length < 0) {
             length = obj.length();
           }
@@ -205,6 +220,12 @@ public final class MemFileIO implements SupportsAtomicOperations {
       MemObject obj = object(path);
       long limit;
       synchronized (this) {
+        if (seen != null && obj != seen) {
+          throw new StaleReadException(
+              "Version " + version + " of " + path + " was replaced; it is now version "
+                  + obj.version(),
+              null);
+        }
         limit = length >= 0 ? length : obj.length();
       }
       if (limit > obj.length()) {
@@ -314,7 +335,7 @@ public final class MemFileIO implements SupportsAtomicOperations {
 
     @Override
     public InputFile toInputFile() {
-      return new MemInputFile(path, -1, -1);
+      return new MemInputFile(path, -1, -1, null);
     }
   }
 
@@ -360,16 +381,20 @@ public final class MemFileIO implements SupportsAtomicOperations {
     }
   }
 
-  /** A write to the version a snapshot saw: {@code version} -1 if it saw none. */
+  /**
+   * A write to the version a snapshot saw: {@code version} -1 and {@code seen} null if it saw none.
+   */
   private final class MemAtomicOutputFile implements AtomicOutputFile {
     private final String path;
     private final long length;
     private final long version;
+    private final MemObject seen;
 
-    MemAtomicOutputFile(String path, long length, long version) {
+    MemAtomicOutputFile(String path, long length, long version, MemObject seen) {
       this.path = path;
       this.length = length;
       this.version = version;
+      this.seen = seen;
     }
 
     @Override
@@ -386,6 +411,7 @@ public final class MemFileIO implements SupportsAtomicOperations {
           lookups.increment(); // the version to extend: the object's current one
         }
         long[] newLength = new long[1];
+        MemObject[] extended = new MemObject[1];
         objects.compute(
             path,
             (k, cur) -> {
@@ -393,28 +419,29 @@ public final class MemFileIO implements SupportsAtomicOperations {
                 throw new AppendException("Cannot append to " + path + ": no object", null);
               }
               newLength[0] = cur.append(version, length, bytes, next);
+              extended[0] = cur;
               return cur;
             });
-        return new MemInputFile(path, newLength[0], next);
+        return new MemInputFile(path, newLength[0], next, extended[0]);
       }
-      boolean[] landed = new boolean[1];
+      MemObject[] landed = new MemObject[1];
       objects.compute(
           path,
           (k, cur) -> {
             if (version < 0 ? cur != null : cur == null || cur.version() != version) {
               return cur;
             }
-            landed[0] = true;
-            return new MemObject(bytes, next);
+            landed[0] = new MemObject(bytes, next);
+            return landed[0];
           });
-      if (!landed[0]) {
+      if (landed[0] == null) {
         throw new StorageInvariantException(
             version < 0
                 ? "Object exists: " + path
                 : "Not the pinned version " + version + ": " + path,
             null);
       }
-      return new MemInputFile(path, bytes.length, next);
+      return new MemInputFile(path, bytes.length, next, landed[0]);
     }
 
     @Override
@@ -434,7 +461,7 @@ public final class MemFileIO implements SupportsAtomicOperations {
 
     @Override
     public InputFile toInputFile() {
-      return new MemInputFile(path, length, version);
+      return new MemInputFile(path, length, version, seen);
     }
   }
 }
