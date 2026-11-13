@@ -40,6 +40,12 @@ import org.apache.iceberg.io.SupportsAtomicOperations;
  * among this process's writers, which are all a run has; another process writing the same files is
  * not excluded.
  *
+ * <p>Reads are of one version, as the fork's contract has them: a stream reads the file it opened,
+ * and a snapshot that has seen a version reads it while the file is that inode (an append keeps the
+ * bytes before it), and fails with {@link StaleReadException} once a CAS has renamed another file
+ * onto it, as S3 and ADLS answer a read conditioned on a version that is gone. (A file deleted and
+ * created again may reuse the inode; nothing in a run does that to a file it reads.)
+ *
  * <p>Locations are absolute paths, optionally prefixed with {@code file:}.
  */
 public final class PreadFileIO implements SupportsAtomicOperations {
@@ -160,7 +166,21 @@ public final class PreadFileIO implements SupportsAtomicOperations {
     @Override
     public SeekableInputStream newStream() {
       try {
-        FileChannel ch = FileChannel.open(path(location), StandardOpenOption.READ);
+        Path p = path(location);
+        FileChannel ch = FileChannel.open(p, StandardOpenOption.READ);
+        Version seen;
+        synchronized (this) {
+          seen = version;
+        }
+        if (seen != null) {
+          // the file opened is the one at the path after the open, so check that one; a replace
+          // between the open and the check fails a read that would have read the version
+          BasicFileAttributes now = attributes(p);
+          if (now == null || !java.util.Objects.equals(seen.fileKey(), now.fileKey())) {
+            ch.close();
+            throw new StaleReadException("The version seen of " + location + " was replaced", null);
+          }
+        }
         return new PreadStream(ch, getLength());
       } catch (NoSuchFileException e) {
         throw new NotFoundException(e, "No such file: %s", location);
