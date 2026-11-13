@@ -1627,7 +1627,7 @@ def rmor_spliced(main, rerun):
 
 
 # The tuner's policy map (pages/tune.md): the cheapest policy at each read mix, its hue the
-# design's (the results pages' colors; the deferred merges, which they do not show, take the
+# design's (the results pages' colors; RMoR-density, which they do not show, take the
 # palette's red, the one slot that clears the validator's normal-vision floor beside the three),
 # white edges between policies, and each region labelled with what sets its policy apart.
 TUNE_COLORS = {"MoR": "#2a78d6", "RMoR": "#eda100", "RMoW-append": "#1baf7a", "deferred": "#e34948",
@@ -1705,26 +1705,39 @@ def tune_map(pm, W, F, width=300, height=250, min_cells=6):
 
 
 # The two workloads (pages/workloads.md, simulated; pages/workloads-cloud.md, measured): each
-# design's write latency against its reads, with whiskers, and its latency as snapshots are added.
-# A spec is a list of (configuration, arm, family, curve it lies on, its knob's value, its name if
-# a main point, order on the curve); a curve runs through one family's settings of one knob.
+# design's write latency against its reads, its latency and storage as snapshots are added, and
+# where its time goes. A spec is a list of (configuration, arm, family, curve it lies on, its knob's
+# value, its name if a main point, order on the curve); a curve runs through one family's settings
+# of one knob.
 WL_STORES = ["S3 Express", "Azure Blob"]
 WL_STORE = {"s3x": WL_STORES[0], "azure": WL_STORES[1]}
 WL_COLOR = {"MoR": "#2a78d6", "RMoR": "#eda100", "RMoW-external": "#008300", "RMoW-append": "#1baf7a",
-            "deferred merges": "#b8478f", "appending": "#5f6b75"}
+            "RMoR-density": "#b8478f"}
 WL_SHAPE = {"MoR": "circle", "RMoR": "triangle-up", "RMoW-external": "square", "RMoW-append": "diamond",
-            "deferred merges": "triangle-down", "appending": "circle"}
-# a main point's own color where two share a family (MoR and MoR compacted, in the snapshots)
-WL_NCOLOR = {"MoR compacted": "#7fb2ea"}
-WL_READ = {"window_s": "a range read (1% of the table)", "full_s": "a full scan", "sorted_s": "a sorted read"}
-# where a phase's time goes: its thread's components (phase_breakdown) by part
-WL_CPU_PART = {"decode CPU": "decoding", "encode CPU": "encoding", "footer CPU": "deletion vectors and footers",
-               "deletes CPU": "deletion vectors and footers", "other CPU": "rows and planning",
-               "store client CPU": "the store", "waiting on the store": "the store",
+            "RMoR-density": "triangle-down"}
+# a main point's own color where two share a family (MoR and MoR (compacted))
+WL_NCOLOR = {"MoR (compacted)": "#7fb2ea"}
+# what the charts and tables call a write and each kind of read
+WL_WRITE = "snapshot write latency"
+WL_READ = {"window_s": "1% range read latency", "full_s": "full scan latency", "sorted_s": "sorted read latency"}
+# Where a phase's time goes: its thread's components (phase_breakdown, views/47_breakdown.sql) by
+# part. "DVs and footers" is delete files' work (deletion vectors built, encoded, loaded and
+# decoded) and RMoW's footers'; "other CPU" the rest of the thread's CPU: making the rows a write
+# writes, planning scans, Iceberg's manifests and commit; "I/O" the store client's CPU and the wait
+# for its requests (simulated: the requests priced by size).
+WL_CPU_PART = {"decode CPU": "decode", "encode CPU": "encode", "footer CPU": "DVs and footers",
+               "deletes CPU": "DVs and footers", "other CPU": "other CPU",
+               "store client CPU": "I/O", "waiting on the store": "I/O",
                "other waiting": "paused (GC, JIT)"}
-WL_PARTS = ["decoding", "encoding", "deletion vectors and footers", "rows and planning", "the store",
-            "paused (GC, JIT)", "compactions, spread over the writes"]
-WL_PCOL = {**PART_COLORS, "compactions, spread over the writes": PART_COLORS["paused (GC, JIT)"]}
+WL_PARTS = ["decode", "encode", "DVs and footers", "other CPU", "I/O", "paused (GC, JIT)"]
+WL_PCOL = {"decode": "#3b2ca6", "encode": "#7d6fdc", "DVs and footers": "#c4bdf0", "other CPU": "#eb6834",
+           "I/O": "#7f8a93", "paused (GC, JIT)": "#c9ced3"}
+WL_SNAPSHOT_X = alt.X("step:Q", title="snapshot", scale=alt.Scale(domain=[0, 30], nice=False),
+                      axis=alt.Axis(values=list(range(0, 31, 5))))
+
+
+def _cap(s):
+    return s[0].upper() + s[1:]
 
 
 def wl_whiskers(S):
@@ -1759,86 +1772,48 @@ def wl_frame(spec, P, W):
     return pd.DataFrame(rows).merge(W, on=["Store", "label", "arm"], how="left")
 
 
-def wl_tradeoff(d, reads, place, width=300, height=220):
-    """Write latency (compactions spread over the writes) against read latency, a panel per kind
-    of read and a row per store; each family's settings of one knob joined in order. The designs
-    are named in the first panel, each placed by `place` (name: (align, dy[, dx]), or a dict of
-    them by store), and carry whiskers: across, their writes' 10th to 90th percentile; up, their
-    fastest to slowest read. Where d has a forecast (`pred_write_s` and `pred_<read>`), each main
-    point's forecast is a hollow mark joined to it by a dashed line."""
-    pred = "pred_write_s" in d.columns
-    pcols = [f"pred_{r}" for r in reads] if pred else []
-    L = d.melt(id_vars=[c for c in d.columns if c not in WL_READ and c not in pcols], value_vars=reads,
+def wl_tradeoff(d, reads, width=260, height=190):
+    """Write latency against read latency, one point per design (d: wl_frame()'s rows, `name` the
+    design), a panel per kind of read and a row per store. Whiskers across span the writes' 10th
+    to 90th percentile, and up the fastest to slowest read after 5 to 30 writes."""
+    names = list(dict.fromkeys(d.name))
+    fam = d.drop_duplicates("name").set_index("name").family
+    L = d.melt(id_vars=["Store", "name", "write_s", "write_lo", "write_hi"], value_vars=list(reads),
                var_name="kind", value_name="read_s")
-    L["read"] = L.kind.map(WL_READ)
     recs = L.to_dict("records")
-    L["read_lo"] = [r[f"{r['kind']}_lo"] for r in recs]
-    L["read_hi"] = [r[f"{r['kind']}_hi"] for r in recs]
-    if pred:
-        P = d.set_index(["Store", "label", "arm"])
-        L["pred_read_s"] = [P.loc[(r["Store"], r["label"], r["arm"]), f"pred_{r['kind']}"] for r in recs]
-
-    def at_(n, st):
-        p = place[n]
-        return p.get(st, p.get("*")) if isinstance(p, dict) else p
-    L["place"] = [" ".join(str(x) for x in at_(n, st)) if n in place and k == reads[0] else ""
-                  for n, k, st in zip(L.name, L.kind, L.Store)]
-    fams = [f for f in WL_COLOR if f in set(L.family) | set(L.curve)]
+    L["read_lo"] = [d.loc[(d.Store == r["Store"]) & (d.name == r["name"]), f"{r['kind']}_lo"].iloc[0] for r in recs]
+    L["read_hi"] = [d.loc[(d.Store == r["Store"]) & (d.name == r["name"]), f"{r['kind']}_hi"].iloc[0] for r in recs]
+    L["read"] = L.kind.map(WL_READ)
     legend = alt.Legend(title=None, orient="bottom", direction="horizontal")
-    color = alt.Color("family:N", legend=legend, scale=alt.Scale(domain=fams, range=[WL_COLOR[f] for f in fams]))
-    lcolor = alt.Color("curve:N", legend=legend, scale=alt.Scale(domain=fams, range=[WL_COLOR[f] for f in fams]))
-    shape = alt.Shape("family:N", legend=legend, scale=alt.Scale(domain=fams, range=[WL_SHAPE[f] for f in fams]))
-    top = max(1.18 * L.write_s.max(), 1.04 * L[L.main].write_hi.max())
-    if pred:
-        top = max(top, 1.18 * L[L.main].pred_write_s.max())
-    xs = alt.Scale(domain=[0, top], nice=False)
+    color = alt.Color("name:N", sort=names, legend=legend,
+                      scale=alt.Scale(domain=names, range=[WL_NCOLOR.get(n, WL_COLOR[fam[n]]) for n in names]))
+    shape = alt.Shape("name:N", sort=names, legend=legend,
+                      scale=alt.Scale(domain=names, range=[WL_SHAPE[fam[n]] for n in names]))
+    xs, ys = alt.Scale(zero=True), alt.Scale(zero=True)
     x = alt.X("write_s:Q", title="write latency (s)", scale=xs)
-    y = alt.Y("read_s:Q", title="read latency (s)", scale=alt.Scale(zero=True))
-    tip = ["Store", "family", "knob", "name", alt.Tooltip("write_s:Q", format=".2f"),
-           alt.Tooltip("compact_s:Q", format=".2f"), "read", alt.Tooltip("read_s:Q", format=".2f")]
-    line = alt.Chart().transform_filter(alt.datum.curve != "").mark_line(strokeWidth=1.5, opacity=0.55).encode(
-        x=x, y=y, color=lcolor, detail="curve:N", order="order:Q")
-    small = alt.Chart().transform_filter(~alt.datum.main).mark_point(size=28, filled=True, opacity=0.8).encode(
-        x=x, y=y, color=color, shape=shape, tooltip=tip)
-    across = alt.Chart().transform_filter(alt.datum.main).mark_rule(strokeWidth=1.5, opacity=0.6).encode(
+    y = alt.Y("read_s:Q", title="read latency (s)", scale=ys)
+    tip = ["Store", "name", alt.Tooltip("write_s:Q", format=".2f", title="write (s)"), "read",
+           alt.Tooltip("read_s:Q", format=".2f", title="read (s)")]
+    across = alt.Chart().mark_rule(strokeWidth=1.5, opacity=0.6).encode(
         x=alt.X("write_lo:Q", title="write latency (s)", scale=xs), x2="write_hi:Q", y=y, color=color)
-    up = alt.Chart().transform_filter(alt.datum.main).mark_rule(strokeWidth=1.5, opacity=0.6).encode(
-        x=x, y=alt.Y("read_lo:Q", title="read latency (s)", scale=alt.Scale(zero=True)), y2="read_hi:Q",
-        color=color)
-    big = alt.Chart().transform_filter(alt.datum.main).mark_point(
-        size=110, filled=True, opacity=1, stroke="white", strokeWidth=0.8).encode(
+    up = alt.Chart().mark_rule(strokeWidth=1.5, opacity=0.6).encode(
+        x=x, y=alt.Y("read_lo:Q", title="read latency (s)", scale=ys), y2="read_hi:Q", color=color)
+    points = alt.Chart().mark_point(size=110, filled=True, opacity=1, stroke="white", strokeWidth=0.8).encode(
         x=x, y=y, color=color, shape=shape, tooltip=tip)
-    ghosts = []
-    if pred:
-        ptip = ["Store", "name", "read", alt.Tooltip("pred_write_s:Q", format=".2f", title="forecast write"),
-                alt.Tooltip("pred_read_s:Q", format=".2f", title="forecast read")]
-        ghosts = [
-            alt.Chart().transform_filter(alt.datum.main).mark_rule(strokeWidth=1, strokeDash=[3, 2], opacity=0.7)
-            .encode(x=x, y=y, x2="pred_write_s:Q", y2="pred_read_s:Q", color=color),
-            alt.Chart().transform_filter(alt.datum.main).mark_point(size=80, filled=False, strokeWidth=1.5)
-            .encode(x=alt.X("pred_write_s:Q", title="write latency (s)", scale=xs),
-                    y=alt.Y("pred_read_s:Q", title="read latency (s)", scale=alt.Scale(zero=True)),
-                    color=color, shape=shape, tooltip=ptip)]
-    labels = []
-    for p in sorted(set(L.place) - {""}):
-        align, dy, *dx = p.split()
-        dx = int(dx[0]) if dx else (8 if align == "left" else -8)
-        labels.append(alt.Chart().transform_filter(alt.datum.place == p).mark_text(
-            align=align, dx=dx, dy=int(dy), fontSize=11, fontWeight="bold").encode(
-            x=x, y=y, text="name:N", color=color))
-    return alt.layer(line, *ghosts, across, up, small, big, *labels, data=L).properties(
-        width=width, height=height).facet(
+    return alt.layer(across, up, points, data=L).properties(width=width, height=height).facet(
         row=alt.Row("Store:N", sort=WL_STORES, title=None),
         column=alt.Column("read:N", sort=[WL_READ[r] for r in reads], title=None)).resolve_scale(y="independent")
 
 
-def wl_twin(d, reads=("window_s", "full_s", "sorted_s")):
-    """wl_tradeoff()'s table twin (with the forecast, where d has one)."""
-    pred = [c for c in ["pred_write_s", *[f"pred_{r}" for r in reads]] if c in d.columns]
-    t = d[["Store", "family", "knob", "name", "label", "arm", "write_s", "write_lo", "write_hi", "compact_s",
-           *[c for r in reads for c in (r, f"{r}_lo", f"{r}_hi")], *pred]].copy()
+def wl_twin(d, reads):
+    """wl_tradeoff()'s table twin: each design's mean write and reads (s), with their whiskers."""
+    cols = {"Store": "Store", "name": "design", "write_s": "write", "write_lo": "write p10", "write_hi": "write p90"}
+    short = {"window_s": "range read", "full_s": "full scan", "sorted_s": "sorted read"}
+    for r in reads:
+        cols |= {r: short[r], f"{r}_lo": f"{short[r]} min", f"{r}_hi": f"{short[r]} max"}
+    t = d[list(cols)].rename(columns=cols)
     t["_s"] = t.Store.map(WL_STORES.index)
-    return t.sort_values(["_s", "family", "order" if "order" in t else "write_s"]).drop(columns="_s").round(3)
+    return t.sort_values("_s", kind="stable").drop(columns="_s").round(3)
 
 
 def wl_snapshots(spec, S, reads):
@@ -1849,7 +1824,7 @@ def wl_snapshots(spec, S, reads):
         if name is None:
             continue
         g = S[(S.label == label) & (S.arm == arm)]
-        parts = [g[(g.phase == "batch") & (g.step >= 1)].assign(what="a write"),
+        parts = [g[(g.phase == "batch") & (g.step >= 1)].assign(what=WL_WRITE),
                  g[g.phase == "compact"].assign(what="a compaction")]
         for r in reads:
             phase, reader = tread[r[:-2]]
@@ -1867,26 +1842,24 @@ def wl_snapshot_chart(d, reads, width=300, height=150):
                       scale=alt.Scale(domain=names, range=[WL_NCOLOR.get(n, WL_COLOR[fam[n]]) for n in names]))
     shape = alt.Shape("name:N", title=None, sort=names,
                       scale=alt.Scale(domain=names, range=[WL_SHAPE[fam[n]] for n in names]))
-    x = alt.X("step:Q", title="snapshots (writes since the initial load)",
-              scale=alt.Scale(domain=[0, 30], nice=False), axis=alt.Axis(values=list(range(0, 31, 5))))
+    x = WL_SNAPSHOT_X
     tip = ["Store", "name", "what", "step", alt.Tooltip("s:Q", format=".2f")]
 
-    def graph(what, title, ytitle, size):
+    def graph(what, ytitle, size):
         y = alt.Y("s:Q", title=ytitle, scale=alt.Scale(zero=True))
         line = alt.Chart().transform_filter(alt.datum.what == what).mark_line(
             strokeWidth=2, point=alt.OverlayMarkDef(size=size)).encode(
             x=x, y=y, color=color, shape=shape, detail="name:N", tooltip=tip)
         layers = [line]
-        if what == "a write" and (d.what == "a compaction").any():
+        if what == WL_WRITE and (d.what == "a compaction").any():
             layers.append(alt.Chart().transform_filter(alt.datum.what == "a compaction").mark_point(
                 shape="cross", filled=True, size=90, opacity=1).encode(x=x, y=y, color=color, tooltip=tip))
         return (alt.layer(*layers, data=d).properties(width=width, height=height)
                 .facet(column=alt.Column("Store:N", title=None, sort=WL_STORES))
-                .properties(title=alt.Title(title, anchor="start")))
+                .properties(title=alt.Title(_cap(what), anchor="start")))
 
-    return alt.vconcat(graph("a write", "A write", "write latency (s)", 18),
-                       *[graph(WL_READ[r], WL_READ[r][0].upper() + WL_READ[r][1:], "read latency (s)", 50)
-                         for r in reads])
+    return alt.vconcat(graph(WL_WRITE, "write latency (s)", 18),
+                       *[graph(WL_READ[r], "read latency (s)", 50) for r in reads])
 
 
 def wl_snapshot_table(d, what, basis="simulated"):
@@ -1896,7 +1869,8 @@ def wl_snapshot_table(d, what, basis="simulated"):
     names = list(dict.fromkeys(d.name))
     t = t.reindex(columns=[(st, n) for st in WL_STORES for n in names if (st, n) in t.columns])
     t.columns = [f"{st}: {n}" for st, n in t.columns]
-    return table(t.reset_index().round(2), caption=f"{what[0].upper() + what[1:]}: {basis} latency (s) at each snapshot")
+    t = t.reset_index().rename(columns={"step": "snapshot"})
+    return table(t.round(2), caption=f"{_cap(what)}, {basis} (s), at each snapshot")
 
 
 # Compaction, apart from the designs: MoR at each interval, light (never) to dark (every 3 writes),
@@ -1905,68 +1879,107 @@ WL_INTERVALS = ["never", "every 12 writes", "every 10 writes", "every 6 writes",
 WL_INTERVAL_COLORS = ["#86b6ef", "#5598e7", "#2a78d6", "#1c5cab", "#104281"]
 
 
-def wl_compaction_chart(d, reads, stored, ref, shown=("never", "every 10 writes", "every 3 writes"),
+def wl_interval_series(name):
+    """A compaction interval's name in the charts' legends."""
+    return "MoR (never compacted)" if name == "never" else f"MoR (compacted {name})"
+
+
+def wl_compaction_chart(d, reads, ref, shown=("never", "every 10 writes", "every 3 writes"),
                         width=300, height=150):
     """MoR at the `shown` compaction intervals as snapshots are added: each kind of read's latency
-    at every probe, a column per store, beside `ref` (a design's name in d, dashed, uncompacted);
-    and what the table stores with every snapshot kept, over its live bytes (`stored`: name, step,
-    stored). d is wl_snapshots()'s frame, its names the intervals (WL_INTERVALS) and ref. More than
-    three intervals tangle: reads every 5 writes catch each at another point of its cycle."""
+    at every probe, a column per store, beside `ref` (a design's name in d, dashed, uncompacted).
+    d is wl_snapshots()'s frame, its names the intervals (WL_INTERVALS) and ref. More than three
+    intervals tangle: reads every 5 writes catch each at another point of its cycle."""
     names = [n for n in WL_INTERVALS if n in set(d.name) and n in shown]
     fam = d.drop_duplicates("name").set_index("name").family
-    ref_name = f"{ref}, no compaction"
-    series = [f"MoR, {n}" if n == "never" else f"MoR compacted {n}" for n in names]
+    ref_name = ref
+    series = [wl_interval_series(n) for n in names]
     label = dict(zip(names, series)) | {ref: ref_name}
     color = alt.Color("series:N", title=None, sort=[*series, ref_name],
-                      legend=alt.Legend(orient="bottom", direction="horizontal", symbolStrokeWidth=2),
+                      legend=alt.Legend(orient="bottom", direction="horizontal", symbolStrokeWidth=2,
+                                        labelLimit=320),
                       scale=alt.Scale(domain=[*series, ref_name],
                                       range=[*[WL_INTERVAL_COLORS[WL_INTERVALS.index(n)] for n in names],
                                              WL_COLOR[fam[ref]]]))
     dash = alt.StrokeDash("series:N", legend=None, scale=alt.Scale(
         domain=[*series, ref_name], range=[[1, 0]] * len(series) + [[5, 3]]))
-    x = alt.X("step:Q", title="snapshots (writes since the initial load)",
-              scale=alt.Scale(domain=[0, 30], nice=False), axis=alt.Axis(values=list(range(0, 31, 5))))
     tip = ["Store", "series", "what", "step", alt.Tooltip("s:Q", format=".2f")]
 
     def graph(what):
         g = d[(d.what == what) & d.name.isin([*names, ref])].assign(series=lambda x: x.name.map(label))
         y = alt.Y("s:Q", title="read latency (s)", scale=alt.Scale(zero=True))
         lines = alt.Chart(g).mark_line(strokeWidth=2, point=alt.OverlayMarkDef(size=40)).encode(
-            x=x, y=y, color=color, strokeDash=dash, tooltip=tip)
-        title = what[0].upper() + what[1:]
+            x=WL_SNAPSHOT_X, y=y, color=color, strokeDash=dash, tooltip=tip)
         return (lines.properties(width=width, height=height)
                 .facet(column=alt.Column("Store:N", title=None, sort=WL_STORES))
-                .properties(title=alt.Title(title, anchor="start")))
+                .properties(title=alt.Title(_cap(what), anchor="start")))
 
-    st = stored[stored.name.isin(names)].assign(series=lambda x: x.name.map(label))
-    sc = alt.Chart(st).mark_line(strokeWidth=2, point=alt.OverlayMarkDef(size=30)).encode(
-        x=x, y=alt.Y("stored:Q", title="stored ÷ live bytes", scale=alt.Scale(zero=True)), color=color,
-        tooltip=["series", "step", alt.Tooltip("stored:Q", format=".2f")]).properties(
-        width=width, height=height,
-        title=alt.Title("What the table stores, every snapshot kept (the same on both stores)", anchor="start"))
-    return alt.vconcat(*[graph(WL_READ[r]) for r in reads], sc)
+    return alt.vconcat(*[graph(WL_READ[r]) for r in reads])
 
 
-def wl_stored(spec):
-    """What MoR's table stores after every write, every snapshot kept, over its live bytes, for each
-    (configuration, interval name) of spec: havoc's runs, whose table states every cloud run and
-    twin repeats exactly."""
-    d = q("""SELECT r.label, s.step, s.stored_bytes / s.live_bytes AS stored
+def wl_written(spec):
+    """What each (configuration, arm, name) of spec has written after every write, in GB: its
+    writes' bytes and its compactions', from the initial load on (0 at snapshot 0). Havoc's runs;
+    the same on both stores, since every cloud run sends what havoc's run of its configuration
+    counts. With nothing deleted, it is also what the store holds beyond the initial load while
+    every snapshot is kept."""
+    d = q("""SELECT r.label, s.arm, s.step, sum(s.bytes_written) / 1e9 AS gb
              FROM steps s JOIN canonical_runs r USING (run_id)
-             WHERE r.host = 'havoc' AND s.phase = 'state' AND s.arm = 'mor-v3' AND list_contains($l, r.label)
-             ORDER BY 1, 2""", l=[l for l, _ in spec])
-    return d.assign(name=d.label.map(dict(spec)))
+             WHERE r.host = 'havoc' AND list_contains($l, r.label)
+               AND ((s.phase = 'batch' AND s.step >= 1) OR s.phase = 'compact')
+             GROUP BY ALL ORDER BY 1, 2, 3""", l=sorted({l for l, _, _ in spec}))
+    names = {(l, a): n for l, a, n in spec}
+    d["name"] = [names.get(k) for k in zip(d.label, d.arm)]
+    d = d[d.name.notna()]
+    d["gb"] = d.groupby(["label", "arm"]).gb.cumsum()
+    start = d.drop_duplicates(["label", "arm"]).assign(step=0, gb=0.0)
+    return pd.concat([start, d]).sort_values(["label", "arm", "step"]).reset_index(drop=True)
 
 
-def wl_compaction_costs(spec, P, cm, st):
+def wl_written_chart(d, colors, shapes=None, dashed=(), width=420, height=180):
+    """Data written as snapshots are added (d: wl_written()), one line per name, `colors` (and
+    `shapes`) by name in legend order, the names in `dashed` dashed."""
+    names = [n for n in colors if n in set(d.name)]
+    legend = alt.Legend(orient="bottom", direction="horizontal", title=None, symbolStrokeWidth=2, labelLimit=320)
+    enc = dict(x=WL_SNAPSHOT_X, y=alt.Y("gb:Q", title="data written (GB)", scale=alt.Scale(zero=True)),
+               color=alt.Color("name:N", sort=names, legend=legend,
+                               scale=alt.Scale(domain=names, range=[colors[n] for n in names])),
+               strokeDash=alt.StrokeDash("name:N", sort=names, legend=None, scale=alt.Scale(
+                   domain=names, range=[[5, 3] if n in dashed else [1, 0] for n in names])),
+               tooltip=["name", "step", alt.Tooltip("gb:Q", format=".3f")])
+    if shapes:
+        enc["shape"] = alt.Shape("name:N", sort=names, legend=legend,
+                                 scale=alt.Scale(domain=names, range=[shapes[n] for n in names]))
+    return alt.Chart(d).mark_line(strokeWidth=2, point=alt.OverlayMarkDef(size=25)).encode(**enc).properties(
+        width=width, height=height)
+
+
+def wl_written_table(d, names):
+    """wl_written_chart()'s table twin: GB written by each name by every 5th snapshot."""
+    from labbook import table
+
+    t = d[d.step % 5 == 0].pivot_table(index="step", columns="name", values="gb")
+    t = t.reindex(columns=[n for n in names if n in t.columns])
+    return table(t.reset_index().rename(columns={"step": "snapshot"}).round(3),
+                 caption="Data written (GB) by every 5th snapshot, from the initial load on")
+
+
+def wl_compaction_written_chart(wr, shown=("never", "every 10 writes", "every 3 writes")):
+    """What MoR writes at the `shown` compaction intervals (wr: wl_written(), its names the
+    intervals), as wl_written_chart() draws it, colored as wl_compaction_chart() colors them."""
+    d = wr[wr.name.isin(shown)].assign(name=lambda x: x.name.map(wl_interval_series))
+    colors = {wl_interval_series(n): c for n, c in zip(WL_INTERVALS, WL_INTERVAL_COLORS) if n in shown}
+    return wl_written_chart(d, colors)
+
+
+def wl_compaction_costs(spec, P, cm, wr):
     """Each compaction interval's costs per store, for spec's (configuration, interval name): P's
     means (tune.policies() or tune.per_write(), with Store; a write without and with its compactions
     spread over the writes, each read), a compaction's mean and the range read after 30 writes
-    (cm, wl_snapshots()), and what the table stores after 30 writes over its live bytes (st,
-    wl_stored())."""
+    (cm, wl_snapshots()), and the data written over the 30 writes (wr, wl_written())."""
     rows = []
     for label, name in spec:
-        stored = st[(st.label == label) & (st.step == 30)].stored.iloc[0]
+        gb30 = wr[(wr.label == label) & (wr.arm == "mor-v3") & (wr.step == 30)].gb.iloc[0]
         for _, r in P[(P.label == label) & (P.arm == "mor-v3")].iterrows():
             g = cm[(cm.Store == r.Store) & (cm.name == name)]
             comp = g[g.what == "a compaction"].s
@@ -1975,7 +1988,7 @@ def wl_compaction_costs(spec, P, cm, st):
                          "a compaction": comp.mean() if len(comp) else np.nan,
                          "range read": r.window_ms / 1e3,
                          "range read after 30": g[(g.what == WL_READ["window_s"]) & (g.step == 30)].s.iloc[0],
-                         "full scan": r.full_ms / 1e3, "stored ÷ live": stored})
+                         "full scan": r.full_ms / 1e3, "GB written": gb30})
     out = pd.DataFrame(rows)
     out["_s"] = out.Store.map(WL_STORES.index)
     return out.sort_values("_s", kind="stable").drop(columns="_s").round(3)
@@ -1984,16 +1997,19 @@ def wl_compaction_costs(spec, P, cm, st):
 def wl_parts_chart(d, whats, names, parts=WL_PARTS, colors=None):
     """Where each design's time goes: a stacked bar per design (d: Store, name, what, part, s, and
     pord, the part's place in `parts`), a panel per kind of operation and a row per store; each
-    part colored by `colors` (WL_PCOL by default)."""
+    part colored by `colors` (WL_PCOL by default). The legend lists the parts d has."""
     colors = colors or WL_PCOL
+    parts = [p for p in parts if p in set(d.part)]
+
     def panel(w):
         return alt.Chart(d[d.what == w]).mark_bar().encode(
             x=alt.X("s:Q", title="seconds", stack="zero"),
             y=alt.Y("name:N", title=None, sort=names),
             color=alt.Color("part:N", title=None, sort=parts,
                             scale=alt.Scale(domain=parts, range=[colors[p] for p in parts]),
-                            legend=alt.Legend(orient="top", columns=3, labelLimit=260)),
+                            legend=alt.Legend(orient="top", columns=len(parts), labelLimit=260)),
             order=alt.Order("pord:Q"),
             tooltip=["Store", "name", "what", "part", alt.Tooltip("s:Q", format=".2f")],
         ).properties(width=190).facet(row=alt.Row("Store:N", sort=WL_STORES, title=None)).properties(title=w)
     return alt.hconcat(*[panel(w) for w in whats]).resolve_scale(x="independent", y="independent")
+

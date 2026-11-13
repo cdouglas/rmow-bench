@@ -30,7 +30,7 @@ drop every one of its rows. Our reader plans no split for a row group whose rows
 deletion vector all covers, nor for a file whose vector covers every row, and RMoR's writers skip
 them the same way when they scan for the rows a write changes. The sorted read skips them too (since
 2026-11-10; before, it fetched every row group of a file it did not skip whole, charging RMoR and
-the deferred merges for the row groups they had copied out). Our check asks the vector's bitmap
+RMoR-density for the row groups they had copied out). Our check asks the vector's bitmap
 whether each row group's range is deleted whole, at the cost of a few of its containers. The
 results pages take RMoR's times from runs with this check; earlier runs tested each row position in
 turn, which cost RMoR seconds of each write and read (RMoR re-measured, 2026-11-04: docs/LESSONS.md).
@@ -53,7 +53,7 @@ between its smallest and largest key, which spans most of the table when the cha
 several regions. Our writers prune files by each changed key, and since 2026-11-10 row groups too:
 they read the key column only of the row groups whose statistics, in the footer the writer already
 holds, may hold one of the keys (`layout.locate` `keys`). It helps MoR, RMoR, RMoW-external and
-the deferred merges alike; RMoW-append finds its rows from its footers' statistics alone.
+RMoR-density alike; RMoW-append finds its rows from its footers' statistics alone.
 
 **Conditional appends.** RMoW-append and RMoW-external extend an existing object, which Iceberg's
 FileIO cannot do. Our fork's `SupportsAtomicOperations` appends at the object's length on the
