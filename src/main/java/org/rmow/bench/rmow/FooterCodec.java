@@ -149,7 +149,8 @@ public final class FooterCodec {
     FileMetaData base = previous != null ? previous : regions.get(0);
     FileMetaData merged = copyWithoutRowGroups(base);
 
-    Map<Integer, FileMetaData> inPlace = new HashMap<>();
+    // a dropped row group's place may go to several regions (a row group cut in pieces), in order
+    Map<Integer, List<FileMetaData>> inPlace = new HashMap<>();
     List<FileMetaData> last = new ArrayList<>();
     for (int j = 0; j < regions.size(); j++) {
       FileMetaData region = regions.get(j);
@@ -159,9 +160,11 @@ public final class FooterCodec {
       Integer slot = slots == null ? null : slots.get(j);
       if (slot == null) {
         last.add(region);
-      } else if (previous == null || !drop.contains(slot) || inPlace.put(slot, region) != null) {
+      } else if (previous == null || !drop.contains(slot)) {
         throw new IllegalArgumentException(
             "Region " + j + " cannot take the place of row group " + slot);
+      } else {
+        inPlace.computeIfAbsent(slot, s -> new ArrayList<>()).add(region);
       }
     }
 
@@ -169,9 +172,9 @@ public final class FooterCodec {
     if (previous != null) {
       List<RowGroup> old = previous.getRow_groups();
       for (int i = 0; i < old.size(); i++) {
-        FileMetaData region = inPlace.get(i);
-        if (region != null) {
-          region.getRow_groups().forEach(rg -> groups.add(shallowCopy(rg)));
+        List<FileMetaData> placed = inPlace.get(i);
+        if (placed != null) {
+          placed.forEach(r -> r.getRow_groups().forEach(rg -> groups.add(shallowCopy(rg))));
         } else if (!drop.contains(i)) {
           groups.add(shallowCopy(old.get(i)));
         }

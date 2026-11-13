@@ -1,0 +1,19 @@
+{
+  "description": "Every design on both workloads at Iceberg's sizes (docs/HYPOTHESES.md, 2026-11-12, W1-W3): the D1-D4 table (205,480,000 rows, 128 MiB row groups in 512 MiB files), one design a job: MoR, MoR compacted as Iceberg plans its bin-pack (checked after every write, 5 files), RMoR, RMoW-external and RMoR-density with the cut, RMoW-append; on the updates (150,000 changes a write) and the inserts (350,000 a write, the region designs placing them by the event-time merge). 240 writes, but 30 for RMoW-append on the updates and for RMoR, RMoW-external and RMoW-append on the inserts, which copy whole row groups every write. Range reads after every write, full and sorted reads every 10, under cached-skip. Payload checks off, requests and held memory logged.",
+  "flags": ["--log-requests", "--log-held"],
+  "cores_per_job": 3,
+  "jobs": [
+    {"config": "configs/w128-upd-mor.json", "heap": "32g", "store_gib": 25},
+    {"config": "configs/w128-upd-compact.json", "heap": "32g", "store_gib": 60},
+    {"config": "configs/w128-upd-rmor.json", "heap": "32g", "store_gib": 60},
+    {"config": "configs/w128-upd-external.json", "heap": "32g", "store_gib": 60},
+    {"config": "configs/w128-upd-append.json", "heap": "32g", "store_gib": 45},
+    {"config": "configs/w128-upd-density.json", "heap": "32g", "store_gib": 40},
+    {"config": "configs/w128-ing-mor.json", "heap": "32g", "store_gib": 20},
+    {"config": "configs/w128-ing-compact.json", "heap": "32g", "store_gib": 30},
+    {"config": "configs/w128-ing-rmor.json", "heap": "32g", "store_gib": 90},
+    {"config": "configs/w128-ing-external.json", "heap": "32g", "store_gib": 90},
+    {"config": "configs/w128-ing-append.json", "heap": "32g", "store_gib": 90},
+    {"config": "configs/w128-ing-density.json", "heap": "32g", "store_gib": 40}
+  ]
+}

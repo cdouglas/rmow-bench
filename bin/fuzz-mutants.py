@@ -4,7 +4,8 @@ and fuzzes it with a fixed budget of seeds. Each mutant must be caught (a seed f
 it names; `none` (no mutant) must stay clean. Run from the repository root, after `mvn package`
 (the copies run on a copy of target/lib/, taken at the start):
 
-    bin/fuzz-mutants.py [--seeds 60] [--workers 6] [--profile mixed|heavy] [--out DIR] [NAME ...]
+    bin/fuzz-mutants.py [--seeds 60] [--workers 6] [--profile mixed|heavy|event-time] [--out DIR]
+        [NAME ...]
 
 A check named with a leading `?` is measured, not required: the mutant is subtler than random
 draws can be expected to reach at this budget, and is reported either way. A mutant's check may
@@ -21,6 +22,10 @@ group): 8 and 2 of the 60 seeds. The sorted read's skip and the locate by key (2
 group (layout.eagerBytes); at the 1 MiB default, none of 60. Under the heavy profile (2026-11-11,
 0942497) the sorted read's skip 5 of 60 and the locate by key none of 60, so the locate by key is
 measured there, not required (at one seed in 60, a round of 60 misses it about a third of the time).
+The event-time merge's five (2026-11-12, under --profile event-time): an insert joining the next
+row group 59 of 60 seeds, a cut losing a row 39, a cut splitting one event time 9, the batch's
+file taking the joined inserts 46, and RMoW-external's index left behind by the rows its footers
+move up 1 (by the check after each such write; none of 60 before it).
 
 Each mutant is an exact-text replacement anchored in the code as this file's last commit left it;
 a replacement that no longer matches is reported, not skipped. Results: DIR/<mutant>/summary-*.jsonl
@@ -140,6 +145,43 @@ MUTANTS = {
         {"mixed": "run", "heavy": "?run"},
         "the locate by key misses a row group whose only changed key is the first past its least id",
     ),
+    # the event-time merge (2026-11-12): run with --profile event-time, whose seeds all use it;
+    # the other profiles seldom or never draw it
+    "event-time-joins-next": (
+        ARMS + "EventTimeRegions.java",
+        "    Map.Entry<Long, Region> e = byMin.floorEntry(ts);",
+        "    Map.Entry<Long, Region> e = byMin.higherEntry(ts);",
+        {"event-time": "run", "mixed": "?run", "heavy": "?run"},
+        "an insert joins the row group after the one that holds its event time",
+    ),
+    "event-time-cut-drops-a-row": (
+        ARMS + "EventTimeRegions.java",
+        "    out.add(from == 0 ? rows : new ArrayList<>(rows.subList(from, n)));",
+        "    out.add(from == 0 ? rows : new ArrayList<>(rows.subList(from, n - 1)));",
+        {"event-time": "run", "mixed": "?run", "heavy": "?run"},
+        "a row group the event-time merge cuts loses its last row",
+    ),
+    "event-time-cut-splits-ties": (
+        ARMS + "EventTimeRegions.java",
+        "    while (c > 0 && c < rows.size() && log.ts(rows.get(c)[0]) == log.ts(rows.get(c - 1)[0])) {",
+        "    while (false && c < rows.size() && log.ts(rows.get(c)[0]) == log.ts(rows.get(c - 1)[0])) {",
+        {"event-time": "run", "mixed": "?run", "heavy": "?run"},
+        "a cut falls between two rows of one event time, so two row groups share it",
+    ),
+    "event-time-elide-keeps-keys": (
+        ARMS + "TailCowArm.java",
+        "          if (oldFirst != newFirst && r != null) {",
+        "          if (false && oldFirst != newFirst && r != null) {",
+        {"event-time": "run", "mixed": "?run", "heavy": "?run"},
+        "RMoW-external's index keeps the row groups a footer moved up at their old rows",
+    ),
+    "event-time-writes-joined-inserts": (
+        ARMS + "TailCowArm.java",
+        "      if (!joined.contains(id)) {\n        rows.add(new long[] {id, 0});",
+        "      if (joined.contains(id)) {\n        rows.add(new long[] {id, 0});",
+        {"event-time": "run", "mixed": "?run", "heavy": "?run"},
+        "the batch's file takes the inserts its row groups took, not those none did",
+    ),
     "mor-stats-miss-deletes": (
         ARMS + "MorArm.java",
         "        files.size() + deleteObjects.size(),",
@@ -216,7 +258,8 @@ def main():
     ap.add_argument("--seeds", type=int, default=60)
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--heap", default="3g")
-    ap.add_argument("--profile", default="mixed", help="the fuzzer's draws: mixed or heavy")
+    ap.add_argument("--profile", default="mixed",
+                    help="the fuzzer's draws: mixed, heavy or event-time")
     ap.add_argument("--out", default="results/fuzz/calibration")
     ap.add_argument("names", nargs="*")
     a = ap.parse_args()

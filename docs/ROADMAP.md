@@ -500,8 +500,12 @@ lower.
     RMoR's 4-write units hold 0.41 of the appending arms' share at p99 5 and 20, RMoW-append's
     all of it. A larger seal (or fan-out) would reach the top level;
   - **leveled, by event time:** a writer that merges each late row into the row group its event
-    time falls in, so no two row groups overlap and a sorted read concatenates. Not built; the
-    model puts it at 746 MB a write at p99 5.
+    time falls in, so no two row groups overlap and a sorted read concatenates. Built 2026-11-12
+    (`layout.inserts` `event-time`, `EventTimeRegions`) for RMoW-append, RMoR, RMoW-external and
+    RMoR-density, and registered with the 128 MiB suite (below). The model
+    (`analysis/event_time_model.py`, checked against the harness at a small scale) puts it at
+    2.3 GB a write at 128 MiB when every late row merges at once (MoR: 10.5 MB), from lateness's
+    long tail, and at 64 MB under RMoR-density's θ 0.06.
 - [x] **Reads of a range** (registered 2026-11-07, HYPOTHESES.md Q1–Q4; ran 2026-11-08).
   `reads.windows` reads five 1% windows by key or event time at each probe; campaign
   `docker/campaigns/windows.json` on havoc and the same `configs/win-*` on the laptop, for
@@ -536,18 +540,24 @@ lower.
   groups came out 19–44% low). Train on a row-group sweep, or count row groups read per phase.
 - [ ] **A writer that tunes itself**: the same prices could drive the writer, merging a row group
   when the reads expected before it next changes cost more than rewriting it.
+- [ ] **Every design on both workloads, at Iceberg's sizes** (registered 2026-11-12,
+  HYPOTHESES.md W1–W3). One definition of each design, on the updates and the inserts, at
+  D1–D4's 128 MiB row groups: `configs/w128-*.json`, campaign `docker/campaigns/w128.json` on
+  havoc (the user's runs). Built for it: the event-time merge (above), MoR compacted as Iceberg
+  plans its bin-pack after every write (`compactMinInputFiles`), and range reads after every
+  write (`reads.rangeEvery`). Before the runs: a fuzz round with the final build on havoc, and
+  the mutants. The designs that copy whole row groups every write run 30 writes, not 240.
 - [ ] **Reads at every snapshot, in a final cloud run** (decided 2026-11-12): every run so far
   reads the table only after every 5th write (`reads.every` 5, one setting for every kind of read;
   `Runner.java`, the probe). Writes are measured at every snapshot. So the workloads pages'
   compaction charts sample a sawtooth every 5 snapshots. Compacted every 10 writes, the reads fall
   alternately right after a compaction and halfway through a cycle; every 3, 6 or 12 writes, at
   shifting points. If there is a final cloud run, make the most of its writes and read at every
-  snapshot. A knob that runs the range reads and the newest 1% at every snapshot, while the full
-  scan and the sorted read stay every 5, keeps it cheap: a range read takes about 0.5 s on S3
-  Express. Reads took 10.5 of `wl-upd-base`'s 33 minutes there at 7 read points, so every kind at
-  every snapshot would roughly double the run. Needs the harness change, a fuzz round and a
-  registered control (the extra reads change no write record), then havoc and laptop references
-  before the cloud.
+  snapshot. The knob is built (`reads.rangeEvery`, 2026-11-12): the range reads and the newest 1%
+  at every snapshot, while the full scan and the sorted read stay every `reads.every`. A range
+  read takes about 0.5 s on S3 Express, against 10.5 of `wl-upd-base`'s 33 minutes there for
+  every kind of read at 7 read points. Its control (the extra reads change no write record) is
+  `SuiteKnobsTest`; the 128 MiB suite uses it on havoc first.
 - [x] **The write-up of the two workloads** (`split`, `seal`, `windows`; 2026-11-09,
   [lab/pages/workloads.md](../lab/pages/workloads.md), Results). Simulated, at 16 MiB row groups:
   each design's write against its range read and full scan, the inserts as a choice of when to

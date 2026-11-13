@@ -640,6 +640,29 @@ public abstract class MorArm implements Arm {
     return out;
   }
 
+  /**
+   * Whether Iceberg's bin-pack rewrites the files {@code groups} hold, as one file group ({@code
+   * BinPackRewriteFilePlanner}, whose groups reach 100 GB): at least {@code minInputFiles} of them
+   * and more than one, or more than one and over the target size, or one with at least {@code
+   * compactDeleteRatio} of its rows deleted.
+   */
+  private boolean icebergRewrites(List<List<Integer>> groups, int minInputFiles) {
+    LayoutSpec layout = ctx.layout();
+    int count = 0;
+    long bytes = 0;
+    boolean deleteHeavy = false;
+    for (List<Integer> g : groups) {
+      for (int k : g) {
+        count++;
+        bytes += files.get(k).fileSizeInBytes();
+        deleteHeavy |= deleteRatio(k) >= layout.compactDeleteRatio;
+      }
+    }
+    return (count > 1 && count >= minInputFiles)
+        || (count > 1 && bytes > layout.targetFileBytes)
+        || deleteHeavy;
+  }
+
   /** Whether compaction may rewrite data file {@code k} (TailCoW keeps its open tail files). */
   protected boolean compactable(int k) {
     return true;
@@ -685,9 +708,15 @@ public abstract class MorArm implements Arm {
     if (!group.isEmpty()) {
       groups.add(group);
     }
+    Integer minInputFiles = layout.compactMinInputFiles;
+    if (minInputFiles != null && !icebergRewrites(groups, minInputFiles)) {
+      return;
+    }
     int n = 0;
     for (List<Integer> g : groups) {
-      if (g.size() == 1 && deleteRatio(g.get(0)) < layout.compactDeleteRatio) {
+      if (minInputFiles == null
+          && g.size() == 1
+          && deleteRatio(g.get(0)) < layout.compactDeleteRatio) {
         continue;
       }
       List<long[]> rows = new ArrayList<>();
@@ -846,16 +875,25 @@ public abstract class MorArm implements Arm {
     return files.get(k).fileSizeInBytes();
   }
 
+  /**
+   * The footprint. Reclaimable data bytes are those of files the current version does not use at
+   * all: a file it uses stays whole, so the row groups a footer appended to it no longer lists are
+   * dead bytes inside a live object, not reclaimable. Before 2026-11-12 they were counted
+   * reclaimable, so the state records of RMoW-external (and RMoR-C with footers) overstate what
+   * expiring old snapshots frees.
+   */
   @Override
   public ArmStats stats() {
     long dataBytes = 0;
     long liveDataBytes = 0;
+    long liveFileBytes = 0;
     long rowGroups = 0;
     for (int k = 0; k < files.size(); k++) {
       DataFile df = files.get(k);
       dataBytes += df.fileSizeInBytes();
       if (live.get(k)) {
         liveDataBytes += liveDataBytes(k);
+        liveFileBytes += df.fileSizeInBytes();
         rowGroups += df.splitOffsets() == null ? 1 : df.splitOffsets().size();
       }
     }
@@ -871,7 +909,7 @@ public abstract class MorArm implements Arm {
         files.size() + deleteObjects.size(),
         dataBytes + storedDeleteBytes,
         liveDataBytes + liveDeleteBytes,
-        (dataBytes - liveDataBytes) + (storedDeleteBytes - liveObjectBytes),
+        (dataBytes - liveFileBytes) + (storedDeleteBytes - liveObjectBytes),
         rowGroups,
         live.cardinality(),
         deletes.size(),

@@ -1575,3 +1575,120 @@ prices them:
 - **The forecast's pace:** it prices CPU at the laptop's pace. The region designs' writes are
   55–64% CPU in the forecast, against MoR's 26–41%, so the VMs' pace moves their writes more than
   MoR's.
+
+## Every design on both workloads, at Iceberg's sizes (registered 2026-11-12)
+
+**What it decides:** whether each design's mechanism, defined once and run on both workloads at
+Iceberg's 128 MiB row groups, spares readers what it costs writers. The runs so far did not
+exercise the mechanisms:
+- **The inserts never merged a region.** A region was a range of ids, and every insert takes a new
+  id, so no write rewrote one. The region designs differed there only by a tail merge.
+- **On the updates at 16 MiB, a region (513,700 rows) is about one row group,** so copying part of
+  a row group (the cut, RMoR-density) did not matter. At 128 MiB it does (D1–D4, above).
+
+**What is new (built 2026-11-12):**
+- **The event-time merge** (`layout.inserts` `event-time`, `EventTimeRegions`). The region designs
+  put each insert into the live row group whose event-time range holds it: in a gap, the one
+  before; before the first, the first. They rewrite that row group as they rewrite one an update
+  changes, so no two row groups overlap in event time.
+  - A row group grown past the rows of a full one (the initial load's largest) is cut, never
+    between two rows of one event time. The newest, which rows on time join, is cut into full row
+    groups and the rest. An older one, which only late rows grow, is cut once it holds two full
+    ones' rows, into equal parts.
+  - RMoR-density merges a row group once the rows that join it, those waiting included, reach θ of
+    its rows. Until then they wait in delta row groups, as updated rows do.
+  - The writer finds the row groups from its index of them, and reads the footer of each file
+    whose event-time bounds overlap them (phase `locate`), checking each placement against the
+    footer's statistics.
+  - Moot without inserts. Refused with a workload that also updates or deletes, and with
+    compaction (not built for them).
+- **MoR (compacted) as Iceberg plans it** (`compactEvery` 1, `compactMinInputFiles` 5). After every
+  write, the small files (under 0.75 of the target size) and those with 30% of their rows deleted
+  form one group. It is rewritten when it holds at least 5 files, or more than one and over the
+  target size, or a file with 30% deleted: `BinPackRewriteFilePlanner`'s defaults (its groups reach
+  100 GB). Before, MoR compacted every 10 writes, any two small files.
+- **Range reads at every write** (`reads.rangeEvery` 1): the newest 1% and the five 1% windows
+  after every write, and the full read and the sorted read every 10.
+
+**The model** (`analysis/event_time_model.py`, the inserts; its docstring has the check against
+the harness at a small scale, which it matched within 10%):
+- **At 128 MiB** (3.54 million rows a row group, 58 in the initial load, 30.1 bytes a row), the
+  event-time merge with every late row merged at once (θ 0: RMoR, RMoW-external, RMoW-append)
+  rewrites 2.3 GB a write, about 20 row groups, where MoR writes 10.5 MB.
+- **Why:** lateness is lognormal, median 0.05 writes and p99 5, with a long tail: of a write's
+  350,000 rows about 1,300 come more than 10 writes late and 21 more than 100. Each reaches back to
+  another old row group, which the write rewrites whole. Over 240 writes that is 552 GB.
+- **RMoR-density** (θ 0.06) writes 64 MB a write, 15 GB over 240 writes.
+- **The updates** as D1–D4 measured them: the cut 172 MB a write, RMoR-density cut 56.6, whole
+  copies 906.
+
+**Setup:**
+- **Configurations:** `configs/w128-{upd,ing}-{mor,compact,rmor,external,append,density}.json`,
+  one design each.
+  - **The table** of D1–D4: 205,480,000 initial rows in event-time order, 128 MiB row groups in
+    512 MiB files, seed 1. Updates: D1–D4's 150,000 changes a write. Inserts: 350,000 a write,
+    lateness median 0.05 writes and p99 5.
+  - **The designs:** MoR (`mor-v3`), MoR (compacted) as above, RMoR (`rmor-c-kept`), RMoW-external
+    (`rmor-c-footer-kept`), RMoW-append (`rmow-c`) and RMoR-density (`rmor-density`, θ 0.06, a
+    delta row group per region). The cut on RMoR, RMoW-external and RMoR-density (it is not built
+    for RMoW-append). The event-time merge on the four region designs.
+  - **240 writes,** except where every write copies whole 128 MiB row groups: RMoW-append on the
+    updates (906 MB a write, D2), and RMoR, RMoW-external and RMoW-append on the inserts (2.3 GB
+    in the model). These run the first 30 writes of the same op log; 240 would store 217 and 552 GB.
+  - **Reads,** under `cached-skip` with the sorted read: the newest 1% and five 1% windows (by id on
+    the updates, by event time on the inserts) after every write; the full read and the sorted read
+    every 10 writes. Payload checks off.
+- **Where:** on havoc (campaign `docker/campaigns/w128.json`, the user's runs), with requests and
+  held memory logged. As for D1–D4, the claims are bytes, which need no laptop twins.
+
+**How it is judged:**
+- **When:** after the last write (the 240th, or the 30th), under `cached-skip`.
+- **A window:** the mean of the five, or the one named.
+- **A write's bytes:** `write` and `delete-write`, and `compact` for MoR (compacted), a mean over
+  the run's writes.
+- **Live bytes:** as D1–D4.
+
+**Predicted:**
+- **W1 (inserts, merging every late row): over their 30 writes, RMoR, RMoW-external and RMoW-append
+  write at least 100 times MoR's bytes a write** (model 2,317 against 10.5 MB, 220 times), **and
+  RMoR-density over its 240 at most 10 times** (64 MB, 6.1 times).
+- **W2 (inserts, what readers get): after the 240th write, RMoR-density's window at 0.9 of the
+  event-time span, among the inserted rows, reads at most 3 times its live bytes and at most a
+  third of MoR's bytes, and its sorted read holds at most 0.4 GB where MoR's holds at least 1 GB.**
+  - MoR's window reads the batch files written after its rows, about 80 of 10.5 MB, whose bounds
+    all reach back past it: about 10 times its 87 MB live.
+  - RMoR-density's reads one or two row groups and the delta row groups waiting for them: 1.2 to
+    2.5 times live.
+  - Every MoR batch file's most belated rows reach back to the table's start, so its sorted read
+    opens all 240 at once (2.5 GB). RMoR-density's opens a row group at a time, and its delta row
+    groups.
+- **W3 (updates, D1–D4 again, now with RMoW-external): after the 240th write, RMoR's,
+  RMoW-external's and RMoR-density's windows read at most 1.3, 1.3 and 2.2 times their live bytes,
+  and MoR's at least 8 times** (D3 and D4 measured 1.16 and 1.60, D1 14.4). **RMoW-external writes
+  within 5% of RMoR's bytes a write:** the same copies, with a footer appended where RMoR writes a
+  DV.
+
+**Controls:**
+- **The op logs:** each run replays its workload's 240-write op log, or its first 30 writes (the
+  SHA-256 of `oplog.bin` against a 30-write log of the same seed).
+- **The build:** with the new knobs off, every arm sends what it sent before. Checked on the laptop
+  on `wl-upd-compact` and `wl-ing-base` against their runs at 0942497.
+- **Range reads change no write:** `SuiteKnobsTest` checks every write record equal with and
+  without `rangeEvery`.
+
+**Measured, not judged:**
+- MoR (compacted) under Iceberg's rule on both workloads: how often it compacts, what it writes,
+  and its windows;
+- the θ 0 designs' reads on the inserts: over 30 writes the inserted rows are 5% of the table, so
+  only the newest 1% and the sorted read fall among them;
+- requests, the newest 1%, held memory, row groups and files;
+- time, simulated on S3 Express and Azure Blob as before.
+
+**Limits:**
+- **One seed, one lateness.** No watermark drops late rows, as a stream processor past its allowed
+  lateness would; the θ 0 cost on the inserts comes from that tail.
+- **30 writes** for the designs that copy whole row groups every write, so no steady state.
+- **What is not built:** the event-time merge with updates or deletes, or with compaction; the cut
+  for RMoW-append.
+- **The writer's index:** the region designs find their row groups from an index of them, as RMoW
+  keeps its footers; an engine without one would read more footers.

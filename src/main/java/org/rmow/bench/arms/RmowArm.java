@@ -55,6 +55,13 @@ import org.rmow.bench.workload.Rows;
  * rewrite rows within their row group, so under {@code logical} every footer lists its row groups
  * in id order, which is checked after each append.
  *
+ * <p>With the event-time merge ({@code layout.inserts} {@code event-time}, {@link
+ * EventTimeRegions}) inserts do not go to the tail: each joins the row group whose event-time range
+ * holds it, which the batch rewrites as it rewrites one an update touches, and the tail policy is
+ * unused. A row group grown past the cap is written as several, in its place; the newest row
+ * group, which rows on time join, goes to the tail file, which rolls over as before, so each file
+ * holds a run of event time and its footer lists its row groups in event-time order.
+ *
  * <p>Files are appendable objects ({@link RmowFile}) or, in the {@code -split} arms, a new object
  * per version for its regions and another for its footer ({@link SplitFile}), which need no
  * append and leave whole objects to delete as versions expire, instead of dead regions inside one.
@@ -90,6 +97,11 @@ public final class RmowArm implements Arm {
   // what this batch's or compaction's writer holds (rows, regions waiting for their append);
   // null outside one
   private Held.Scope held;
+  // the event-time merge: whether it is on, its index of the live row groups (made at the load),
+  // and the batch's newest row group (-1: none)
+  private final boolean byEventTime;
+  private EventTimeRegions eventTime;
+  private long newestRg = -1;
 
   public RmowArm(ArmContext ctx, TailPolicy.Kind kind) {
     this(ctx, kind, false);
@@ -112,6 +124,10 @@ public final class RmowArm implements Arm {
     this.rgOfId = new long[(int) ctx.log().totalIds()];
     this.posInRg = new int[(int) ctx.log().totalIds()];
     Arrays.fill(rgOfId, -1);
+    this.byEventTime = EventTimeRegions.wanted(ctx);
+    if (byEventTime && split) {
+      throw new IllegalArgumentException("The event-time merge is not built for split files");
+    }
   }
 
   @Override
@@ -127,6 +143,8 @@ public final class RmowArm implements Arm {
   @Override
   public void load(List<InitialLoad.InitialFile> initial) throws IOException {
     long largest = 0;
+    long largestRows = 0;
+    List<long[]> ranges = new ArrayList<>(); // with the event-time merge: {row group, min, max ts}
     for (InitialLoad.InitialFile f : initial) {
       LogicalFile file =
           split
@@ -142,15 +160,27 @@ public final class RmowArm implements Arm {
           largest = Math.max(largest, FooterCodec.compressedSize(rgs.get(i)));
         }
         fileOfRg.put(rgIds.get(i), k);
+        long[] range = {rgIds.get(i), Long.MAX_VALUE, Long.MIN_VALUE};
         for (int j = 0; j < rgs.get(i).getNum_rows(); j++, id++) {
           rgOfId[(int) id] = rgIds.get(i);
           posInRg[(int) id] = j;
+          range[1] = Math.min(range[1], ctx.log().ts(id));
+          range[2] = Math.max(range[2], ctx.log().ts(id));
         }
+        ranges.add(range);
+        largestRows = Math.max(largestRows, rgs.get(i).getNum_rows());
       }
       tail = file.liveBytes() < ctx.layout().targetFileBytes ? k : -1;
     }
     if (largest > 0) {
       packBytes = largest;
+    }
+    if (byEventTime) {
+      eventTime =
+          new EventTimeRegions(largestRows > 0 ? largestRows : ctx.layout().rowGroupBytes / 40);
+      for (long[] r : ranges) {
+        eventTime.add(r[0], r[1], r[2]);
+      }
     }
     history.add(versions());
   }
@@ -163,15 +193,19 @@ public final class RmowArm implements Arm {
     return v;
   }
 
-  /** The changes a batch makes to one live row group, and its rows once read, as {id, version}. */
+  /**
+   * The changes a batch makes to one live row group (with the event-time merge, the inserts that
+   * join it), and its rows once read, as {id, version}.
+   */
   private static final class Touched {
     final Map<Long, Integer> updates = new HashMap<>();
     final Set<Long> deletes = new HashSet<>();
+    final List<Long> inserts = new ArrayList<>();
     List<long[]> rows;
 
-    /** The row group's rows after this batch's updates and deletes. */
+    /** The row group's rows after this batch's updates, deletes and inserts. */
     List<long[]> merged() {
-      List<long[]> out = new ArrayList<>(rows.size());
+      List<long[]> out = new ArrayList<>(rows.size() + inserts.size());
       for (long[] r : rows) {
         Integer v = updates.get(r[0]);
         if (v != null) {
@@ -179,6 +213,9 @@ public final class RmowArm implements Arm {
         } else if (!deletes.contains(r[0])) {
           out.add(r);
         }
+      }
+      for (long id : inserts) {
+        out.add(new long[] {id, 0});
       }
       return out;
     }
@@ -221,7 +258,16 @@ public final class RmowArm implements Arm {
   public void apply(OpLog.Batch b) throws IOException {
     footers.begin();
     if (ctx.layout().locatesByScan()) {
-      ctx.phases().run("locate", () -> locateByStats(b));
+      ctx.phases()
+          .run(
+              "locate",
+              () -> {
+                if (byEventTime) {
+                  locateInserts(b);
+                } else {
+                  locateByStats(b);
+                }
+              });
     }
 
     // every row group an update or delete touches is rewritten
@@ -240,7 +286,20 @@ public final class RmowArm implements Arm {
       }
     }
 
-    int newRows = b.insertIds().length;
+    // with the event-time merge, each insert joins its row group, and none goes to the tail
+    List<Long> unplaced = List.of();
+    if (byEventTime) {
+      Map<Long, List<Long>> placed = eventTime.assign(b.insertIds(), ctx.log());
+      List<Long> none = placed.remove(-1L);
+      unplaced = none == null ? List.of() : none;
+      for (Map.Entry<Long, List<Long>> e : placed.entrySet()) {
+        touched.computeIfAbsent(e.getKey(), k -> new Touched()).inserts.addAll(e.getValue());
+      }
+      newestRg = eventTime.newest() == null ? -1 : eventTime.newest().key();
+    }
+    List<Long> fresh = unplaced;
+
+    int newRows = byEventTime ? 0 : b.insertIds().length;
     TailPolicy.Plan plan =
         newRows > 0
             ? policy.plan((long) (newRows * bytesPerRow))
@@ -269,8 +328,12 @@ public final class RmowArm implements Arm {
             .part(
                 "write",
                 () -> {
+                  held.hold(Held.Kind.ROWS, t.inserts.size(), "inserts joining row group " + rg);
                   rewrite(rg, t, pending, idsOfNewRg);
-                  held.release(Held.Kind.ROWS, t.rows.size(), "row group " + rg + " rewritten");
+                  held.release(
+                      Held.Kind.ROWS,
+                      t.rows.size() + t.inserts.size(),
+                      "row group " + rg + " rewritten");
                 });
         t.rows = null;
       }
@@ -279,7 +342,9 @@ public final class RmowArm implements Arm {
         ctx.phases().part("merge-read", () -> t.rows = readRowGroup(rg));
       }
       ctx.phases()
-          .part("write", () -> writeRegions(b, touched, plan, mergeIds, pending, idsOfNewRg));
+          .part(
+              "write",
+              () -> writeRegions(b, touched, plan, mergeIds, fresh, pending, idsOfNewRg));
     } finally {
       held.close();
       held = null;
@@ -363,6 +428,10 @@ public final class RmowArm implements Arm {
       throws IOException {
     Pending p = pending(pending, fileOfRg.get(rg));
     p.drop.add(rg);
+    if (byEventTime) {
+      placeByEventTime(rg, t.merged(), p, pending, idsOfNewRg);
+      return;
+    }
     Region r = addRegion(p, t.merged(), idsOfNewRg, inPlace ? rg : null);
     if (policy.isOpen(rg)) {
       policy.replace(
@@ -372,17 +441,56 @@ public final class RmowArm implements Arm {
     }
   }
 
+  /**
+   * The event-time merge's rewrite of row group {@code rg} of {@code p}'s file: its rows with the
+   * batch's changes and inserts ({@code rows}), as the pieces {@link EventTimeRegions#pieces} cuts
+   * them into, in its place. The newest piece of the newest row group goes to the tail file, as
+   * inserts did, or to a new file once the tail is full: listed last there, it keeps the tail's
+   * row groups in event-time order.
+   */
+  private void placeByEventTime(
+      long rg,
+      List<long[]> rows,
+      Pending p,
+      Map<Integer, Pending> pending,
+      Map<Long, List<Long>> idsOfNewRg)
+      throws IOException {
+    boolean newest = rg == newestRg;
+    List<List<long[]>> pieces = eventTime.pieces(rows, ctx.log(), newest);
+    for (int i = 0; i < pieces.size(); i++) {
+      if (newest && i == pieces.size() - 1 && tail != fileOfRg.get(rg)) {
+        addRegion(pending(pending, tail >= 0 ? tail : files.size()), pieces.get(i), idsOfNewRg, null);
+      } else {
+        addRegion(p, pieces.get(i), idsOfNewRg, inPlace ? rg : null);
+      }
+    }
+  }
+
   /** The inserts, with the open tail row groups merged into them, and every file's append. */
   private void writeRegions(
       OpLog.Batch b,
       Map<Long, Touched> touched,
       TailPolicy.Plan plan,
       Set<Long> mergeIds,
+      List<Long> fresh,
       Map<Integer, Pending> pending,
       Map<Long, List<Long>> idsOfNewRg)
       throws IOException {
+    // with the event-time merge, the inserts of a table with no row group: the newest, cut as one
+    if (!fresh.isEmpty()) {
+      List<long[]> rows = new ArrayList<>(fresh.size());
+      for (long id : fresh) {
+        rows.add(new long[] {id, 0});
+      }
+      held.hold(Held.Kind.ROWS, rows.size(), "the batch's inserts");
+      Pending p = pending(pending, tail >= 0 ? tail : files.size());
+      for (List<long[]> piece : eventTime.pieces(rows, ctx.log(), true)) {
+        addRegion(p, piece, idsOfNewRg, null);
+      }
+      held.release(Held.Kind.ROWS, rows.size(), "the inserts' regions encoded");
+    }
     // the inserts, merged with the open tail row groups the policy picked
-    if (b.insertIds().length > 0) {
+    if (!byEventTime && b.insertIds().length > 0) {
       List<long[]> rows = new ArrayList<>(b.insertIds().length);
       for (long id : b.insertIds()) {
         rows.add(new long[] {id, 0});
@@ -405,6 +513,17 @@ public final class RmowArm implements Arm {
 
     for (Map.Entry<Integer, Pending> e : pending.entrySet()) {
       commit(e.getKey(), e.getValue(), idsOfNewRg);
+    }
+    if (byEventTime) {
+      // the replaced row groups leave the index before the new ones join, which may span them
+      for (Pending p : pending.values()) {
+        p.drop.forEach(eventTime::remove);
+      }
+      for (Pending p : pending.values()) {
+        for (long rg : p.newRgIds) {
+          eventTime.addIds(rg, idsOfNewRg.get(rg), ctx.log());
+        }
+      }
     }
     // the new versions' manifest entries: column metrics from the merged footers
     for (int k : pending.keySet()) {
@@ -434,9 +553,10 @@ public final class RmowArm implements Arm {
       sent += r.bytes().length;
     }
     held.release(Held.Kind.PENDING, sent, "append to " + name(files.get(k).location()) + " sent");
-    if (inPlace && outOfOrder(files.get(k)) > 0) {
+    if (inPlace && outOfOrder(files.get(k), keyColumn()) > 0) {
       throw new IllegalStateException(
-          "Footer of " + files.get(k).location() + " lists row groups out of id order");
+          "Footer of " + files.get(k).location() + " lists row groups out of "
+              + (byEventTime ? "event-time" : "id") + " order");
     }
     for (long rg : p.drop) {
       fileOfRg.remove(rg);
@@ -522,6 +642,59 @@ public final class RmowArm implements Arm {
         }
       }
     }
+  }
+
+  /**
+   * The event-time merge's locate: the writer finds the row group each insert joins from its index
+   * of them, and reads the footer of each file whose event-time bounds (its manifest entry) overlap
+   * the range those row groups and inserts span ({@link EventTimeRegions#searchRange}), once in
+   * the batch, checking every placement against the row groups' {@code ts} statistics.
+   */
+  private void locateInserts(OpLog.Batch b) throws IOException {
+    if (b.insertIds().length == 0 || eventTime.newest() == null) {
+      return;
+    }
+    OpLog log = ctx.log();
+    long[] ts = new long[b.insertIds().length];
+    for (int i = 0; i < ts.length; i++) {
+      ts[i] = log.ts(b.insertIds()[i]);
+    }
+    Arrays.sort(ts);
+    List<long[]> bounds = new ArrayList<>(files.size());
+    for (LogicalFile f : files) {
+      bounds.add(f.liveRows() == 0 ? null : EventTimeRegions.bounds(f.dataFile()));
+    }
+    long[] range = eventTime.searchRange(ts);
+    Map<Long, long[]> stats = new HashMap<>(); // row group -> {min ts, max ts}
+    for (int i = 0; i < files.size(); i++) {
+      LogicalFile f = files.get(i);
+      long[] fb = bounds.get(i);
+      if (f.liveRows() == 0 || (fb != null && (fb[1] < range[0] || fb[0] > range[1]))) {
+        continue;
+      }
+      FileMetaData footer = footer(f);
+      List<Long> ids = f.rgIds();
+      for (int j = 0; j < footer.getRow_groupsSize(); j++) {
+        Statistics st =
+            footer.getRow_groups().get(j).getColumns().get(1).getMeta_data().getStatistics();
+        stats.put(ids.get(j), new long[] {le64(st.getMin_value()), le64(st.getMax_value())});
+      }
+    }
+    for (long id : b.insertIds()) {
+      EventTimeRegions.Region r = eventTime.of(log.ts(id));
+      long[] s = stats.get(r.key());
+      if (s == null || s[0] != r.minTs() || s[1] != r.maxTs()) {
+        throw new IllegalStateException(
+            "Statistics do not place insert " + id + " in row group " + r.key() + " ("
+                + r.minTs() + ".." + r.maxTs() + ", read "
+                + (s == null ? "nothing" : s[0] + ".." + s[1]) + ")");
+      }
+    }
+  }
+
+  /** The column the footers list row groups in order of: {@code id}, or {@code ts} by event time. */
+  private int keyColumn() {
+    return byEventTime ? 1 : 0;
   }
 
   /**
@@ -895,7 +1068,7 @@ public final class RmowArm implements Arm {
       live += f.liveBytes();
       rowGroups += f.footer().getRow_groupsSize();
       footers += f.tail().length;
-      outOfOrder += outOfOrder(f);
+      outOfOrder += outOfOrder(f, keyColumn());
     }
     for (LogicalFile f : rewritten) {
       reclaimable += f.storedBytes();
@@ -914,12 +1087,12 @@ public final class RmowArm implements Arm {
         used);
   }
 
-  /** Row groups the footer lists after one holding a larger id. */
-  private static long outOfOrder(LogicalFile f) {
+  /** Row groups the footer lists after one holding a larger key (column {@code column}'s value). */
+  private static long outOfOrder(LogicalFile f, int column) {
     long count = 0;
     long maxSoFar = Long.MIN_VALUE;
     for (RowGroup rg : f.footer().getRow_groups()) {
-      Statistics st = rg.getColumns().get(0).getMeta_data().getStatistics();
+      Statistics st = rg.getColumns().get(column).getMeta_data().getStatistics();
       if (le64(st.getMin_value()) < maxSoFar) {
         count++;
       }

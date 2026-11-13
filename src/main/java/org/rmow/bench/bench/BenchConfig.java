@@ -71,6 +71,14 @@ public final class BenchConfig {
   public static final class ReadSpec {
     /** Probe after every {@code every} batches (and after the last). */
     public int every = 5;
+    /**
+     * Also read the newest rows ({@code read_recent}) and the windows ({@code read_window}) after
+     * every {@code rangeEvery} batches, between the probes, which add the full, time-travel and
+     * sorted reads (null: only at the probes). The range reads are cheap, so a run can take them
+     * at every snapshot. Left out of the configuration's hash when null.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public Integer rangeEvery = null;
     /** {@code read_recent} reads rows with {@code ts} in the newest fraction of the event time. */
     public double recentFraction = 0.01;
     /** {@code read_old} reads the table as it was this many batches earlier. */
