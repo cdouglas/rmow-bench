@@ -2013,3 +2013,55 @@ def wl_parts_chart(d, whats, names, parts=WL_PARTS, colors=None):
         ).properties(width=190).facet(row=alt.Row("Store:N", sort=WL_STORES, title=None)).properties(title=w)
     return alt.hconcat(*[panel(w) for w in whats]).resolve_scale(x="independent", y="independent")
 
+
+
+# --- The inserts at 128 MiB, projected (analysis/event_time_model.py; pages/inserts-128.md) ------
+# The model's designs by the names the pages use. "merge" is the event-time merge at theta 0, which
+# RMoR, RMoW-external and RMoW-append share: they write the same bytes and keep the same row groups.
+ET_NAMES = {"mor": "MoR", "compact": "MoR (compacted)", "density": "RMoR-density",
+            "merge": "RMoR, RMoW-external, RMoW-append"}
+ET_COLOR = {"MoR": WL_COLOR["MoR"], "MoR (compacted)": WL_NCOLOR["MoR (compacted)"],
+            "RMoR-density": WL_COLOR["RMoR-density"],
+            "RMoR, RMoW-external, RMoW-append": WL_COLOR["RMoR"]}
+_ET_CACHE = {}
+
+
+def et_projection(**overrides):
+    """analysis/event_time_model.py's projection (its defaults: the 128 MiB suite's inserts), run
+    once a kernel for each set of overrides; about a minute at the defaults."""
+    key = tuple(sorted(overrides.items()))
+    if key not in _ET_CACHE:
+        if str(ANALYSIS) not in sys.path:
+            sys.path.insert(0, str(ANALYSIS))
+        import event_time_model
+
+        _ET_CACHE[key] = event_time_model.project(**overrides)
+    return _ET_CACHE[key]
+
+
+def et_written(proj, names=ET_NAMES):
+    """Projected data written as snapshots are added: name, step, gb (cumulative), with step 0 at 0,
+    in wl_written()'s form, so wl_written_chart draws it."""
+    rows = []
+    for k, per in proj["written"].items():
+        if k not in names:
+            continue
+        rows.append((names[k], 0, 0.0))
+        total = 0.0
+        for step, b in enumerate(per, start=1):
+            total += b
+            rows.append((names[k], step, total / 1e9))
+    return pd.DataFrame(rows, columns=["name", "step", "gb"])
+
+
+def et_reads(proj, names=ET_NAMES):
+    """Projected reads at each read point: name, step, window (its position in the event-time
+    span), ratio (bytes read over live bytes), and held_gb (the sorted read's peak)."""
+    rows = []
+    for k, by_step in proj["reads"].items():
+        if k not in names:
+            continue
+        for step, (windows, held) in by_step.items():
+            for at, ratio in windows.items():
+                rows.append((names[k], step, at, ratio, held / 1e9))
+    return pd.DataFrame(rows, columns=["name", "step", "window", "ratio", "held_gb"])

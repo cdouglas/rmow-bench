@@ -40,7 +40,9 @@ write (RMoW: the old copy is gone from the footer readers use). Where a write's 
   merged four writes' worth at a time (RMoR there is `rmor-c`). The *event-time merge* instead puts
   each new row into the row group its event time falls in, so no two row groups overlap in event
   time. It is built (`layout.inserts` `event-time`); its runs are registered in
-  docs/HYPOTHESES.md (2026-11-12) and not yet run.
+  docs/HYPOTHESES.md (2026-11-12) and not yet run. Merging every late row at once would write
+  2.3 GB a write at 128 MiB, so RMoR, RMoW-external and RMoW-append are projected there, not run
+  ([the inserts at 128 MiB, projected](pages/inserts-128.md)).
 
 **Results**
 - [Updates and inserts: writes against reads](pages/workloads.md): every design as snapshots are
@@ -51,7 +53,8 @@ write (RMoW: the old copy is gone from the footer readers use). Where a write's 
   that stock Iceberg does not, for every design.
 
 **Decisions:** [copies cut where a write changes](pages/region-cut.md), at Iceberg's 128 MiB row
-groups.
+groups; [the inserts at 128 MiB, projected](pages/inserts-128.md): which designs to run, and
+RMoR-density against compaction.
 
 **Calibration:** [the simulation against the cloud](pages/simulation-cloud.md) (the simulated
 times beside the measured ones, and whether the cloud runs did the same work),
