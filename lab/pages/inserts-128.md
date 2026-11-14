@@ -61,7 +61,8 @@ was checked against the harness only at a small scale, on its writes.
   every row group whose range overlaps it, whole; the sorted read holds every row group whose range
   spans the event time it has reached. Requests, footers and pages are left out.
 - **Its check:** at 400,000 rows and 1 MiB row groups over 12 writes it wrote within 10% of what the
-  harness wrote, at θ 0 and 0.06 (the model's docstring). Its reads are not checked yet.
+  harness wrote, at θ 0 and 0.06 (the model's docstring). At this size, against the three designs
+  that ran, it is checked on a calibration page, [](model-128.md).
 
 ## Data written as snapshots are added
 
@@ -177,7 +178,8 @@ What it costs in requests, for its delta row groups, the runs measure.
 ## Limits
 
 - **A model:** it counts bytes of whole row groups, not requests, footers or pages, and splits a
-  cut row group's range in proportion to its rows. Its reads are not checked at any scale yet.
+  cut row group's range in proportion to its rows. At this size it is checked against the three
+  designs that ran on [](model-128.md).
 - **One draw of the lateness:** median 0.05 writes, p99 5, with no watermark. The θ 0 cost comes from
   its tail; a stream processor that dropped rows past an allowed lateness would cut it.
 - **One θ:** RMoR-density at 0.06, its value on the updates.

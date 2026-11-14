@@ -21,9 +21,11 @@ project:
       children:
         - file: pages/region-cut.md
         - file: pages/inserts-128.md
+        - file: pages/suite-128.md
     - title: Calibration
       children:
         - file: pages/simulation-cloud.md
+        - file: pages/model-128.md
         - file: pages/compare.md
         - file: pages/micro.md
   exclude:

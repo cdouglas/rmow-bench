@@ -540,9 +540,10 @@ lower.
   groups came out 19–44% low). Train on a row-group sweep, or count row groups read per phase.
 - [ ] **A writer that tunes itself**: the same prices could drive the writer, merging a row group
   when the reads expected before it next changes cost more than rewriting it.
-- [ ] **Every design on both workloads, at Iceberg's sizes** (registered 2026-11-12,
-  HYPOTHESES.md W1–W3). One definition of each design, on the updates and the inserts, at
-  D1–D4's 128 MiB row groups: `configs/w128-*.json`, campaign `docker/campaigns/w128.json` on
+- [x] **Every design on both workloads, at Iceberg's sizes** (registered 2026-11-12,
+  HYPOTHESES.md W1–W5; ran 2026-11-13/14, lab/pages/suite-128.md). One definition of each
+  design, on the updates and the inserts, at D1–D4's 128 MiB row groups: `configs/w128-*.json`,
+  campaign `docker/campaigns/w128.json` on
   havoc (the user's runs). Built for it: the event-time merge (above), MoR compacted as Iceberg
   plans its bin-pack after every write (`compactMinInputFiles`), and range reads after every
   write (`reads.rangeEvery`). Before the runs, at 9ff9176 on havoc (2026-11-13): fuzz rounds
@@ -554,6 +555,17 @@ lower.
   copies whole row groups. On the inserts RMoR, RMoW-external and RMoW-append are projected, not
   run (revised 2026-11-12, W4–W5; lab/pages/inserts-128.md): the event-time merge at θ 0 would
   write 2.3 GB a write. The runs of MoR, MoR (compacted) and RMoR-density check the projection.
+  Judged 2026-11-14: W1 (RMoR-density's half) to W5 held. The inserts jobs first failed at start
+  (the op log's hash held the 3 GB log in one array) and ran at 14727a8, which streams it. The
+  model's check missed one part of nine: it writes 0.74 of RMoR-density's bytes
+  (lab/pages/model-128.md), so the projection waits on its revision.
+- [ ] **Results pages from the 128 MiB suite**, by snapshot, to replace the 16 MiB workloads
+  pages. Bytes and requests are in hand. Time needs each run's work, which havoc's container did
+  not count (no instruction counters, and other users' load on every job's cores), so it needs
+  laptop twins or a cloud run.
+- [ ] **The inserts model, revised for RMoR-density's merges** (only if the projection of RMoR,
+  RMoW-external and RMoW-append is to stand beside the runs): it rewrites 53 MB of stored rows a
+  write where the run rewrites 73.
 - [ ] **Reads at every snapshot, in a final cloud run** (decided 2026-11-12): every run so far
   reads the table only after every 5th write (`reads.every` 5, one setting for every kind of read;
   `Runner.java`, the probe). Writes are measured at every snapshot. So the workloads pages'

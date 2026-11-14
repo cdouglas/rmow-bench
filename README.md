@@ -601,12 +601,22 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
   and its sweeps in the cloud, RMoR's rerun, the tuner) were retired on 2026-11-12 with their runs
   and pages. What they taught, from the measurement method to the results that carry over, is
   [docs/LESSONS.md](docs/LESSONS.md).
-- **Next: every design on both workloads at Iceberg's sizes** (registered 2026-11-12, W1–W3 in
-  [docs/HYPOTHESES.md](docs/HYPOTHESES.md); campaign `docker/campaigns/w128.json`, not yet run):
-  one definition of each design, the inserts placed by the event-time merge (`layout.inserts`),
-  MoR compacted as Iceberg plans its bin-pack, and range reads after every write. On the inserts,
-  the designs that merge every late row at once are projected, not run
-  ([lab/pages/inserts-128.md](lab/pages/inserts-128.md)). Then the density
-  hypothesis where density can choose: a workload of sparse changes, cold pieces merged back, and
-  the locate's requests ([docs/ROADMAP.md](docs/ROADMAP.md)). GCS needs APPEND in the fork first;
-  split files can also run on standard S3.
+- **Every design on both workloads at Iceberg's sizes** (W1–W5 in
+  [docs/HYPOTHESES.md](docs/HYPOTHESES.md); campaign `w128` on havoc, 2026-11-13/14;
+  [lab/pages/suite-128.md](lab/pages/suite-128.md)): one definition of each design, the inserts
+  placed by the event-time merge (`layout.inserts`), MoR compacted as Iceberg plans its bin-pack,
+  and range reads after every write. W1 (as far as it ran) to W5 held at the last write, as
+  registered (earlier, RMoR-density's window often read past W2's bound). On the updates RMoR's and
+  RMoW-external's windows read 1.16 and 1.06 times their live bytes, RMoR-density's 1.60 and MoR's
+  14.4. On the inserts RMoR-density writes 1.17 times MoR (compacted)'s bytes, and its windows
+  read 0.15 of theirs at the last write (0.22 to 0.58 before it). It pays in requests, for its
+  delta row groups. The designs that merge every
+  late row at once are projected on the inserts, not run
+  ([lab/pages/inserts-128.md](lab/pages/inserts-128.md)).
+  The model behind that projection missed RMoR-density's writes by 26%
+  ([lab/pages/model-128.md](lab/pages/model-128.md)), so the projection awaits a revision.
+- **Next:** results pages from the 128 MiB suite (their time needs each run's work, which havoc's
+  container did not count). Then the density hypothesis where density can choose: a workload of
+  sparse changes, cold pieces merged back, and the locate's requests
+  ([docs/ROADMAP.md](docs/ROADMAP.md)). GCS needs APPEND in the fork first; split files can also
+  run on standard S3.
