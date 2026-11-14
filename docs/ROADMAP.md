@@ -536,6 +536,18 @@ lower.
   groups came out 19–44% low). Train on a row-group sweep, or count row groups read per phase.
 - [ ] **A writer that tunes itself**: the same prices could drive the writer, merging a row group
   when the reads expected before it next changes cost more than rewriting it.
+- [ ] **Reads at every snapshot, in a final cloud run** (decided 2026-11-12): every run so far
+  reads the table only after every 5th write (`reads.every` 5, one setting for every kind of read;
+  `Runner.java`, the probe). Writes are measured at every snapshot. So the workloads pages'
+  compaction charts sample a sawtooth every 5 snapshots. Compacted every 10 writes, the reads fall
+  alternately right after a compaction and halfway through a cycle; every 3, 6 or 12 writes, at
+  shifting points. If there is a final cloud run, make the most of its writes and read at every
+  snapshot. A knob that runs the range reads and the newest 1% at every snapshot, while the full
+  scan and the sorted read stay every 5, keeps it cheap: a range read takes about 0.5 s on S3
+  Express. Reads took 10.5 of `wl-upd-base`'s 33 minutes there at 7 read points, so every kind at
+  every snapshot would roughly double the run. Needs the harness change, a fuzz round and a
+  registered control (the extra reads change no write record), then havoc and laptop references
+  before the cloud.
 - [x] **The write-up of the two workloads** (`split`, `seal`, `windows`; 2026-11-09,
   [lab/pages/workloads.md](../lab/pages/workloads.md), Results). Simulated, at 16 MiB row groups:
   each design's write against its range read and full scan, the inserts as a choice of when to
