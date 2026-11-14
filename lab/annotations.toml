@@ -34,6 +34,10 @@ select = ["where:label IN ('d128-upd-mor', 'd128-upd-compact', 'd128-upd-density
 title = "Copies cut where a write changes, at 128 MiB row groups, on havoc at a68eda3: D3 and D4 (docs/HYPOTHESES.md, 2026-11-09)"
 select = ["where:label IN ('d128-upd-cut', 'd128-upd-density-cut')"]
 
+[campaigns.w128]
+title = "Every design on both workloads at Iceberg's 128 MiB row groups (docs/HYPOTHESES.md, 2026-11-12, W1-W5, and its revision for the inserts): docker/campaigns/w128.json on havoc, 3 cores a job, four at once. The updates at dd15dc9; the inserts, which failed at start there (the op log's hash held it in one array, past 2 GiB), at 14727a8, which streams it and changes nothing else"
+select = ["where:label LIKE 'w128-%' AND host = 'havoc'"]
+
 [campaigns.prices]
 title = "The two latency tests (spikes) the simulated pages price requests with (analysis/tune.py SPIKES; region-cut): S3 Express from the base point's c7a.4xlarge in usw2-az3, and Azure Blob from a D8as_v6 in westus, both 2026-10-31 at 6f24575"
 select = ["spike/s3x-spike-20261031T163533Z", "spike/azure-spike-20261031T234510Z"]
