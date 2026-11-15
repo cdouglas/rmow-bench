@@ -1734,6 +1734,9 @@ WL_PCOL = {"decode": "#3b2ca6", "encode": "#7d6fdc", "DVs and footers": "#c4bdf0
            "I/O": "#7f8a93", "paused (GC, JIT)": "#c9ced3"}
 WL_SNAPSHOT_X = alt.X("step:Q", title="snapshot", scale=alt.Scale(domain=[0, 30], nice=False),
                       axis=alt.Axis(values=list(range(0, 31, 5))))
+# the 128 MiB suite's 240 snapshots (pages/workloads-128.md)
+W128_SNAPSHOT_X = alt.X("step:Q", title="snapshot", scale=alt.Scale(domain=[0, 240], nice=False),
+                        axis=alt.Axis(values=list(range(0, 241, 40))))
 
 
 def _cap(s):
@@ -1817,7 +1820,9 @@ def wl_twin(d, reads):
 
 
 def wl_snapshots(spec, S, reads):
-    """Each design's (main point's) time `s` in S at every write, compaction and read probe."""
+    """Each design's (main point's) time `s` in S at every write, compaction and read probe. A
+    compaction phase that sent no request (one checked at every write and found nothing to
+    compact, as the 128 MiB suite's do) is not a compaction."""
     tread = tuner().READS
     rows = []
     for label, arm, family, curve, knob, name, order in spec:
@@ -1825,7 +1830,7 @@ def wl_snapshots(spec, S, reads):
             continue
         g = S[(S.label == label) & (S.arm == arm)]
         parts = [g[(g.phase == "batch") & (g.step >= 1)].assign(what=WL_WRITE),
-                 g[g.phase == "compact"].assign(what="a compaction")]
+                 g[(g.phase == "compact") & (g.requests > 0)].assign(what="a compaction")]
         for r in reads:
             phase, reader = tread[r[:-2]]
             parts.append(g[(g.phase == phase) & (g.reader == reader)].assign(what=WL_READ[r]))
@@ -1833,44 +1838,49 @@ def wl_snapshots(spec, S, reads):
     return pd.concat(rows, ignore_index=True)
 
 
-def wl_snapshot_chart(d, reads, width=300, height=150):
+def wl_snapshot_chart(d, reads, width=300, height=150, x=None, point=(18, 50)):
     """Lines over the snapshots: write latency at every write (a compaction a cross at its write),
-    and each kind of read's latency at every probe; a column per store."""
+    and each kind of read's latency at every probe; a column per store. `x` is the snapshot axis
+    (WL_SNAPSHOT_X by default), `point` the size of a write's and a read's points (0: none)."""
     names = list(dict.fromkeys(d.name))
     fam = d.drop_duplicates("name").set_index("name").family
     color = alt.Color("name:N", title=None, sort=names, legend=alt.Legend(orient="bottom"),
                       scale=alt.Scale(domain=names, range=[WL_NCOLOR.get(n, WL_COLOR[fam[n]]) for n in names]))
     shape = alt.Shape("name:N", title=None, sort=names,
                       scale=alt.Scale(domain=names, range=[WL_SHAPE[fam[n]] for n in names]))
-    x = WL_SNAPSHOT_X
+    x = x or WL_SNAPSHOT_X
     tip = ["Store", "name", "what", "step", alt.Tooltip("s:Q", format=".2f")]
 
     def graph(what, ytitle, size):
         y = alt.Y("s:Q", title=ytitle, scale=alt.Scale(zero=True))
         line = alt.Chart().transform_filter(alt.datum.what == what).mark_line(
-            strokeWidth=2, point=alt.OverlayMarkDef(size=size)).encode(
+            strokeWidth=2 if size else 1.5, point=alt.OverlayMarkDef(size=size) if size else False).encode(
             x=x, y=y, color=color, shape=shape, detail="name:N", tooltip=tip)
         layers = [line]
         if what == WL_WRITE and (d.what == "a compaction").any():
             layers.append(alt.Chart().transform_filter(alt.datum.what == "a compaction").mark_point(
                 shape="cross", filled=True, size=90, opacity=1).encode(x=x, y=y, color=color, tooltip=tip))
-        return (alt.layer(*layers, data=d).properties(width=width, height=height)
+        # each panel embeds only its own rows: at 240 snapshots the whole frame passes Altair's limit
+        rows = d[d.what.isin([what, "a compaction"] if what == WL_WRITE else [what])]
+        return (alt.layer(*layers, data=rows[["Store", "name", "what", "step", "s"]])
+                .properties(width=width, height=height)
                 .facet(column=alt.Column("Store:N", title=None, sort=WL_STORES))
                 .properties(title=alt.Title(_cap(what), anchor="start")))
 
-    return alt.vconcat(graph(WL_WRITE, "write latency (s)", 18),
-                       *[graph(WL_READ[r], "read latency (s)", 50) for r in reads])
+    return alt.vconcat(graph(WL_WRITE, "write latency (s)", point[0]),
+                       *[graph(WL_READ[r], "read latency (s)", point[1]) for r in reads])
 
 
-def wl_snapshot_table(d, what, basis="simulated"):
+def wl_snapshot_table(d, what, basis="simulated", every=1):
     from labbook import table
 
-    t = d[d.what == what].pivot_table(index="step", columns=["Store", "name"], values="s")
+    t = d[(d.what == what) & (d.step % every == 0)].pivot_table(index="step", columns=["Store", "name"], values="s")
     names = list(dict.fromkeys(d.name))
     t = t.reindex(columns=[(st, n) for st in WL_STORES for n in names if (st, n) in t.columns])
     t.columns = [f"{st}: {n}" for st, n in t.columns]
     t = t.reset_index().rename(columns={"step": "snapshot"})
-    return table(t.round(2), caption=f"{_cap(what)}, {basis} (s), at each snapshot")
+    at = "each snapshot" if every == 1 else f"every {every}th snapshot"
+    return table(t.round(2), caption=f"{_cap(what)}, {basis} (s), at {at}")
 
 
 # Compaction, apart from the designs: MoR at each interval, light (never) to dark (every 3 writes),
@@ -1936,12 +1946,14 @@ def wl_written(spec):
     return pd.concat([start, d]).sort_values(["label", "arm", "step"]).reset_index(drop=True)
 
 
-def wl_written_chart(d, colors, shapes=None, dashed=(), width=420, height=180):
+def wl_written_chart(d, colors, shapes=None, dashed=(), width=420, height=180, x=None, y="data written (GB)",
+                     point=25):
     """Data written as snapshots are added (d: wl_written()), one line per name, `colors` (and
-    `shapes`) by name in legend order, the names in `dashed` dashed."""
+    `shapes`) by name in legend order, the names in `dashed` dashed; `x` the snapshot axis
+    (WL_SNAPSHOT_X by default), `y` the axis title, `point` the points' size (0: none)."""
     names = [n for n in colors if n in set(d.name)]
     legend = alt.Legend(orient="bottom", direction="horizontal", title=None, symbolStrokeWidth=2, labelLimit=320)
-    enc = dict(x=WL_SNAPSHOT_X, y=alt.Y("gb:Q", title="data written (GB)", scale=alt.Scale(zero=True)),
+    enc = dict(x=x or WL_SNAPSHOT_X, y=alt.Y("gb:Q", title=y, scale=alt.Scale(zero=True)),
                color=alt.Color("name:N", sort=names, legend=legend,
                                scale=alt.Scale(domain=names, range=[colors[n] for n in names])),
                strokeDash=alt.StrokeDash("name:N", sort=names, legend=None, scale=alt.Scale(
@@ -1950,18 +1962,18 @@ def wl_written_chart(d, colors, shapes=None, dashed=(), width=420, height=180):
     if shapes:
         enc["shape"] = alt.Shape("name:N", sort=names, legend=legend,
                                  scale=alt.Scale(domain=names, range=[shapes[n] for n in names]))
-    return alt.Chart(d).mark_line(strokeWidth=2, point=alt.OverlayMarkDef(size=25)).encode(**enc).properties(
-        width=width, height=height)
+    return alt.Chart(d).mark_line(strokeWidth=2, point=alt.OverlayMarkDef(size=point) if point else False).encode(
+        **enc).properties(width=width, height=height)
 
 
-def wl_written_table(d, names):
-    """wl_written_chart()'s table twin: GB written by each name by every 5th snapshot."""
+def wl_written_table(d, names, every=5):
+    """wl_written_chart()'s table twin: GB written by each name by every `every`th snapshot."""
     from labbook import table
 
-    t = d[d.step % 5 == 0].pivot_table(index="step", columns="name", values="gb")
+    t = d[d.step % every == 0].pivot_table(index="step", columns="name", values="gb")
     t = t.reindex(columns=[n for n in names if n in t.columns])
     return table(t.reset_index().rename(columns={"step": "snapshot"}).round(3),
-                 caption="Data written (GB) by every 5th snapshot, from the initial load on")
+                 caption=f"Data written (GB) by every {every}th snapshot, from the initial load on")
 
 
 def wl_compaction_written_chart(wr, shown=("never", "every 10 writes", "every 3 writes")):
@@ -1997,9 +2009,11 @@ def wl_compaction_costs(spec, P, cm, wr):
 def wl_parts_chart(d, whats, names, parts=WL_PARTS, colors=None):
     """Where each design's time goes: a stacked bar per design (d: Store, name, what, part, s, and
     pord, the part's place in `parts`), a panel per kind of operation and a row per store; each
-    part colored by `colors` (WL_PCOL by default). The legend lists the parts d has."""
+    part colored by `colors` (WL_PCOL by default). The legend lists the parts d has. A bar is 20
+    pixels high, or more where a store's panel would be shorter than its label (two designs)."""
     colors = colors or WL_PCOL
     parts = [p for p in parts if p in set(d.part)]
+    bar = max(20, -(-66 // max(1, len(names))))
 
     def panel(w):
         return alt.Chart(d[d.what == w]).mark_bar().encode(
@@ -2010,7 +2024,8 @@ def wl_parts_chart(d, whats, names, parts=WL_PARTS, colors=None):
                             legend=alt.Legend(orient="top", columns=len(parts), labelLimit=260)),
             order=alt.Order("pord:Q"),
             tooltip=["Store", "name", "what", "part", alt.Tooltip("s:Q", format=".2f")],
-        ).properties(width=190).facet(row=alt.Row("Store:N", sort=WL_STORES, title=None)).properties(title=w)
+        ).properties(width=190, height=alt.Step(bar)).facet(
+            row=alt.Row("Store:N", sort=WL_STORES, title=None)).properties(title=w)
     return alt.hconcat(*[panel(w) for w in whats]).resolve_scale(x="independent", y="independent")
 
 
