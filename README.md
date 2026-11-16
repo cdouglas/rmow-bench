@@ -615,8 +615,17 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
   ([lab/pages/inserts-128.md](lab/pages/inserts-128.md)).
   The model behind that projection missed RMoR-density's writes by 26%
   ([lab/pages/model-128.md](lab/pages/model-128.md)), so the projection awaits a revision.
-- **Next:** results pages from the 128 MiB suite (their time needs each run's work, which havoc's
-  container did not count). Then the density hypothesis where density can choose: a workload of
+- **The 128 MiB suite in simulated time** ([lab/pages/workloads-128.md](lab/pages/workloads-128.md);
+  each phase's work from laptop twins of the nine runs, campaign `w128-twins`, which equal havoc's
+  in every record). On S3 Express, on the updates RMoR writes in 18.5 s on average against MoR's
+  25.2 and reads a 1% range in 1.7 s against 6.5; RMoW-external is the fastest at both, 15.8 s and
+  1.0 s, as its appended footers narrow its files' statistics and it reads no deletion vectors.
+  MoR's writes and range reads slow as snapshots are added (its writes from 8.5 s over the first 10
+  to 32.2 s over the last 10), RMoR's and RMoW-external's hold steady, and RMoR-density's writes
+  slow from 8.0 s to 20.9 s. On the inserts RMoR-density reads a range in 3.2 s against MoR's
+  10.1, for writes of 4.1 s against 0.45. Iceberg's compaction halves MoR's range read after 240
+  writes, for slower writes. The page is to replace the 16 MiB workloads pages.
+- **Next:** the density hypothesis where density can choose: a workload of
   sparse changes, cold pieces merged back, and the locate's requests
   ([docs/ROADMAP.md](docs/ROADMAP.md)). GCS needs APPEND in the fork first; split files can also
   run on standard S3.

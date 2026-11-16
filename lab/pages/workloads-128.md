@@ -443,6 +443,7 @@ row groups. Its range reads are the fastest, {eval}`f2(v(U30, S3X, "RMoW-append"
 :tags: [remove-cell]
 
 WR_RMOR = at_step("w128-upd-rmor", "batch", 240)
+WR_DEN = [at_step("w128-upd-density", "batch", n) for n in (1, 240)]
 FULL_U = {n: at_step(l, "read_full", 240) for l, _, n in UPD}
 WIN_RANGE = {n: series(SNU, n, READ["window_s"]) for n in ["RMoR", "RMoW-external", "RMoR-density"]}
 
@@ -490,7 +491,14 @@ MoR's writes slow as writes are added: on S3 Express a write takes
 changes, MoR reads every file whose keys may hold one, and every earlier write left a file of new
 versions spread over the keys it changed: its first write reads {eval}`f0(WR_MOR[0].mb)` MB, its
 240th {eval}`f0(WR_MOR[1].mb)` MB. RMoR's 240th write reads {eval}`f0(WR_RMOR.mb)` MB, and its writes
-take {eval}`f1(mean_over(SNU, "RMoR", WRITE, 231, 240))` s over the last 10.
+take {eval}`f1(mean_over(SNU, "RMoR", WRITE, 1, 10))` s over the first 10 and
+{eval}`f1(mean_over(SNU, "RMoR", WRITE, 231, 240))` s over the last 10; RMoW-external's
+{eval}`f1(mean_over(SNU, "RMoW-external", WRITE, 1, 10))` s and
+{eval}`f1(mean_over(SNU, "RMoW-external", WRITE, 231, 240))` s. RMoR-density's writes slow, from
+{eval}`f1(mean_over(SNU, "RMoR-density", WRITE, 1, 10))` s over the first 10 to
+{eval}`f1(mean_over(SNU, "RMoR-density", WRITE, 231, 240))` s over the last 10, and the requests a
+write sends grow from {eval}`f0(WR_DEN[0].requests)` at its first to
+{eval}`f0(WR_DEN[1].requests)` at its 240th.
 
 MoR's 1% range read slows the same way, from {eval}`f1(at(SNU, "MoR", READ["window_s"], 1))` s after
 the first write to {eval}`f1(at(SNU, "MoR", READ["window_s"], 240))` s after the 240th on S3
