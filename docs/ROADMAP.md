@@ -559,10 +559,28 @@ lower.
   (the op log's hash held the 3 GB log in one array) and ran at 14727a8, which streams it. The
   model's check missed one part of nine: it writes 0.74 of RMoR-density's bytes
   (lab/pages/model-128.md), so the projection waits on its revision.
-- [ ] **Results pages from the 128 MiB suite**, by snapshot, to replace the 16 MiB workloads
-  pages. Bytes and requests are in hand. Time needs each run's work, which havoc's container did
-  not count (no instruction counters, and other users' load on every job's cores), so it needs
-  laptop twins or a cloud run.
+- [x] **Results pages from the 128 MiB suite** (2026-11-16,
+  [lab/pages/workloads-128.md](../lab/pages/workloads-128.md), Results), by snapshot, to replace
+  the 16 MiB workloads pages. Bytes and requests are havoc's runs'. Time needs each run's work,
+  which havoc's container did not count (no instruction counters, and other users' load on every
+  job's cores), so the user chose laptop twins: campaign `w128-twins`, `w128`'s nine
+  configurations at 7590d4a, one at a time (a 12g heap; RMoW-external's updates ran out of it and
+  ran with 18g), each equal to havoc's run in every record. On S3 Express, on the updates
+  RMoW-external writes in 15.8 s on average and reads a 1% range in 1.0 s, RMoR in 18.5 s and 1.7
+  s, MoR in 25.2 s and 6.5 s; MoR's writes and range reads slow as snapshots are added. On the
+  inserts RMoR-density reads a range in 3.2 s against MoR's 10.1, for writes of 4.1 s against
+  0.45.
+- [ ] **Retire the 16 MiB workloads pages** that the 128 MiB results page replaces
+  (`workloads.md`, and its cloud check `workloads-cloud.md`): the user decides which pages and
+  runs go; first record them in EXPERIMENTS.md (Retired runs) and carry what still matters into
+  LESSONS.md.
+- [ ] **Two mechanisms the 128 MiB results page states without explaining**: RMoR-density's
+  update writes slow from 8.0 s over the first 10 to 20.9 s over the last 10 (S3 Express) as its
+  requests a write grow from 8 to 1,299, while its bytes read rise to about 1.8 GB a write around
+  writes 20 to 80 and fall back to about 550 MB; and RMoW-external's update writes decode 3.5 s
+  where RMoR's decode 5.5 (its writes read 74 files at the 240th to RMoR's 137, and no deletion
+  vectors to RMoR's 182, which the decode span's opens and deletes include, but not obviously 2 s
+  of them).
 - [ ] **The inserts model, revised for RMoR-density's merges** (only if the projection of RMoR,
   RMoW-external and RMoW-append is to stand beside the runs): it rewrites 53 MB of stored rows a
   write where the run rewrites 73.
