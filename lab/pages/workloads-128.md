@@ -359,9 +359,11 @@ it changes. RMoW-append copies whole 128 MiB row groups, so it ran the first 30 
 inserts RMoR-density places each late row in the row group whose event-time range holds it, when
 that row group's waiting rows reach its threshold. RMoR, RMoW-external and RMoW-append, which
 would merge every late row at once, rewriting whole row groups on almost every write, did not run
-there ([why](./inserts-128.md)). Each writer finds the rows a write changes by key, reading only
-the row groups whose statistics may hold a changed key ([our changes to readers and
-writers](./reader-changes.md)).
+there ([why](./inserts-128.md)). Each writer finds the rows a write changes by scanning the key
+column, as a MERGE would: it reads only the files whose key range may hold a changed key, and in
+each of them every row group between the write's smallest and largest changed key (RMoW-append
+finds its rows from its footers' statistics alone). The pruning of row groups by each changed key
+in [our changes to readers and writers](./reader-changes.md) was not used here.
 
 **The designs are compared with nothing compacted,** as snapshots are added. MoR compacted as
 Iceberg plans it (its bin-pack rule, checked after every write: a group of at least 5 files) has
@@ -942,5 +944,7 @@ fig.wl_snapshot_table(CMI, READ["window_s"], every=10)
 - **Simulated, not measured.** No run at 128 MiB has run in the cloud; the times price havoc's
   requests by size and add the laptop's CPU.
 - **One table, one seed.** The narrow 11-column table of the 16 MiB pages at 8 times the rows.
+- **Writers prune row groups only to a write's range of keys,** not by each changed key, as the
+  16 MiB pages' runs did.
 - **RMoR, RMoW-external and RMoW-append did not run on the inserts,** and RMoW-append ran 30 of
   the updates' 240 writes.
