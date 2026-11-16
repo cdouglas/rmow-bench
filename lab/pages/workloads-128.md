@@ -140,6 +140,20 @@ def mean_over(d, name, what, first, last, store=S3X):
     return g.s.mean()
 
 
+def series(d, name, what, store=S3X):
+    return d[(d.Store == store) & (d.name == name) & (d.what == what)].set_index("step").s
+
+
+def at_step(label, phase, step):
+    """Havoc's run's phase after a write: requests, MB read and written, and rows (a read's the mean
+    over its probes, by the reader every design reads with here)."""
+    return q(f"""SELECT avg(s.requests) AS requests, avg(s.bytes_read) / 1e6 AS mb,
+                        avg(s.bytes_written) / 1e6 AS mb_written, avg(s.rows) AS rows
+                 FROM steps s JOIN canonical_runs r USING (run_id)
+                 WHERE list_contains(r.campaigns, 'w128') AND s.label = '{label}' AND s.phase = '{phase}'
+                   AND (s.phase = 'batch' OR s.reader = 'cached-skip') AND s.step = {step}""").iloc[0]
+
+
 # What each design has written after every write, and what the store holds: with every snapshot
 # kept (nothing is ever deleted) and with the snapshots before the newest expired (what the newest
 # snapshot's files hold, live rows or not). Havoc's runs; the same on both stores.
@@ -240,6 +254,12 @@ def share_of(d, store, name, what, part):
     return g[g.part == part].s.sum() / g.s.sum()
 
 
+def part_s(d, name, what, part=None, store=S3X):
+    """A design's simulated seconds in one part of an operation (all of it with no part)."""
+    g = d[(d.Store == store) & (d.name == name) & (d.what == what)]
+    return (g[g.part == part] if part else g).s.sum()
+
+
 runs = q(f"""SELECT run_id, label, host, left(git_sha, 7) AS build FROM canonical_runs
              WHERE {GRID} ORDER BY label, host""")
 ```
@@ -247,6 +267,62 @@ runs = q(f"""SELECT run_id, label, host, left(git_sha, 7) AS build FROM canonica
 What each design costs a writer and its readers at Iceberg's 128 MiB row groups, on two workloads
 apart, **updates** and **inserts**, over 240 writes on S3 Express and Azure Blob. The times are
 simulated from local runs.
+
+```{code-cell} ipython3
+:tags: [remove-cell]
+
+# what the summary quotes and the sections below show: each design's times at every snapshot, MoR
+# against MoR (compacted), data written and storage, and MoR's first and last write
+SNU, SNI = snapshots(UPD, UN, READS_U), snapshots(ING, IN, READS_U)
+CMP = ["MoR", "MoR (compacted)"]
+CMU, CMI = snapshots(UPD, CMP, READS_U), snapshots(ING, CMP, READS_U)
+WRU, STU = written(UPD), stored(UPD)
+WRI, STI = written(ING), stored(ING)
+WR_MOR = [at_step("w128-upd-mor", "batch", n) for n in (1, 240)]
+```
+
+## What it shows
+
+- **Updates: RMoR writes faster than MoR and reads a range
+  {eval}`f"{v(U, S3X, 'MoR', 'window_s') / v(U, S3X, 'RMoR', 'window_s'):.1f}"` times as fast;
+  RMoW-external is faster still at both.** On S3 Express RMoR's writes take
+  {eval}`f1(v(U, S3X, "RMoR", "write_s"))` s on average against MoR's
+  {eval}`f1(v(U, S3X, "MoR", "write_s"))`, and its 1% range reads
+  {eval}`f1(v(U, S3X, "RMoR", "window_s"))` s against {eval}`f1(v(U, S3X, "MoR", "window_s"))`.
+  RMoW-external takes {eval}`f1(v(U, S3X, "RMoW-external", "write_s"))` s to write and
+  {eval}`f1(v(U, S3X, "RMoW-external", "window_s"))` s to read a range: the footers it appends
+  drop the rows it replaced, so it reads no deletion vectors, and fewer files. RMoR-density takes
+  {eval}`f1(v(U, S3X, "RMoR-density", "write_s"))` s and {eval}`f1(v(U, S3X, "RMoR-density", "window_s"))`
+  s (sections 1 and 2).
+- **MoR slows as snapshots are added; RMoR does not.** Each MoR write reads more than the last to
+  find the rows it changes, from {eval}`f0(WR_MOR[0].mb)` MB at the first to
+  {eval}`f0(WR_MOR[1].mb)` MB at the 240th, and its range read takes
+  {eval}`f"{at(SNU, 'MoR', READ['window_s'], 240) / at(SNU, 'MoR', READ['window_s'], 1):.1f}"` times as
+  long after 240 writes as after the first on S3 Express (section 2).
+- **RMoR's full scans slow on Azure Blob:** it reads the table in pieces of 1 to 16 MB, which Azure
+  Blob serves far more slowly than whole row groups, so after 240 writes a scan takes
+  {eval}`f0(at(SNU, "RMoR", READ["full_s"], 240, AZ))` s against MoR's
+  {eval}`f0(at(SNU, "MoR", READ["full_s"], 240, AZ))` (section 2).
+- **The region designs write far more:** over the 240 writes RMoR writes
+  {eval}`f0(gb(WRU, "RMoR") / gb(WRU, "MoR"))` times MoR's {eval}`f1(gb(WRU, "MoR"))` GB, and
+  RMoR-density {eval}`f1(gb(WRU, "RMoR-density"))` GB. RMoW-append, copying whole row groups,
+  writes {eval}`f1(gb(WRU, "RMoW-append", 30))` GB in its 30 writes (section 3).
+- **Inserts: RMoR-density keeps range reads fast for dearer writes.** On S3 Express its range reads
+  take {eval}`f1(v(I, S3X, "RMoR-density", "window_s"))` s on average against MoR's
+  {eval}`f1(v(I, S3X, "MoR", "window_s"))`, and its writes {eval}`f1(v(I, S3X, "RMoR-density", "write_s"))`
+  s against {eval}`f2(v(I, S3X, "MoR", "write_s"))`. Its full scans are slower,
+  {eval}`f0(v(I, S3X, "RMoR-density", "full_s"))` s against {eval}`f0(v(I, S3X, "MoR", "full_s"))`,
+  over its {eval}`f0(gb(STI, "RMoR-density", col="row_groups"))` row groups (sections 6 to 8).
+- **Compaction roughly halves MoR's range reads, at a price in writes.** After 240 writes, Iceberg's
+  rule brings MoR's range read on S3 Express from
+  {eval}`f1(at(CMU, "MoR", READ["window_s"], 240))` s to
+  {eval}`f1(at(CMU, "MoR (compacted)", READ["window_s"], 240))` on the updates and from
+  {eval}`f1(at(CMI, "MoR", READ["window_s"], 240))` s to
+  {eval}`f1(at(CMI, "MoR (compacted)", READ["window_s"], 240))` on the inserts. With its compactions
+  spread over the writes, a write costs {eval}`f1(v(U, S3X, "MoR (compacted)", "write_s"))` s against
+  {eval}`f1(v(U, S3X, "MoR", "write_s"))` on the updates and
+  {eval}`f1(v(I, S3X, "MoR (compacted)", "write_s"))` s against
+  {eval}`f2(v(I, S3X, "MoR", "write_s"))` on the inserts (sections 5 and 10).
 
 ## Setup
 
@@ -320,6 +396,19 @@ table(runs)
 
 ### 1. Write latency against read latency
 
+On the updates RMoR costs less than MoR for writes and for range reads. Its writes take
+{eval}`f1(v(U, S3X, "RMoR", "write_s"))` s on average on S3 Express against MoR's
+{eval}`f1(v(U, S3X, "MoR", "write_s"))`, and its 1% range reads
+{eval}`f1(v(U, S3X, "RMoR", "window_s"))` s against {eval}`f1(v(U, S3X, "MoR", "window_s"))`.
+RMoW-external, which drops the old rows with a new footer instead of a deletion vector, is the
+fastest at both: it writes in {eval}`f1(v(U, S3X, "RMoW-external", "write_s"))` s and reads a range
+in {eval}`f1(v(U, S3X, "RMoW-external", "window_s"))` s, reading no deletion vectors, and fewer files
+(section 2). RMoR-density writes in {eval}`f1(v(U, S3X, "RMoR-density", "write_s"))` s and reads a
+range in {eval}`f1(v(U, S3X, "RMoR-density", "window_s"))` s. MoR's writes cost more because each reads more than the last (section 2). On Azure Blob RMoR's
+full scans are slower than MoR's, {eval}`f0(v(U, AZ, "RMoR", "full_s"))` s against
+{eval}`f0(v(U, AZ, "MoR", "full_s"))`, since they read the table in smaller pieces, which Azure Blob
+serves more slowly (section 2).
+
 ```{code-cell} ipython3
 :label: workloads-128-updates-tradeoff
 :tags: [remove-input]
@@ -344,13 +433,97 @@ RMoW-append ran the first 30 writes. Over those, the designs compare as follows:
 table(fig.wl_twin(U30, READS_U), caption="Each design's mean write and reads over the first 30 writes, simulated (s)")
 ```
 
+RMoW-append's writes cost the most, {eval}`f1(v(U30, S3X, "RMoW-append", "write_s"))` s on S3
+Express against RMoR's {eval}`f1(v(U30, S3X, "RMoR", "write_s"))`, as each copies whole 128 MiB
+row groups. Its range reads are the fastest, {eval}`f2(v(U30, S3X, "RMoW-append", "window_s"))` s.
+
 ### 2. Latency as snapshots are added
 
 ```{code-cell} ipython3
 :tags: [remove-cell]
 
-SNU = snapshots(UPD, UN, READS_U)
+WR_RMOR = at_step("w128-upd-rmor", "batch", 240)
+FULL_U = {n: at_step(l, "read_full", 240) for l, _, n in UPD}
+WIN_RANGE = {n: series(SNU, n, READ["window_s"]) for n in ["RMoR", "RMoW-external", "RMoR-density"]}
+
+
+def scan_sizes(label, step=240):
+    """Havoc's run's full scan after a write: its reads of 1 to 16 MB and of 64 MB or more (count, GB)."""
+    return q(f"""SELECT count(*) FILTER (WHERE q.length >= 1e6 AND q.length < 16e6) AS mid_n,
+                        sum(q.length) FILTER (WHERE q.length >= 1e6 AND q.length < 16e6) / 1e9 AS mid_gb,
+                        count(*) FILTER (WHERE q.length >= 64e6) AS big_n,
+                        sum(q.length) FILTER (WHERE q.length >= 64e6) / 1e9 AS big_gb
+                 FROM requests q JOIN canonical_runs r USING (run_id)
+                 WHERE list_contains(r.campaigns, 'w128') AND r.label = '{label}' AND q.phase = 'read_full'
+                   AND q.step = {step} AND q.reader = 'cached-skip' AND q.kind = 'get_range'""").iloc[0]
+
+
+SCAN_RMOR, SCAN_MOR = scan_sizes("w128-upd-rmor"), scan_sizes("w128-upd-mor")
+# how fast a read streams at a size, by the latency test the times are priced with (views/65_sized.sql)
+RATE = q(f"""SELECT profile, bytes, bytes / 1e6 / (ms / 1e3) AS mb_s FROM sized_points
+             WHERE op = 'get' AND profile IN ({", ".join(f"'{s}'" for s in tune.SPIKES.values())})""")
+
+
+def rate(store, mib):
+    p = tune.SPIKES[{S3X: "s3x", AZ: "azure"}[store]]
+    return RATE[(RATE.profile == p) & (RATE.bytes == mib << 20)].mb_s.iloc[0]
+
+
+def files_read(label, phase, step=240):
+    """Havoc's run's write (phase batch) or reads after it, at a write: its reads of deletion
+    vectors, and the Parquet files it read from."""
+    return q(f"""SELECT count(*) FILTER (WHERE q.object LIKE '%.puffin') AS dvs,
+                        count(DISTINCT q.object) FILTER (WHERE q.object LIKE '%.parquet') AS files
+                 FROM requests q JOIN canonical_runs r USING (run_id)
+                 WHERE list_contains(r.campaigns, 'w128') AND r.label = '{label}' AND q.phase = '{phase}'
+                   AND q.step = {step} AND (q.phase = 'batch' OR q.reader = 'cached-skip')
+                   AND q.kind = 'get_range'""").iloc[0]
+
+
+FR = {(n, what): files_read(l, phase) for l, n in [("w128-upd-rmor", "RMoR"), ("w128-upd-external", "RMoW-external")]
+      for what, phase in [("write", "batch"), ("window", "read_window")]}
 ```
+
+MoR's writes slow as writes are added: on S3 Express a write takes
+{eval}`f1(mean_over(SNU, "MoR", WRITE, 1, 10))` s on average over the first 10 writes and
+{eval}`f1(mean_over(SNU, "MoR", WRITE, 231, 240))` s over the last 10. To find the rows a write
+changes, MoR reads every file whose keys may hold one, and every earlier write left a file of new
+versions spread over the keys it changed: its first write reads {eval}`f0(WR_MOR[0].mb)` MB, its
+240th {eval}`f0(WR_MOR[1].mb)` MB. RMoR's 240th write reads {eval}`f0(WR_RMOR.mb)` MB, and its writes
+take {eval}`f1(mean_over(SNU, "RMoR", WRITE, 231, 240))` s over the last 10.
+
+MoR's 1% range read slows the same way, from {eval}`f1(at(SNU, "MoR", READ["window_s"], 1))` s after
+the first write to {eval}`f1(at(SNU, "MoR", READ["window_s"], 240))` s after the 240th on S3
+Express, and to {eval}`f1(at(SNU, "MoR", READ["window_s"], 240, AZ))` s on Azure Blob. RMoR's
+stays between {eval}`f1(WIN_RANGE["RMoR"].min())` and {eval}`f1(WIN_RANGE["RMoR"].max())` s,
+RMoW-external's between {eval}`f1(WIN_RANGE["RMoW-external"].min())` and
+{eval}`f1(WIN_RANGE["RMoW-external"].max())` s, and RMoR-density's between
+{eval}`f1(WIN_RANGE["RMoR-density"].min())` and {eval}`f1(WIN_RANGE["RMoR-density"].max())` s.
+RMoW-append's, over its 30 writes, stays at {eval}`f2(at(SNU, "RMoW-append", READ["window_s"], 30))`
+s: its writes leave the table as many live row groups as before, and no deletes to apply.
+
+RMoW-external reads less than RMoR, for writes and for range reads. A footer it appends to a file
+lists only the row groups the file still holds, and the file's statistics are taken from that
+footer, so a read can pass over a file whose rows in its range were all replaced. RMoR's files keep
+the statistics of every row they held, with a deletion vector over those replaced. The five range
+reads after the 240th write read from {eval}`f0(FR["RMoW-external", "window"].files)` files and no
+deletion vectors on RMoW-external's table, from {eval}`f0(FR["RMoR", "window"].files)` files and
+{eval}`f0(FR["RMoR", "window"].dvs)` deletion vectors on RMoR's. The 240th write itself reads from
+{eval}`f0(FR["RMoW-external", "write"].files)` files on RMoW-external's table, and from
+{eval}`f0(FR["RMoR", "write"].files)` files and {eval}`f0(FR["RMoR", "write"].dvs)` deletion vectors
+on RMoR's.
+
+RMoR's full scans hold steady on S3 Express and slow on Azure Blob, from
+{eval}`f0(at(SNU, "RMoR", READ["full_s"], 10, AZ))` s after 10 writes to
+{eval}`f0(at(SNU, "RMoR", READ["full_s"], 240, AZ))` s after 240 (MoR's:
+{eval}`f0(at(SNU, "MoR", READ["full_s"], 240, AZ))` s). After 240 writes RMoR's table is
+{eval}`f0(gb(ST[ST.label == "w128-upd-rmor"], "RMoR", col="row_groups"))` row groups to MoR's
+{eval}`f0(gb(ST[ST.label == "w128-upd-mor"], "MoR", col="row_groups"))`, so a full scan reads most
+of it in pieces: {eval}`f1(SCAN_RMOR.mid_gb)` GB in {eval}`f0(SCAN_RMOR.mid_n)` reads of 1 to 16
+MB, where MoR's reads {eval}`f1(SCAN_MOR.big_gb)` GB in {eval}`f0(SCAN_MOR.big_n)` reads of whole row
+groups. By the stores' latency tests, a read streams about as fast at either size on S3 Express
+({eval}`f0(rate(S3X, 8))` MB/s at 8 MiB, {eval}`f0(rate(S3X, 128))` at 128 MiB), but not on Azure
+Blob ({eval}`f0(rate(AZ, 8))` and {eval}`f0(rate(AZ, 128))` MB/s).
 
 ```{code-cell} ipython3
 :label: workloads-128-updates
@@ -389,7 +562,6 @@ fig.wl_snapshot_table(SNU, READ["sorted_s"], every=10)
 ```{code-cell} ipython3
 :tags: [remove-cell]
 
-WRU, STU = written(UPD), stored(UPD)
 UNAMES = [n for _, _, n in UPD]
 REG = ["RMoR", "RMoW-external"]
 ```
@@ -444,6 +616,20 @@ storage_table(STU, UNAMES)
 UP = parts(UPD, [n for n in UN if n != "RMoW-append"])
 ```
 
+On S3 Express MoR's write spends {eval}`f1(part_s(UP, "MoR", WRITE, "decode"))` s decoding the
+files it reads to find the changed rows, and {eval}`f1(part_s(UP, "MoR", WRITE, "I/O"))` s on I/O.
+RMoR's spends {eval}`f1(part_s(UP, "RMoR", WRITE, "decode"))` s decoding and
+{eval}`f1(part_s(UP, "RMoR", WRITE, "I/O"))` s on I/O, and {eval}`f1(part_s(UP, "RMoR", WRITE, "encode"))`
+s encoding the pieces of row groups it copies. RMoW-external's spends
+{eval}`f1(part_s(UP, "RMoW-external", WRITE, "decode"))` s decoding and
+{eval}`f1(part_s(UP, "RMoW-external", WRITE, "I/O"))` s on I/O, and its range read
+{eval}`f2(part_s(UP, "RMoW-external", READ["window_s"], "I/O"))` s on I/O against RMoR's
+{eval}`f2(part_s(UP, "RMoR", READ["window_s"], "I/O"))`: it opens fewer files and reads no deletion
+vectors (section 2). MoR's range read is
+{eval}`f"{share_of(UP, S3X, 'MoR', READ['window_s'], 'I/O'):.0%}"` I/O. On Azure Blob RMoR's full
+scan spends {eval}`f0(part_s(UP, "RMoR", READ["full_s"], "I/O", AZ))` s on I/O against MoR's
+{eval}`f0(part_s(UP, "MoR", READ["full_s"], "I/O", AZ))`, for its smaller reads (section 2).
+
 ```{code-cell} ipython3
 :label: workloads-128-updates-parts
 :tags: [remove-input]
@@ -465,9 +651,47 @@ table(UP.pivot_table(index=["Store", "what", "name"], columns="part", values="s"
 ```{code-cell} ipython3
 :tags: [remove-cell]
 
-CMP = ["MoR", "MoR (compacted)"]
-CMU = snapshots(UPD, CMP, READS_U)
+# each compaction that did anything (havoc's runs): how many, from which write, the bytes the first
+# read, the bytes each read (least, most) and all they wrote
+COMP = q("""SELECT s.label, count(*) AS n, min(s.step) AS first, arg_min(s.bytes_read, s.step) / 1e6 AS first_mb,
+                   min(s.bytes_read) / 1e6 AS lo_mb, max(s.bytes_read) / 1e6 AS hi_mb,
+                   sum(s.bytes_written) / 1e9 AS gb
+            FROM steps s JOIN canonical_runs r USING (run_id)
+            WHERE list_contains(r.campaigns, 'w128') AND s.phase = 'compact' AND s.requests > 0
+            GROUP BY 1""").set_index("label")
+
+
+def compaction_s(d, store=S3X):
+    """The simulated time of each compaction (MoR (compacted)'s compaction phases that did anything)."""
+    return d[(d.Store == store) & (d.what == "a compaction")].s
+
+
+def c(label, col):
+    return COMP.loc[label, col]
 ```
+
+Iceberg's rule compacted after {eval}`f0(c("w128-upd-compact", "n"))` of the 240 writes, the
+first after write {eval}`f0(c("w128-upd-compact", "first"))` (the crosses). Each compaction
+rewrites the small files written since the last together with the part-full file the previous
+compaction wrote, so it reads more each time, up to {eval}`f0(c("w128-upd-compact", "hi_mb"))` MB,
+until that file is full and the next one starts another from
+{eval}`f0(c("w128-upd-compact", "lo_mb"))` MB. The first took in the last file of the table as
+loaded, which was part full, so it read {eval}`f0(c("w128-upd-compact", "first_mb"))` MB, and its
+climb starts high. Its time climbs with it, from {eval}`f1(compaction_s(CMU).min())` s to
+{eval}`f1(compaction_s(CMU).max())` s on S3 Express. In all they write
+{eval}`f1(c("w128-upd-compact", "gb"))` GB. Spread over the writes, a write costs
+{eval}`f1(v(U, S3X, "MoR (compacted)", "write_s"))` s on S3 Express against MoR's
+{eval}`f1(v(U, S3X, "MoR", "write_s"))`.
+
+They keep the reads from slowing as MoR's do. After 240 writes a 1% range read takes
+{eval}`f1(at(CMU, "MoR (compacted)", READ["window_s"], 240))` s on S3 Express against MoR's
+{eval}`f1(at(CMU, "MoR", READ["window_s"], 240))`, and
+{eval}`f1(at(CMU, "MoR (compacted)", READ["window_s"], 240, AZ))` s against
+{eval}`f1(at(CMU, "MoR", READ["window_s"], 240, AZ))` on Azure Blob; a sorted read
+{eval}`f0(at(CMU, "MoR (compacted)", READ["sorted_s"], 240))` s against
+{eval}`f0(at(CMU, "MoR", READ["sorted_s"], 240))` on S3 Express. Over the first writes its range
+reads are slower than MoR's: {eval}`f1(at(CMU, "MoR (compacted)", READ["window_s"], 10))` s against
+{eval}`f1(at(CMU, "MoR", READ["window_s"], 10))` after 10 writes.
 
 ```{code-cell} ipython3
 :label: workloads-128-updates-compaction
@@ -486,6 +710,19 @@ fig.wl_snapshot_table(CMU, READ["window_s"], every=10)
 ## Inserts
 
 ### 6. Write latency against read latency
+
+On the inserts MoR's writes cost least by far. Each one adds a file of the new rows, taking
+{eval}`f2(v(I, S3X, "MoR", "write_s"))` s on S3 Express. RMoR-density's writes take
+{eval}`f1(v(I, S3X, "RMoR-density", "write_s"))` s on average (from
+{eval}`f1(v(I, S3X, "RMoR-density", "write_lo"))` to {eval}`f1(v(I, S3X, "RMoR-density", "write_hi"))`
+s, the 10th to the 90th percentile), as each rewrites the newest rows waiting to fill a row group
+(section 7). In return its 1% range reads take {eval}`f1(v(I, S3X, "RMoR-density", "window_s"))` s
+against MoR's {eval}`f1(v(I, S3X, "MoR", "window_s"))`. Its full scans are slower,
+{eval}`f0(v(I, S3X, "RMoR-density", "full_s"))` s against {eval}`f0(v(I, S3X, "MoR", "full_s"))`.
+Its sorted reads take {eval}`f0(v(I, S3X, "RMoR-density", "sorted_s"))` s against
+{eval}`f0(v(I, S3X, "MoR", "sorted_s"))` on S3 Express, and
+{eval}`f0(v(I, AZ, "RMoR-density", "sorted_s"))` against {eval}`f0(v(I, AZ, "MoR", "sorted_s"))` on
+Azure Blob.
 
 ```{code-cell} ipython3
 :label: workloads-128-inserts-tradeoff
@@ -508,8 +745,47 @@ table(fig.wl_twin(IM, READS_U), caption="Each design's mean write and reads over
 ```{code-cell} ipython3
 :tags: [remove-cell]
 
-SNI = snapshots(ING, IN, READS_U)
+WIN_MOR, WIN_DEN = at_step("w128-ing-mor", "read_window", 240), at_step("w128-ing-density", "read_window", 240)
+FULL_MOR, FULL_DEN = at_step("w128-ing-mor", "read_full", 240), at_step("w128-ing-density", "read_full", 240)
+# what each of RMoR-density's writes wrote (MB, havoc's run): the newest rows' delta row group grows
+# by a write's rows, then starts again once they fill a row group
+DW = q("""SELECT s.step, s.bytes_written / 1e6 AS mb FROM steps s JOIN canonical_runs r USING (run_id)
+          WHERE list_contains(r.campaigns, 'w128') AND s.label = 'w128-ing-density' AND s.phase = 'batch'
+            AND s.step >= 1 ORDER BY 1""")
+DW_GROWTH = DW.mb.diff()[DW.mb.diff() > 0].median()
+DW_CYCLE = len(DW) / (DW.mb.diff() < 0).sum()
+
+
+def passes(d, a, b, what, store=S3X):
+    """The first write after which a's time stays above b's."""
+    x = (series(d, a, what, store) - series(d, b, what, store)).dropna()
+    below = x[x <= 0]
+    return x.index[x.index > below.index.max()].min() if len(below) else x.index.min()
+
+
+DEN_W = series(SNI, "RMoR-density", WRITE)
 ```
+
+MoR's 1% range read slows as writes are added, from
+{eval}`f1(at(SNI, "MoR", READ["window_s"], 10))` s after 10 writes to
+{eval}`f1(at(SNI, "MoR", READ["window_s"], 240))` s after 240 on S3 Express, and to
+{eval}`f1(at(SNI, "MoR", READ["window_s"], 240, AZ))` s on Azure Blob. Each write's file holds a few
+rows that arrived late, so its event times reach back over older ranges, and a range read over them
+must read it. After 240 writes MoR's range read reads {eval}`f0(WIN_MOR.mb)` MB for
+{eval}`f1(WIN_MOR.rows / 1e6)` million rows. RMoR-density's reads {eval}`f0(WIN_DEN.mb)` MB, since
+it places each late row in the row group that holds its event time; its range read never takes
+more than {eval}`f1(series(SNI, "RMoR-density", READ["window_s"]).max())` s on S3 Express.
+
+RMoR-density's writes rise and fall. The newest rows wait in a delta row group, which each write
+reads and writes again with its own rows added, about {eval}`f0(DW_GROWTH)` MB more each time.
+Every {eval}`f0(DW_CYCLE)` writes they fill a row group, and the next write starts a new delta. Its
+writes take from {eval}`f1(DEN_W.min())` s to {eval}`f1(DEN_W.max())` s on S3 Express.
+
+Its full scans and sorted reads slow faster than MoR's. They read the same bytes in many more,
+smaller row groups (section 8 counts them): after 240 writes a full scan reads
+{eval}`f1(FULL_DEN.mb / 1e3)` GB in {eval}`f0(FULL_DEN.requests)` requests, MoR's
+{eval}`f1(FULL_MOR.mb / 1e3)` GB in {eval}`f0(FULL_MOR.requests)`. Its sorted read is slower than
+MoR's after {eval}`f0(passes(SNI, "RMoR-density", "MoR", READ["sorted_s"]))` writes on S3 Express.
 
 ```{code-cell} ipython3
 :label: workloads-128-inserts
@@ -542,7 +818,6 @@ fig.wl_snapshot_table(SNI, READ["sorted_s"], every=10)
 ```{code-cell} ipython3
 :tags: [remove-cell]
 
-WRI, STI = written(ING), stored(ING)
 INAMES = [n for _, _, n in ING]
 ```
 
@@ -592,6 +867,15 @@ storage_table(STI, INAMES)
 IP = parts(ING, IN)
 ```
 
+A MoR write takes {eval}`f2(part_s(IP, "MoR", WRITE))` s: encoding the new rows, and one upload.
+Most of RMoR-density's write is the delta it writes again (section 7):
+{eval}`f1(part_s(IP, "RMoR-density", WRITE, "encode"))` s encoding and
+{eval}`f1(part_s(IP, "RMoR-density", WRITE, "I/O"))` s of I/O on S3 Express. MoR's range read is
+{eval}`f"{share_of(IP, S3X, 'MoR', READ['window_s'], 'I/O'):.0%}"` I/O, the bytes of section 7. A
+full scan spends about as long decoding in either design; RMoR-density's spends more on I/O,
+{eval}`f0(part_s(IP, "RMoR-density", READ["full_s"], "I/O"))` s against MoR's
+{eval}`f0(part_s(IP, "MoR", READ["full_s"], "I/O"))` on S3 Express, for its many more requests.
+
 ```{code-cell} ipython3
 :label: workloads-128-inserts-parts
 :tags: [remove-input]
@@ -610,11 +894,26 @@ table(IP.pivot_table(index=["Store", "what", "name"], columns="part", values="s"
 
 ### 10. Compaction
 
-```{code-cell} ipython3
-:tags: [remove-cell]
+On the inserts the rule compacted after {eval}`f0(c("w128-ing-compact", "n"))` writes, the first
+after write {eval}`f0(c("w128-ing-compact", "first"))`. Again each compaction reads the part-full
+file the previous one wrote, from {eval}`f0(c("w128-ing-compact", "lo_mb"))` MB to
+{eval}`f0(c("w128-ing-compact", "hi_mb"))` MB (the first, with the part-full last file of the table
+as loaded, {eval}`f0(c("w128-ing-compact", "first_mb"))` MB), taking from {eval}`f1(compaction_s(CMI).min())` s to
+{eval}`f1(compaction_s(CMI).max())` s on S3 Express; in all they write
+{eval}`f1(c("w128-ing-compact", "gb"))` GB. Spread over the writes, a write costs
+{eval}`f1(v(I, S3X, "MoR (compacted)", "write_s"))` s against MoR's
+{eval}`f2(v(I, S3X, "MoR", "write_s"))`.
 
-CMI = snapshots(ING, CMP, READS_U)
-```
+After 240 writes a 1% range read takes {eval}`f1(at(CMI, "MoR (compacted)", READ["window_s"], 240))`
+s against MoR's {eval}`f1(at(CMI, "MoR", READ["window_s"], 240))` on S3 Express, and
+{eval}`f1(at(CMI, "MoR (compacted)", READ["window_s"], 240, AZ))` s against
+{eval}`f1(at(CMI, "MoR", READ["window_s"], 240, AZ))` on Azure Blob; a sorted read
+{eval}`f0(at(CMI, "MoR (compacted)", READ["sorted_s"], 240))` s against
+{eval}`f0(at(CMI, "MoR", READ["sorted_s"], 240))` on S3 Express. A full scan, which reads every row
+either way, takes {eval}`f0(at(CMI, "MoR (compacted)", READ["full_s"], 240))` s against
+{eval}`f0(at(CMI, "MoR", READ["full_s"], 240))` on S3 Express, and
+{eval}`f0(at(CMI, "MoR (compacted)", READ["full_s"], 240, AZ))` s against
+{eval}`f0(at(CMI, "MoR", READ["full_s"], 240, AZ))` on Azure Blob.
 
 ```{code-cell} ipython3
 :label: workloads-128-inserts-compaction

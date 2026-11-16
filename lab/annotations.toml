@@ -39,7 +39,7 @@ title = "Every design on both workloads at Iceberg's 128 MiB row groups (docs/HY
 select = ["where:label LIKE 'w128-%' AND host = 'havoc'"]
 
 [campaigns.w128-twins]
-title = "Campaign w128's nine configurations again on the laptop, for their work: instruction counters, which havoc's container lacks (lab/pages/workloads-128.md prices havoc's requests and adds this work). At 7590d4a (build snapshot 20261115T071921Z-7590d4a6d299), one at a time with a 12g heap; their requests and bytes must equal havoc's runs'"
+title = "Campaign w128's nine configurations again on the laptop, for their work: instruction counters, which havoc's container lacks (lab/pages/workloads-128.md prices havoc's requests and adds this work). At 7590d4a (build snapshot 20261115T071921Z-7590d4a6d299), one at a time with a 12g heap (w128-upd-external, which ran out of it, with 18g); their requests and bytes equal havoc's runs' record for record (steps_diff)"
 select = ["where:label LIKE 'w128-%' AND host <> 'havoc'"]
 
 [campaigns.prices]
