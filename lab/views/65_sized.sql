@@ -91,8 +91,11 @@ WITH streams AS (
              AS stream
     FROM requests WHERE kind IN ('get_stream', 'stream_bytes')
 ),
+-- one row per stream, not per object: a writer reads a footer as parquet-java does, in two streams
+-- of one object (its last 8 bytes, then the footer), each a GET. Until 2026-11-16 the two were one
+-- row, priced as one GET of both sizes, and the second GET went unpriced (its size null)
 stream_sizes AS (
-    SELECT run_id, arm, step, phase, reader, task, object,
+    SELECT run_id, arm, step, phase, reader, task, object, stream,
            min(seq) FILTER (WHERE kind = 'get_stream') AS seq,
            coalesce(sum(length) FILTER (WHERE kind = 'stream_bytes'), 0) AS bytes,
            sum(dur_ns) AS dur_ns
