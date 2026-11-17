@@ -1,0 +1,12 @@
+{
+  "description": "Verification runs (--verify; README, Correctness) of the five 128 MiB update configurations whose writers prune by key (configs/w128k-upd-*.json, campaign w128-keys-2): every read checks each row it returns against the reference model, and payloads are not checked (the configs' verifyRows is off). Nothing is measured: the laptop's runs of the same configurations measure, and these vouch for them, request for request and byte for byte (steps_diff). One configuration a job; 240 writes each.",
+  "flags": ["--verify"],
+  "cores_per_job": 2,
+  "jobs": [
+    {"config": "configs/w128k-upd-mor.json", "heap": "32g", "store_gib": 25},
+    {"config": "configs/w128k-upd-compact.json", "heap": "32g", "store_gib": 60},
+    {"config": "configs/w128k-upd-rmor.json", "heap": "32g", "store_gib": 60},
+    {"config": "configs/w128k-upd-external.json", "heap": "32g", "store_gib": 60},
+    {"config": "configs/w128k-upd-density.json", "heap": "32g", "store_gib": 40}
+  ]
+}
