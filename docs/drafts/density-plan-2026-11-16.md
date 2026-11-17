@@ -34,9 +34,9 @@ change* (what a stock reader must understand), and which designs need appends (R
   - under `locate` `scan`, a key-column read in every write whose key range spans it.
 - **The scan for a write's rows hides the copies' cost.** At 128 MiB RMoR-density's scan grows from
   2.2 s to 13.3 s a write over the 240 writes on S3 Express, most of what its write slows by
-  (workloads-128.md, section 2). With `keys` the forecast is 13.3 s a write on average against 20.3
-  (HYPOTHESES.md, 2026-11-16, queued). After `keys`, what is left of the scan is per file: two
-  footer GETs, and a DV loaded before pruning.
+  (under `scan`). With `keys` its write takes 13.6 s on average against 20.3 (2026-11-17,
+  suite-128.md, K3), and what is left of the scan is per file: two footer GETs, and a DV loaded
+  before pruning.
 - **Density is already cumulative.** A v3 data file has one DV, and each write that deletes more of
   its rows writes the union, so the DV on a row group sums every commit's deletes and updates. θ
   counts its dead rows in the row group plus the rows waiting for the region in delta row groups.
@@ -75,9 +75,11 @@ footer must recompute them (or drop the statistics): one more reason it is a for
 
 ## Steps, in order
 
-1. **Locate by key at 128 MiB** (registered as K1–K3, queued on the laptop). It takes the scan's
-   growth out of the writes, so the steps below judge copies and reads. The results page switches to
-   these runs once they are judged; Appendix A shows what pruning by key takes off.
+1. **Locate by key at 128 MiB** (K1–K3; done 2026-11-17, lab/pages/suite-128.md). It took most of
+   the scan's growth out of the writes: RMoR-density's writes now slow from 6.8 s over the first 10
+   to 10.8 over the last 10 (8.0 to 21.7 under `scan`), what is left being each file's footer and
+   deletion vector. The results page uses these runs; Appendix A shows what pruning by key takes
+   off.
 2. **A sparse workload with hot regions, with no new code.** `updateShare` 0 makes each change a
    row of its own, in a region picked by heat (`REGIONS`, skew 1; decided: hot regions, or density
    has little to work with). A write's 150,000 changes then fall thinly over most row groups and

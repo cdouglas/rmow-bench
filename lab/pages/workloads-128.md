@@ -55,9 +55,11 @@ def spec(runs, names=None):
     return [(l, a, family(n), "", "", n, 0) for l, a, n in runs if names is None or n in names]
 
 
-# Simulated time per phase: havoc's requests priced by size from each store's latency test, plus the
-# phase's work as its laptop twin measured it (campaign w128-twins: user-mode instructions at the
-# arm's pace on the laptop, views/35_work.sql). Nothing stands in for a twin that has not run.
+# Simulated time per phase: a run's requests priced by size from each store's latency test, plus the
+# phase's work (user-mode instructions at the arm's pace on the laptop, views/35_work.sql). The
+# updates are timed from their w128-keys runs (below); RMoW-append and the inserts from havoc's
+# requests and the work their laptop twins measured (campaign w128-twins). Nothing stands in for a
+# twin that has not run.
 class TwinsOnly:
     def predict(self, d):
         return np.full(len(d), np.nan)
@@ -65,7 +67,7 @@ class TwinsOnly:
 
 GRID = "(list_contains(campaigns, 'w128') OR list_contains(campaigns, 'w128-twins'))"
 tune.READS["sorted"] = ("read_sorted", "cached-skip")
-tune.WORKLOADS["w128_upd"] = "regexp_matches(label, '^w128-upd-')"
+tune.WORKLOADS["w128_upd"] = "label = 'w128-upd-append'"
 tune.WORKLOADS["w128_ing"] = "regexp_matches(label, '^w128-ing-')"
 
 
@@ -75,7 +77,34 @@ def simulated(workload):
     return d.assign(Store=d.store.map(fig.WL_STORE), s=d.ms / 1e3)
 
 
-S = pd.concat([simulated("w128_upd"), simulated("w128_ing")], ignore_index=True)
+# The updates are timed from runs whose writers prune row groups by each changed key (locate keys,
+# campaign w128-keys, docs/HYPOTHESES.md 2026-11-16): on the laptop, each run's own requests priced by
+# size and its own work, for its writes, reads and compactions alike. RMoW-append finds its rows from
+# its footers alone, so it has no such run.
+KEYS = {l: l.replace("w128-", "w128k-") for l, _, n in UPD if n != "RMoW-append"}
+KEYS_RUN = {l: q(f"""SELECT run_id FROM canonical_runs
+                     WHERE list_contains(campaigns, 'w128-keys') AND label = '{k}'""").run_id.iloc[0]
+            for l, k in KEYS.items()}
+
+
+def keys_steps():
+    """tune.steps()'s form for the w128-keys runs, under their w128 configurations' labels."""
+    out = []
+    for label, run in KEYS_RUN.items():
+        for store, spike in tune.SPIKES.items():
+            d = q(f"""SELECT run_id, arm, step, phase, coalesce(reader, '') AS reader, request_ms, requests, work_ms
+                      FROM sized_latency('{run}', '{spike}')""")
+            out.append(d.assign(store=store, label=label, source="measured"))
+    d = pd.concat(out, ignore_index=True)
+    priced = d.phase.isin(["batch", "compact"])
+    for phase, reader in tune.READS.values():
+        priced |= (d.phase == phase) & (d.reader == reader)
+    d = d[priced].copy()
+    d["ms"] = d.work_ms + d.request_ms
+    return d.assign(Store=d.store.map(fig.WL_STORE), s=d.ms / 1e3)
+
+
+S = pd.concat([simulated("w128_upd"), keys_steps(), simulated("w128_ing")], ignore_index=True)
 
 
 def means(d):
@@ -144,13 +173,21 @@ def series(d, name, what, store=S3X):
     return d[(d.Store == store) & (d.name == name) & (d.what == what)].set_index("step").s
 
 
+def run_of(label):
+    """The run a configuration is timed from: an update's w128-keys run where it has one, else
+    havoc's w128 run."""
+    if label in KEYS:
+        return KEYS_RUN[label]
+    return q(f"""SELECT run_id FROM canonical_runs
+                 WHERE list_contains(campaigns, 'w128') AND label = '{label}'""").run_id.iloc[0]
+
+
 def at_step(label, phase, step):
-    """Havoc's run's phase after a write: requests, MB read and written, and rows (a read's the mean
-    over its probes, by the reader every design reads with here)."""
+    """A configuration's phase after a write: requests, MB read and written, and rows (a read's the
+    mean over its probes, by the reader every design reads with here)."""
     return q(f"""SELECT avg(s.requests) AS requests, avg(s.bytes_read) / 1e6 AS mb,
                         avg(s.bytes_written) / 1e6 AS mb_written, avg(s.rows) AS rows
-                 FROM steps s JOIN canonical_runs r USING (run_id)
-                 WHERE list_contains(r.campaigns, 'w128') AND s.label = '{label}' AND s.phase = '{phase}'
+                 FROM steps s WHERE s.run_id = '{run_of(label)}' AND s.phase = '{phase}'
                    AND (s.phase = 'batch' OR s.reader = 'cached-skip') AND s.step = {step}""").iloc[0]
 
 
@@ -177,7 +214,7 @@ def written_chart(d, names):
 
 STORAGE = {"kept": "every snapshot kept", "expired": "older snapshots expired"}
 ST = q("""SELECT r.label, s.arm, s.step, s.stored_bytes / 1e9 AS kept, (s.stored_bytes - s.reclaimable_bytes) / 1e9 AS expired,
-                 s.row_groups
+                 s.row_groups, s.data_files
           FROM steps s JOIN canonical_runs r USING (run_id)
           WHERE list_contains(r.campaigns, 'w128') AND s.phase = 'state' ORDER BY 1, 2, 3""")
 ST["name"] = [{(l, a): n for l, a, n in UPD + ING}[k] for k in zip(ST.label, ST.arm)]
@@ -215,12 +252,16 @@ def gb(d, name, step=240, col="gb"):
     return d[(d.name == name) & (d.step == step)][col].iloc[0]
 
 
-# Where the time goes: the twin's CPU split by kind (phase_breakdown, the phase's own thread) applies
-# to each phase's work; I/O is the store client's CPU plus the priced requests.
-B = q("""
-SELECT r.label, b.arm, b.phase, b.component, sum(b.ms) AS ms
+# Where the time goes: the CPU split by kind (phase_breakdown, the phase's own thread) of the run that
+# counted the phase's work (an update's w128-keys run, else the twin) applies to that work; I/O is the
+# store client's CPU plus the priced requests.
+KEYS_IN = ", ".join(f"'{l}'" for l in KEYS)
+B = q(f"""
+SELECT replace(r.label, 'w128k-', 'w128-') AS label, b.arm, b.phase, b.component, sum(b.ms) AS ms
 FROM phase_breakdown b JOIN canonical_runs r USING (run_id)
-WHERE list_contains(r.campaigns, 'w128-twins') AND b.thread = 'phase' AND b.component LIKE '%CPU'
+WHERE b.thread = 'phase' AND b.component LIKE '%CPU'
+  AND (list_contains(r.campaigns, 'w128-keys')
+       OR (list_contains(r.campaigns, 'w128-twins') AND r.label NOT IN ({KEYS_IN})))
   AND ((b.phase = 'batch' AND b.step >= 1)
        OR (b.step >= 5 AND b.phase IN ('read_full', 'read_window', 'read_sorted') AND b.reader = 'cached-skip'))
 GROUP BY ALL""")
@@ -260,8 +301,16 @@ def part_s(d, name, what, part=None, store=S3X):
     return (g[g.part == part] if part else g).s.sum()
 
 
-runs = q(f"""SELECT run_id, label, host, left(git_sha, 7) AS build FROM canonical_runs
-             WHERE {GRID} ORDER BY label, host""")
+# the runs the page reads: the twins of the configurations timed from w128-keys runs give it nothing
+runs = q(f"""SELECT run_id, label, host, left(git_sha, 7) AS build,
+                    CASE WHEN list_contains(campaigns, 'w128-keys') THEN 'times'
+                         WHEN host = 'havoc' AND label IN ({KEYS_IN}) THEN 'data written, storage, memory held'
+                         WHEN host = 'havoc' THEN 'requests and bytes; data written, storage, memory held'
+                         ELSE 'work' END AS gives
+             FROM canonical_runs
+             WHERE ({GRID} AND NOT (host <> 'havoc' AND label IN ({KEYS_IN})))
+                OR list_contains(campaigns, 'w128-keys')
+             ORDER BY replace(label, 'w128k-', 'w128-'), label, host""")
 ```
 
 What each design costs a writer and its readers at Iceberg's 128 MiB row groups, on two workloads
@@ -282,12 +331,11 @@ WR_MOR = [at_step("w128-upd-mor", "batch", n) for n in (1, 240)]
 
 
 def locate(label, first, last, spike=tune.SPIKES["s3x"]):
-    """The scan that finds the rows a write changes (phase locate, a write's first requests) over
-    writes first to last, a write's mean: its requests by what they read (each file's footer, in two;
-    its deletion vector; the key column), their price by the store's latency test, and the twin's
-    work (s)."""
-    run = q(f"""SELECT run_id FROM canonical_runs WHERE list_contains(campaigns, 'w128')
-                AND label = '{label}'""").run_id.iloc[0]
+    """The locate, which finds the rows a write changes (a write's first requests), over writes
+    first to last, a write's mean: its requests by what they read (each file's footer, in two; its
+    deletion vector; the key column), their price by the store's latency test, and its work (s); from
+    the configuration's w128-keys run."""
+    run = KEYS_RUN[label]
     n = last - first + 1
     d = q(f"""
         WITH loc AS (SELECT step, requests AS n FROM steps
@@ -302,9 +350,8 @@ def locate(label, first, last, spike=tune.SPIKES["s3x"]):
                     ELSE 'keys' END AS what, count(*) / {n} AS requests, sum(pr.price_ms) / {n} / 1e3 AS s
         FROM o JOIN loc USING (step) JOIN rq USING (step, seq) JOIN pr USING (step, seq)
         WHERE o.i <= loc.n GROUP BY 1""").set_index("what")
-    work = q(f"""SELECT avg(w.work_ms) / 1e3 AS s FROM phase_work w JOIN canonical_runs r USING (run_id)
-                 WHERE list_contains(r.campaigns, 'w128-twins') AND r.label = '{label}' AND w.phase = 'locate'
-                   AND w.step BETWEEN {first} AND {last}""").s.iloc[0]
+    work = q(f"""SELECT avg(work_ms) / 1e3 AS s FROM phase_work
+                 WHERE run_id = '{run}' AND phase = 'locate' AND step BETWEEN {first} AND {last}""").s.iloc[0]
     out = {k: float(d.requests.get(w, 0.0)) for k, w in [("footers", "footers"), ("dvs", "dvs"), ("key_column", "keys")]}
     return pd.Series({**out, "requests": sum(out.values()), "s": float(d.s.sum()) + work})
 
@@ -325,6 +372,32 @@ RG = {n: [gb(ST[ST.label == l], n, step, col="row_groups") for step in (0, 240)]
       for l, n in [("w128-upd-density", "RMoR-density"), ("w128-upd-rmor", "RMoR"), ("w128-upd-mor", "MoR"),
                    ("w128-upd-external", "RMoW-external")]}
 COPY_RMOR = [written_mb("w128-upd-rmor", 1, 10), written_mb("w128-upd-rmor", 231, 240)]
+FILES = {n: [gb(ST[ST.label == l], n, step, col="data_files") for step in (0, 240)]
+         for l, n in [("w128-upd-density", "RMoR-density"), ("w128-upd-mor", "MoR")]}
+# The updates' reads and compactions in each w128-keys run against the same in its configuration's
+# twin, whose writers pruned only by range (Limits): the same requests and bytes (suite-128.md, K1)
+# and the same code. Over the run, less one: work (phase_work, at each run's own pace), user-mode
+# instructions, and work an instruction (the pace); and the instructions at the reads before the
+# first write (step 0) and from the 10th write on
+RW = q(f"""
+    WITH r AS (SELECT run_id, replace(label, 'w128k-', 'w128-') AS label, list_contains(campaigns, 'w128-keys') AS keys
+               FROM canonical_runs
+               WHERE (list_contains(campaigns, 'w128-keys') OR list_contains(campaigns, 'w128-twins'))
+                 AND replace(label, 'w128k-', 'w128-') IN ({KEYS_IN})),
+    w AS (SELECT r.label, r.keys, p.phase, sum(p.work_ms) AS ms, sum(p.instructions) AS instr,
+                 sum(p.instructions) FILTER (WHERE p.step = 0) AS instr0,
+                 sum(p.instructions) FILTER (WHERE p.step >= 10) AS instr10
+          FROM phase_work p JOIN r USING (run_id)
+          WHERE p.phase = 'compact' OR (p.phase IN ('read_full', 'read_window', 'read_sorted') AND p.reader = 'cached-skip')
+          GROUP BY ALL)
+    SELECT k.label, k.phase, k.ms / t.ms - 1 AS time, k.instr / t.instr - 1 AS instr,
+           (k.ms / k.instr) / (t.ms / t.instr) - 1 AS pace, k.instr0 / t.instr0 - 1 AS instr0,
+           k.instr10 / t.instr10 - 1 AS instr10
+    FROM w k JOIN w t ON k.label = t.label AND k.phase = t.phase AND k.keys AND NOT t.keys""")
+RW_READS = RW[RW.phase != "compact"]
+RW_COMPACT = RW[RW.phase == "compact"].iloc[0]
+MOR_FULL = RW[(RW.label == "w128-upd-mor") & (RW.phase == "read_full")].iloc[0]
+RW_OTHER = RW[~((RW.label == "w128-upd-mor") & (RW.phase == "read_full"))].instr.abs().max()
 DEN_RISE = mean_over(SNU, "RMoR-density", WRITE, 231, 240) - mean_over(SNU, "RMoR-density", WRITE, 1, 10)
 
 # What reads and writes hold (README, What is held): the most a phase held at once, its encoded
@@ -373,14 +446,16 @@ def held_span(what, names=None):
   {eval}`f1(v(U, S3X, "RMoR-density", "write_s"))` s and {eval}`f1(v(U, S3X, "RMoR-density", "window_s"))`
   s (sections 1 and 2).
 - **MoR slows as snapshots are added; RMoR does not.** Each MoR write reads more than the last to
-  find the rows it changes, from {eval}`f0(WR_MOR[0].mb)` MB at the first to
+  find and read the rows it changes, from {eval}`f0(WR_MOR[0].mb)` MB at the first to
   {eval}`f0(WR_MOR[1].mb)` MB at the 240th, and its range read takes
   {eval}`f"{at(SNU, 'MoR', READ['window_s'], 240) / at(SNU, 'MoR', READ['window_s'], 1):.1f}"` times as
   long after 240 writes as after the first on S3 Express (section 2).
-- **RMoR-density's writes slow as its row groups multiply.** It cuts what it copies into pieces,
-  each a row group of its own ({eval}`f0(RG["RMoR-density"][1])` after 240 writes, from
-  {eval}`f0(RG["RMoR-density"][0])`), and a write reads the key column of every row group in its
-  range of keys to find the rows it changes. That scan takes
+- **RMoR-density's writes slow as files are added.** To find the rows a write changes, a writer
+  reads the footer and deletion vector of every file whose keys may hold one. Each of RMoR-density's
+  writes adds one data file (and a file of deletion vectors), and a data file leaves the table only
+  once later writes have replaced or copied every row in it, so its table grows from
+  {eval}`f0(FILES["RMoR-density"][0])` data files to {eval}`f0(FILES["RMoR-density"][1])` over the
+  240 writes. Finding the rows takes
   {eval}`f1(LOC["RMoR-density", "first"].s)` s a write over the first 10 writes and
   {eval}`f1(LOC["RMoR-density", "last"].s)` s over the last 10 on S3 Express, most of the
   {eval}`f1(DEN_RISE)` s its write slows by (section 2).
@@ -449,11 +524,11 @@ it changes. RMoW-append copies whole 128 MiB row groups, so it ran the first 30 
 inserts RMoR-density places each late row in the row group whose event-time range holds it, when
 that row group's waiting rows reach its threshold. RMoR, RMoW-external and RMoW-append, which
 would merge every late row at once, rewriting whole row groups on almost every write, did not run
-there ([why](./inserts-128.md)). Each writer finds the rows a write changes by scanning the key
+there ([why](./inserts-128.md)). Each writer finds the rows a write changes by reading the key
 column, as a MERGE would: it reads only the files whose key range may hold a changed key, and in
-each of them every row group between the write's smallest and largest changed key (RMoW-append
-finds its rows from its footers' statistics alone). The pruning of row groups by each changed key
-in [our changes to readers and writers](./reader-changes.md) was not used here.
+each of them only the row groups whose key statistics may hold one (`locate` `keys`, one of [our
+changes to readers and writers](./reader-changes.md)). RMoW-append finds its rows from its footers'
+statistics alone.
 
 **The designs are compared with nothing compacted,** as snapshots are added. MoR compacted as
 Iceberg plans it (its bin-pack rule, checked after every write: a group of at least 5 files) has
@@ -472,10 +547,15 @@ reads after 5 to 240 writes.
 initial load, the same on both stores. **Storage** is what the store holds: with every snapshot
 kept (no run deletes anything) and with the snapshots before the newest expired.
 
-**How the times are simulated.** Each run's requests and bytes were counted on havoc, and its CPU
-by its twin on the laptop, which replays the same writes and counts instructions. A phase's time
-is its CPU at the laptop's speed, plus its requests priced by size from a latency test of the
-store (S3 Express on a `c7a.4xlarge` in usw2-az3, Azure Blob on a `D8as_v6` in westus). No run at
+**How the times are simulated.** The updates are timed from one run of each configuration on the
+laptop, which counts requests, bytes and instructions, with writers that find their rows by key, as
+above. RMoW-append, which finds its rows from its footers alone, and the inserts are timed from
+runs on havoc, which counted requests and bytes, and their twins on the laptop, which replay the
+same op log and count instructions. A phase's time is its CPU at the laptop's speed, plus its
+requests priced by size from a latency test of the store (S3 Express on a `c7a.4xlarge` in
+usw2-az3, Azure Blob on a `D8as_v6` in westus). What each design writes, stores and holds is
+counted from havoc's runs, which the laptop's runs of the updates match byte for byte ([the
+hypotheses page](./suite-128.md), K1). No run at
 128 MiB has been measured in the cloud.
 
 ```{code-cell} ipython3
@@ -541,13 +621,12 @@ WIN_RANGE = {n: series(SNU, n, READ["window_s"]) for n in ["RMoR", "RMoW-externa
 
 
 def scan_sizes(label, step=240):
-    """Havoc's run's full scan after a write: its reads of 1 to 16 MB and of 64 MB or more (count, GB)."""
+    """A full scan after a write: its reads of 1 to 16 MB and of 64 MB or more (count, GB)."""
     return q(f"""SELECT count(*) FILTER (WHERE q.length >= 1e6 AND q.length < 16e6) AS mid_n,
                         sum(q.length) FILTER (WHERE q.length >= 1e6 AND q.length < 16e6) / 1e9 AS mid_gb,
                         count(*) FILTER (WHERE q.length >= 64e6) AS big_n,
                         sum(q.length) FILTER (WHERE q.length >= 64e6) / 1e9 AS big_gb
-                 FROM requests q JOIN canonical_runs r USING (run_id)
-                 WHERE list_contains(r.campaigns, 'w128') AND r.label = '{label}' AND q.phase = 'read_full'
+                 FROM requests q WHERE q.run_id = '{run_of(label)}' AND q.phase = 'read_full'
                    AND q.step = {step} AND q.reader = 'cached-skip' AND q.kind = 'get_range'""").iloc[0]
 
 
@@ -563,12 +642,11 @@ def rate(store, mib):
 
 
 def files_read(label, phase, step=240):
-    """Havoc's run's write (phase batch) or reads after it, at a write: its reads of deletion
-    vectors, and the Parquet files it read from."""
+    """A write (phase batch) or the reads after it, at a write: its reads of deletion vectors, and
+    the Parquet files it read from."""
     return q(f"""SELECT count(*) FILTER (WHERE q.object LIKE '%.puffin') AS dvs,
                         count(DISTINCT q.object) FILTER (WHERE q.object LIKE '%.parquet') AS files
-                 FROM requests q JOIN canonical_runs r USING (run_id)
-                 WHERE list_contains(r.campaigns, 'w128') AND r.label = '{label}' AND q.phase = '{phase}'
+                 FROM requests q WHERE q.run_id = '{run_of(label)}' AND q.phase = '{phase}'
                    AND q.step = {step} AND (q.phase = 'batch' OR q.reader = 'cached-skip')
                    AND q.kind = 'get_range'""").iloc[0]
 
@@ -580,8 +658,8 @@ FR = {(n, what): files_read(l, phase) for l, n in [("w128-upd-rmor", "RMoR"), ("
 
 MoR's writes slow as writes are added: on S3 Express a write takes
 {eval}`f1(mean_over(SNU, "MoR", WRITE, 1, 10))` s on average over the first 10 writes and
-{eval}`f1(mean_over(SNU, "MoR", WRITE, 231, 240))` s over the last 10. To find the rows a write
-changes, MoR reads every file whose keys may hold one, and every earlier write left a file of new
+{eval}`f1(mean_over(SNU, "MoR", WRITE, 231, 240))` s over the last 10. To find and read the rows a
+write changes, MoR reads every file whose keys may hold one, and every earlier write left a file of new
 versions spread over the keys it changed: its first write reads {eval}`f0(WR_MOR[0].mb)` MB, its
 240th {eval}`f0(WR_MOR[1].mb)` MB. RMoR's 240th write reads {eval}`f0(WR_RMOR.mb)` MB, and its writes
 take {eval}`f1(mean_over(SNU, "RMoR", WRITE, 1, 10))` s over the first 10 and
@@ -593,26 +671,33 @@ take {eval}`f1(mean_over(SNU, "RMoR", WRITE, 1, 10))` s over the first 10 and
 write sends grow from {eval}`f0(WR_DEN[0].requests)` at its first to
 {eval}`f0(WR_DEN[1].requests)` at its 240th.
 
-Most of RMoR-density's slowing is the scan that finds a write's rows. For each file whose keys may
-hold a changed key, it reads the file's footer (two requests) and its deletion vector, then the key
-column of every row group between the write's smallest and largest changed key (setup), one request
-each. RMoR-density cuts what it copies into pieces, each a row group of its own, so its table goes
-from {eval}`f0(RG["RMoR-density"][0])` row groups to {eval}`f0(RG["RMoR-density"][1])` over the 240
-writes, and the scan with it: over the first 10 writes it sends {eval}`f0(LOC["RMoR-density", "first"].requests)`
-requests a write and takes {eval}`f1(LOC["RMoR-density", "first"].s)` s on S3 Express, over the last
-10 {eval}`f0(LOC["RMoR-density", "last"].requests)` requests ({eval}`f0(LOC["RMoR-density", "last"].footers)`
+Most of RMoR-density's slowing is finding a write's rows. For each file whose keys may hold a
+changed key, a write reads the file's footer (two requests) and its deletion vector, then the key
+column of each row group whose statistics may hold a changed key (setup), a request each.
+Each of RMoR-density's writes adds one data file, holding all it writes, and one Puffin file of
+deletion vectors, one for each data file it changed; a data file leaves the table once later writes
+have replaced or copied every row in it ({eval}`f0(FILES["RMoR-density"][0] + 240 - FILES["RMoR-density"][1])` had
+left by the 240th write). Its table grows from {eval}`f0(FILES["RMoR-density"][0])` data files to
+{eval}`f0(FILES["RMoR-density"][1])` over the 240 writes, and from {eval}`f0(RG["RMoR-density"][0])`
+row groups to {eval}`f0(RG["RMoR-density"][1])` as it cuts what it copies into pieces. A write's file
+spans the keys of every region it changed, so almost every file's keys may hold a changed key: over
+the last 10 writes a write reads the footers of {eval}`f0(LOC["RMoR-density", "last"].footers / 2)`
+files. Over the first
+10 writes finding the rows takes {eval}`f0(LOC["RMoR-density", "first"].requests)` requests a write
+and {eval}`f1(LOC["RMoR-density", "first"].s)` s on S3 Express; over the last 10,
+{eval}`f0(LOC["RMoR-density", "last"].requests)` requests ({eval}`f0(LOC["RMoR-density", "last"].footers)`
 for footers, {eval}`f0(LOC["RMoR-density", "last"].dvs)` for deletion vectors and
 {eval}`f0(LOC["RMoR-density", "last"].key_column)` for the key column) and
 {eval}`f1(LOC["RMoR-density", "last"].s)` s, {eval}`f1(LOC["RMoR-density", "last"].s - LOC["RMoR-density", "first"].s)`
-of the {eval}`f1(DEN_RISE)` s its write slows by. RMoR's scan grows too, from
-{eval}`f1(LOC["RMoR", "first"].s)` to {eval}`f1(LOC["RMoR", "last"].s)` s, over a table cut into
-{eval}`f0(RG["RMoR"][1])` row groups (dead ones included), but RMoR copies less as its pieces get
-smaller ({eval}`f0(COPY_RMOR[0])` MB a write over the first 10 writes, {eval}`f0(COPY_RMOR[1])` over
-the last 10), which offsets it. RMoR-density copies little from the start, since it defers. MoR's
-scan grows from {eval}`f1(LOC["MoR", "first"].s)` to {eval}`f1(LOC["MoR", "last"].s)` s, a footer
-and a deletion vector for each file its writes added, and RMoW-external's least, from
-{eval}`f1(LOC["RMoW-external", "first"].s)` to {eval}`f1(LOC["RMoW-external", "last"].s)` s, over files
-whose statistics its footers narrow (below).
+of the {eval}`f1(DEN_RISE)` s its write slows by. RMoR's grows too, from
+{eval}`f1(LOC["RMoR", "first"].s)` to {eval}`f1(LOC["RMoR", "last"].s)` s, but RMoR copies less as
+its pieces get smaller ({eval}`f0(COPY_RMOR[0])` MB a write over the first 10 writes,
+{eval}`f0(COPY_RMOR[1])` over the last 10), so its writes speed up. RMoR-density copies little from
+the start, since it defers. MoR's grows from {eval}`f1(LOC["MoR", "first"].s)` to
+{eval}`f1(LOC["MoR", "last"].s)` s, a footer, a deletion vector and a key column for each file its
+writes added ({eval}`f0(FILES["MoR"][1])` data files after 240 writes), and RMoW-external's least,
+from {eval}`f1(LOC["RMoW-external", "first"].s)` to {eval}`f1(LOC["RMoW-external", "last"].s)` s,
+over files whose statistics its footers narrow and with no deletion vectors (below).
 
 MoR's 1% range read slows the same way, from {eval}`f1(at(SNU, "MoR", READ["window_s"], 1))` s after
 the first write to {eval}`f1(at(SNU, "MoR", READ["window_s"], 240))` s after the 240th on S3
@@ -738,28 +823,24 @@ storage_table(STU, UNAMES)
 UP = parts(UPD, [n for n in UN if n != "RMoW-append"])
 
 
-def twin_phase(label, phase, first=1, last=240):
-    """The laptop twin's part of a write (locate: the scan for the rows to change; merge-read: the
-    read of what it copies) over writes first to last: decode CPU a write (s, on the wall clock), MB
-    read a write, and decode ms a MB."""
+def write_phase(label, phase, first=1, last=240):
+    """A part of a write, from the configuration's w128-keys run (locate: finding the rows to
+    change; merge-read: the read of what it copies) over writes first to last: decode CPU a write (s,
+    on the wall clock), MB read a write, and decode ms a MB."""
     return q(f"""SELECT sum(s.decode_cpu_ns / c.cpu_per_wall) / 1e9 / count(*) AS decode_s,
                         sum(s.bytes_read) / 1e6 / count(*) AS mb,
                         sum(s.decode_cpu_ns / c.cpu_per_wall) / 1e6 / (sum(s.bytes_read) / 1e6) AS ms_mb
-                 FROM steps s JOIN canonical_runs r USING (run_id) JOIN run_clock c USING (run_id)
-                 WHERE list_contains(r.campaigns, 'w128-twins') AND r.label = '{label}' AND s.phase = '{phase}'
+                 FROM steps s JOIN run_clock c USING (run_id)
+                 WHERE s.run_id = '{KEYS_RUN[label]}' AND s.phase = '{phase}'
                    AND s.step BETWEEN {first} AND {last}""").iloc[0]
 
 
-DEC = {(n, ph): twin_phase(l, ph) for l, n in [("w128-upd-rmor", "RMoR"), ("w128-upd-external", "RMoW-external")]
+DEC = {(n, ph): write_phase(l, ph) for l, n in [("w128-upd-rmor", "RMoR"), ("w128-upd-external", "RMoW-external")]
        for ph in ("locate", "merge-read")}
-DEC_MB = {(n, b): twin_phase(l, "locate", *span).ms_mb
-          for l, n in [("w128-upd-mor", "MoR"), ("w128-upd-density", "RMoR-density"), ("w128-upd-rmor", "RMoR"),
-                       ("w128-upd-external", "RMoW-external")]
-          for b, span in [("first", (1, 10)), ("last", (231, 240))]}
 ```
 
 On S3 Express MoR's write spends {eval}`f1(part_s(UP, "MoR", WRITE, "decode"))` s decoding the
-files it reads to find the changed rows, and {eval}`f1(part_s(UP, "MoR", WRITE, "I/O"))` s on I/O.
+files it reads to find and read the changed rows, and {eval}`f1(part_s(UP, "MoR", WRITE, "I/O"))` s on I/O.
 RMoR's spends {eval}`f1(part_s(UP, "RMoR", WRITE, "decode"))` s decoding and
 {eval}`f1(part_s(UP, "RMoR", WRITE, "I/O"))` s on I/O, and {eval}`f1(part_s(UP, "RMoR", WRITE, "encode"))`
 s encoding the pieces of row groups it copies. RMoW-external's spends
@@ -769,23 +850,13 @@ s encoding the pieces of row groups it copies. RMoW-external's spends
 {eval}`f2(part_s(UP, "RMoR", READ["window_s"], "I/O"))`: it opens fewer files and reads no deletion
 vectors (section 2).
 
-RMoW-external's write decodes less than RMoR's in its scan for the rows to change, not in what it
-copies. By the laptop twins' CPU, RMoR's scan decodes for {eval}`f1(DEC["RMoR", "locate"].decode_s)` s
-a write and RMoW-external's for {eval}`f1(DEC["RMoW-external", "locate"].decode_s)`, while their reads
-of the rows they copy decode alike ({eval}`f2(DEC["RMoR", "merge-read"].decode_s)` and
-{eval}`f2(DEC["RMoW-external", "merge-read"].decode_s)` s). RMoW-external's scan reads less of the key
-column, {eval}`f0(DEC["RMoW-external", "locate"].mb)` MB a write against
-{eval}`f0(DEC["RMoR", "locate"].mb)`, as fewer of its files pass on their statistics, and decodes each
-MB faster, {eval}`f0(DEC["RMoW-external", "locate"].ms_mb)` ms against
-{eval}`f0(DEC["RMoR", "locate"].ms_mb)`. It is the one design whose scan applies no deletion vectors
-to the rows it decodes, and it stays as fast as its table ages
-({eval}`f0(DEC_MB["RMoW-external", "first"])` ms a MB over the first 10 writes,
-{eval}`f0(DEC_MB["RMoW-external", "last"])` over the last 10), where the designs with deletion
-vectors decode more slowly as they accumulate: MoR from {eval}`f0(DEC_MB["MoR", "first"])` to
-{eval}`f0(DEC_MB["MoR", "last"])` ms a MB, RMoR-density from {eval}`f0(DEC_MB["RMoR-density", "first"])`
-to {eval}`f0(DEC_MB["RMoR-density", "last"])`, and RMoR, with deletion vectors over its copied
-pieces from its first writes, {eval}`f0(DEC_MB["RMoR", "first"])` and
-{eval}`f0(DEC_MB["RMoR", "last"])`. MoR's range read is
+Finding the rows decodes little in the region designs: RMoR's write decodes for
+{eval}`f2(DEC["RMoR", "locate"].decode_s)` s a write to find them, over
+{eval}`f0(DEC["RMoR", "locate"].mb)` MB of key column, and RMoW-external's for
+{eval}`f2(DEC["RMoW-external", "locate"].decode_s)` s over {eval}`f0(DEC["RMoW-external", "locate"].mb)`
+MB, as fewer of its files pass on their statistics. Their reads of the rows they copy decode for
+{eval}`f2(DEC["RMoR", "merge-read"].decode_s)` and {eval}`f2(DEC["RMoW-external", "merge-read"].decode_s)`
+s. MoR's range read is
 {eval}`f"{share_of(UP, S3X, 'MoR', READ['window_s'], 'I/O'):.0%}"` I/O. On Azure Blob RMoR's full
 scan spends {eval}`f0(part_s(UP, "RMoR", READ["full_s"], "I/O", AZ))` s on I/O against MoR's
 {eval}`f0(part_s(UP, "MoR", READ["full_s"], "I/O", AZ))`, for its smaller reads (section 2).
@@ -1184,11 +1255,23 @@ table(PEAK.rename(columns={"name": "design"}).round(2),
 
 ## Limits
 
-- **Simulated, not measured.** No run at 128 MiB has run in the cloud; the times price havoc's
-  requests by size and add the laptop's CPU.
+- **Simulated, not measured.** No run at 128 MiB has run in the cloud; the times price each run's
+  requests by size (the laptop's for the updates but RMoW-append's, havoc's for the rest) and add
+  the laptop's CPU.
 - **One table, one seed.** The narrow 11-column table of the 16 MiB runs at 8 times the rows.
-- **Writers prune row groups only to a write's range of keys,** not by each changed key (`locate`
-  `keys`, [Appendix A](./reader-changes.md)), as the 16 MiB runs did. The scan for a write's rows
-  (section 2) reads the key column of every row group in that range.
+- **A run's work is one measurement.** The updates' reads and compactions repeat, request for
+  request, byte for byte and with the same code, those of earlier laptop runs whose writers pruned
+  only by a write's range of keys ([the hypotheses page](./suite-128.md), K1). Timed at each run's
+  own pace, the reads took from {eval}`f"{-RW_READS.time.min():.1%}"` less to
+  {eval}`f"{RW_READS.time.max():.1%}"` more in the runs timed here, and MoR (compacted)'s
+  compactions {eval}`f"{RW_COMPACT.time:.0%}"` more. Most of that is the pace of the same
+  instructions, which moves from run to run, but MoR's full scans ran
+  {eval}`f"{MOR_FULL.instr:.1%}"` more instructions ({eval}`f"{MOR_FULL.instr0:.1%}"` at the scan
+  before its first write, {eval}`f"{MOR_FULL.instr10:.1%}"` over the scans from its 10th write on),
+  where no other read or compaction differed by more than {eval}`f"{RW_OTHER:.1%}"`. What changed
+  between the runs is not known.
+- **Writers that find their rows read every footer and deletion vector** of each file whose keys
+  may hold a changed key, a write at a time: a writer that held them across writes, or pruned by key
+  before loading a file's deletion vector, would read less ([Appendix A](./reader-changes.md)).
 - **RMoR, RMoW-external and RMoW-append did not run on the inserts,** and RMoW-append ran 30 of
   the updates' 240 writes.

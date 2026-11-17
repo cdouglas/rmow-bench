@@ -148,7 +148,9 @@ def show(w, n, col, fmt=f2):
 
 Do the designs' mechanisms, defined once and run on both workloads at Iceberg's 128 MiB row
 groups, spare readers what they cost writers? This page judges W1–W5 (docs/HYPOTHESES.md,
-2026-11-12, and its revision for the inserts) on campaign `w128`, on havoc. What a paper would
+2026-11-12, and its revision for the inserts) on campaign `w128`, on havoc, and K1–K3
+(2026-11-16: writers that prune row groups by each changed key) on campaign `w128-keys`, on the
+laptop. What a paper would
 show from these runs, by snapshot and in simulated time, belongs on the Results pages; this page
 holds the verdicts and the controls.
 
@@ -492,9 +494,335 @@ over live bytes being its bytes over its rows at the same design's full-read byt
 and the windows' measure their mean (W2 names the window at 0.9). A write's bytes are `write` and
 `delete-write`, and `compact` for MoR (compacted), a mean over the run's writes.
 
+## Writers that prune by key (K1–K3)
+
+```{code-cell} ipython3
+:tags: [remove-cell]
+
+# K1-K3 (docs/HYPOTHESES.md, 2026-11-16): each w128-keys run (the laptop, one at a time, requests
+# logged, instructions counted) against its configuration's w128 run (havoc) and that run's laptop
+# twin (campaign w128-twins: instructions counted, no request log)
+tune = fig.tuner()
+KD = [("MoR", "mor", "mor-v3"), ("MoR (compacted)", "compact", "mor-v3"), ("RMoR", "rmor", "rmor-c-kept"),
+      ("RMoW-external", "external", "rmor-c-footer-kept"), ("RMoR-density", "density", "rmor-density")]
+REGION_K = ["RMoR", "RMoW-external", "RMoR-density"]
+K_STORES = {"S3 Express": tune.SPIKES["s3x"], "Azure Blob": tune.SPIKES["azure"]}
+
+
+def run_in(campaign, label):
+    r = q(f"""SELECT run_id FROM canonical_runs
+              WHERE list_contains(campaigns, '{campaign}') AND label = '{label}'""").run_id
+    return r.iloc[0] if len(r) == 1 else None
+
+
+KR = pd.DataFrame([dict(design=n, arm=a, keys_run=run_in("w128-keys", f"w128k-upd-{k}"),
+                        scan_run=run_in("w128", f"w128-upd-{k}"),
+                        twin_run=run_in("w128-twins", f"w128-upd-{k}"))
+                   for n, k, a in KD]).set_index("design").dropna()
+k_ran = set(KR.index)
+
+# K1: the records against the scan run's. A write's totals (batch) and its locate may differ only in
+# what they read; anything else differing, or a record in one run only, breaks the control
+READ_COUNTS = "['requests', 'gets', 'get_range', 'get_stream', 'heads', 'bytes_read']"
+
+
+def k1_records(n):
+    r = KR.loc[n]
+    return q(f"""
+        SELECT count(*) AS records, count(*) FILTER (WHERE len(differs) > 0) AS differ,
+               count(*) FILTER (WHERE one_run_only OR (len(differs) > 0
+                                AND phase NOT IN ('locate', 'batch'))) AS differ_elsewhere,
+               count(*) FILTER (WHERE len(list_filter(differs, x -> NOT list_contains({READ_COUNTS}, x)))
+                                > 0) AS differ_beyond_reads
+        FROM steps_diff('{r.keys_run}', '{r.scan_run}') WHERE arm = '{r.arm}'""").iloc[0]
+
+
+def locate_reads(run):
+    """Per write, the locate's requests (a write's first, as many as its locate record counts) by
+    what they read: each file's footer (two streamed GETs), its deletion vector, the key column of
+    the initial load's files or of the files writes added (MB); and the footers' and deletion
+    vectors' objects."""
+    return q(f"""
+        WITH loc AS (SELECT step, requests AS n FROM steps WHERE run_id = '{run}' AND phase = 'locate'),
+        o AS (SELECT step, kind, object, length, row_number() OVER (PARTITION BY step ORDER BY seq) AS i
+              FROM requests WHERE run_id = '{run}' AND phase = 'batch'
+                AND kind IN ('get_range', 'get_stream', 'head', 'put', 'append')),
+        l AS (SELECT o.*, CASE WHEN object LIKE '%.puffin' THEN 'dv' WHEN kind = 'get_stream' THEN 'footer'
+                               ELSE 'key' END AS what
+              FROM o JOIN loc USING (step) WHERE o.i <= loc.n)
+        SELECT step, count(*) FILTER (WHERE what = 'footer') AS footers,
+               count(*) FILTER (WHERE what = 'dv') AS dvs, count(*) FILTER (WHERE what = 'key') AS key_column,
+               coalesce(sum(length) FILTER (WHERE what = 'key' AND object LIKE '%/initial-%'), 0) / 1e6
+                   AS initial_mb,
+               coalesce(sum(length) FILTER (WHERE what = 'key' AND object NOT LIKE '%/initial-%'), 0) / 1e6
+                   AS added_mb,
+               coalesce(list(object ORDER BY object) FILTER (WHERE what = 'footer'), []) AS footer_objects,
+               coalesce(list(object ORDER BY object) FILTER (WHERE what = 'dv'), []) AS dv_objects
+        FROM l GROUP BY 1 ORDER BY 1""").set_index("step")
+
+
+LR = {(n, w): locate_reads(KR.loc[n, f"{w}_run"]) for n in KR.index for w in ("keys", "scan")}
+
+
+def same_objects(n, col):
+    a, b = LR[(n, "keys")][col], LR[(n, "scan")][col]
+    return int(sum(list(x) != list(y) for x, y in zip(a, b.reindex(a.index))))
+
+
+def read_instructions(n):
+    """Each read's user-mode instructions (thread and read pool), the run's over its twin's: their
+    sums over the run, and the worst single read."""
+    r = KR.loc[n]
+    return q(f"""
+        WITH j AS (
+            SELECT a.phase, a.step, (a.instructions + coalesce(a.pool_instructions, 0)) AS ka,
+                   (b.instructions + coalesce(b.pool_instructions, 0)) AS kb
+            FROM steps a JOIN steps b ON a.arm = b.arm AND a.step = b.step AND a.phase = b.phase
+              AND a.reader IS NOT DISTINCT FROM b.reader AND a.window_at IS NOT DISTINCT FROM b.window_at
+            WHERE a.run_id = '{r.keys_run}' AND b.run_id = '{r.twin_run}' AND a.arm = '{r.arm}'
+              AND a.phase IN ('read_full', 'read_recent', 'read_window', 'read_sorted')
+              AND a.reader = 'cached-skip' AND b.instructions > 0)
+        SELECT phase, sum(ka) / sum(kb) AS ratio, max(abs(ka / kb - 1)) AS worst, count(*) AS reads
+        FROM j GROUP BY 1""").assign(design=n)
+
+
+K1 = pd.DataFrame([dict(design=n, **k1_records(n).to_dict(),
+                        footers_differ=same_objects(n, "footer_objects"),
+                        dvs_differ=same_objects(n, "dv_objects")) for n in KR.index])
+RI = pd.concat([read_instructions(n) for n in KR.index], ignore_index=True)
+RI["off"] = (RI.ratio - 1).abs()
+k1 = {"the records": bool((K1.differ_elsewhere == 0).all() and (K1.differ_beyond_reads == 0).all()),
+      "the footers and deletion vectors": bool((K1.footers_differ == 0).all() and (K1.dvs_differ == 0).all())}
+for n in KR.index:
+    k1[f"{n}'s reads' instructions"] = bool((RI[RI.design == n].off <= 0.02).all())
+ri_ok = RI[~RI.design.isin([n for n in KR.index if not k1[f"{n}'s reads' instructions"]])]
+
+
+def ri(n, phase):
+    return float(RI[(RI.design == n) & (RI.phase == phase)].ratio.iloc[0])
+
+
+# MoR's full read against its twin's, read by read (G instructions)
+mor_full = None
+if "MoR" in k_ran:
+    r = KR.loc["MoR"]
+    mor_full = q(f"""
+        SELECT a.step, ((a.instructions + coalesce(a.pool_instructions, 0))
+                        - (b.instructions + coalesce(b.pool_instructions, 0))) / 1e9 AS more_g
+        FROM steps a JOIN steps b ON a.arm = b.arm AND a.step = b.step AND a.phase = b.phase
+          AND a.reader IS NOT DISTINCT FROM b.reader
+        WHERE a.run_id = '{r.keys_run}' AND b.run_id = '{r.twin_run}' AND a.arm = '{r.arm}'
+          AND a.phase = 'read_full' AND a.reader = 'cached-skip' ORDER BY 1""").set_index("step").more_g
+
+
+# K2: the locate's requests a write over writes first to last
+def locate_requests(run, arm, first=231, last=240):
+    return float(q(f"""SELECT sum(requests) / {last - first + 1} AS r FROM steps
+                       WHERE run_id = '{run}' AND arm = '{arm}' AND phase = 'locate'
+                         AND step BETWEEN {first} AND {last}""").r.iloc[0])
+
+
+K2 = pd.DataFrame([dict(design=n, scan=locate_requests(KR.loc[n, "scan_run"], KR.loc[n, "arm"]),
+                        keys=locate_requests(KR.loc[n, "keys_run"], KR.loc[n, "arm"]),
+                        footers=LR[(n, "keys")].footers.loc[231:240].mean(),
+                        dvs=LR[(n, "keys")].dvs.loc[231:240].mean(),
+                        key_column=LR[(n, "keys")].key_column.loc[231:240].mean()) for n in KR.index])
+K2["of_scan"] = K2["keys"] / K2["scan"]
+K2 = K2.set_index("design")
+K2_BOUND = {"RMoR": ("<=", 0.55), "RMoR-density": ("<=", 0.55), "RMoW-external": ("<=", 0.35),
+            "MoR": (">=", 0.85)}
+k2 = {f"{n}'s locate": (K2.of_scan[n] <= b if op == "<=" else K2.of_scan[n] >= b)
+      for n, (op, b) in K2_BOUND.items() if n in k_ran}
+
+
+# K3: a write's simulated time at every write: its requests priced by size, plus its work (under
+# scan, the twin's: havoc's runs count no instructions)
+def write_s(run, arm, spike, work_run=None):
+    d = q(f"""SELECT step, request_ms FROM sized_latency('{run}', '{spike}')
+              WHERE arm = '{arm}' AND phase = 'batch' AND step >= 1""")
+    w = q(f"""SELECT step, work_ms FROM sized_latency('{work_run or run}', '{spike}')
+              WHERE arm = '{arm}' AND phase = 'batch' AND step >= 1""")
+    d = d.merge(w, on="step")
+    return d.assign(s=(d.request_ms + d.work_ms) / 1e3).set_index("step").s.sort_index()
+
+
+def f3(x):
+    return f"{x:.3f}"
+
+
+K3 = []
+for store, spike in K_STORES.items():
+    for n in KR.index:
+        r = KR.loc[n]
+        sc = write_s(r.scan_run, r.arm, spike, r.twin_run)
+        ke = write_s(r.keys_run, r.arm, spike)
+        K3.append(dict(store=store, design=n, scan=sc.mean(), keys=ke.mean(),
+                       scan_last_first=sc.loc[231:240].mean() / sc.loc[1:10].mean(),
+                       keys_last_first=ke.loc[231:240].mean() / ke.loc[1:10].mean(), writes=len(ke)))
+K3 = pd.DataFrame(K3)
+K3["less"] = 1 - K3["keys"] / K3["scan"]
+K3["of_mor"] = K3["keys"] / K3.store.map(K3[K3.design == "MoR"].set_index("store")["keys"])
+K3S = K3[K3.store == "S3 Express"].set_index("design")
+K3A = K3[K3.store == "Azure Blob"].set_index("design")
+k3 = {}
+for n in REGION_K:
+    if n in k_ran:
+        k3[f"{n}'s writes"] = K3S.less[n] >= 0.20
+if "MoR" in k_ran:
+    k3["MoR's writes"] = K3S.less["MoR"] <= 0.05
+    if all(n in k_ran for n in REGION_K):
+        k3["the region designs against MoR"] = bool((K3S.of_mor[REGION_K] <= 0.6).all())
+if "RMoR-density" in k_ran:
+    k3["RMoR-density's last 10 writes"] = K3S.keys_last_first["RMoR-density"] <= 2
+
+
+# Why: the locate's requests and bytes against the scan run's, and its instructions against the
+# twin's, over every write
+def locate_totals(n):
+    r = KR.loc[n]
+    return q(f"""
+        SELECT sum(requests) FILTER (WHERE run_id = '{r.keys_run}')
+                 / sum(requests) FILTER (WHERE run_id = '{r.scan_run}') AS requests,
+               sum(bytes_read) FILTER (WHERE run_id = '{r.keys_run}')
+                 / sum(bytes_read) FILTER (WHERE run_id = '{r.scan_run}') AS bytes,
+               sum(instructions) FILTER (WHERE run_id = '{r.keys_run}')
+                 / sum(instructions) FILTER (WHERE run_id = '{r.twin_run}') AS instructions,
+               avg(bytes_read) FILTER (WHERE run_id = '{r.scan_run}') / 1e6 AS scan_mb,
+               avg(bytes_read) FILTER (WHERE run_id = '{r.keys_run}') / 1e6 AS keys_mb
+        FROM steps WHERE run_id IN ('{r.keys_run}', '{r.scan_run}', '{r.twin_run}') AND arm = '{r.arm}'
+          AND phase = 'locate' AND step >= 1""").iloc[0]
+
+
+LT = pd.DataFrame([dict(design=n, **locate_totals(n).to_dict(),
+                        initial_scan_mb=LR[(n, "scan")].initial_mb.mean(),
+                        initial_keys_mb=LR[(n, "keys")].initial_mb.mean(),
+                        added_scan_mb=LR[(n, "scan")].added_mb.mean(),
+                        added_keys_mb=LR[(n, "keys")].added_mb.mean()) for n in KR.index]).set_index("design")
+```
+
+The updates' writers find the rows a write changes by reading the table (`layout.locate` `scan`):
+in each file that may hold a changed key, the key column of every row group between the write's
+smallest and largest changed key. Campaign `w128-keys` reran the five configurations that do so with
+one change, `locate` `keys`, which reads the key column only of the row groups whose key statistics
+may hold a changed key (docs/HYPOTHESES.md, 2026-11-16). RMoW-append finds its rows from its
+footers' statistics, so it did not run again. The runs ran on the laptop, one at a time from one
+build snapshot, with every request logged, and they count instructions, so they decide time. A
+write's simulated time is its requests priced by size plus its work, as on [](workloads-128.md):
+under `keys` the run's own; under `scan` havoc's requests and its laptop twin's work.
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(KR.drop(columns="arm").reset_index(),
+      caption="The runs: each configuration under keys (the laptop), under scan (havoc), and the "
+      "scan run's laptop twin, which counts its work")
+```
+
+**K1 (a control): {eval}`verdict(k1, 2 + len(KD))`.** Only the locate's records differ from the
+`scan` runs', with the writes' totals that include them, and only in what they read: every read,
+compaction and table-state record, and every other part of every write, sends the same requests
+and reads and writes the same bytes, over the {eval}`f0(K1.records.sum())` records of the five
+runs. Every write reads the footers and deletion vectors of the same files. The reads'
+instructions come within {eval}`pct(ri_ok.off.max())` of their twins' in every design but MoR (at
+most 2%). MoR's full read runs {eval}`pct(ri("MoR", "read_full") - 1)` more instructions than its
+twin's, and its read of the newest 1% {eval}`pct(ri("MoR", "read_recent") - 1)` more, with the same
+requests and bytes. From write 10 on, each of MoR's full reads runs between
+{eval}`f1(mor_full.loc[10:].min())` and {eval}`f1(mor_full.loc[10:].max())` billion instructions more
+than its twin's; the read before the first write, {eval}`f1(mor_full.loc[0])` billion more. These
+runs do not say why.
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(K1, caption="K1: records (write, phase, reader, window) compared with the scan run; those that "
+      "differ; those that differ beyond what the write reads, or outside its locate and totals, or "
+      "are in one run only; writes whose locate reads other files' footers or deletion vectors")
+```
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(RI.pivot_table(index="design", columns="phase", values="ratio").reindex(list(KR.index))
+      .round(3).reset_index(),
+      caption="K1: each read's user-mode instructions over the run, under keys over the twin's "
+      "(within 0.98 and 1.02 is within 2%)")
+```
+
+**K2: {eval}`verdict(k2, 4)`.** Over the last 10 writes the locate sends
+{eval}`f2(K2.of_scan["RMoR"])` of its `scan` requests for RMoR and
+{eval}`f2(K2.of_scan["RMoR-density"])` for RMoR-density (at most 0.55),
+{eval}`f2(K2.of_scan["RMoW-external"])` for RMoW-external (at most 0.35) and
+{eval}`f2(K2.of_scan["MoR"])` for MoR (at least 0.85). What `keys` leaves is a file's: its footer,
+in two requests, and its deletion vector, which every design but RMoW-external loads before
+pruning.
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(K2.round(2).reset_index(),
+      caption="K2: the locate's requests a write over the last 10 writes, under scan and keys, and "
+      "under keys its footer, deletion-vector and key-column requests")
+```
+
+**K3: {eval}`verdict(k3, 6)`.** On S3 Express, RMoR's writes take
+{eval}`pct(K3S.less["RMoR"])` less on average than under `scan`, RMoW-external's
+{eval}`pct(K3S.less["RMoW-external"])` and RMoR-density's {eval}`pct(K3S.less["RMoR-density"])` (at
+least 20% each), and MoR's {eval}`pct(K3S.less["MoR"])` less (at most 5%). Under `keys` the region
+designs write in {eval}`f3(K3S.of_mor["RMoR"])`, {eval}`f3(K3S.of_mor["RMoW-external"])` and
+{eval}`f3(K3S.of_mor["RMoR-density"])` of MoR's time (at most 0.6), and RMoR-density's last 10
+writes take {eval}`f2(K3S.keys_last_first["RMoR-density"])` times its first 10 (at most 2; under
+`scan`, {eval}`f2(K3S.scan_last_first["RMoR-density"])`).
+
+**Why MoR's writes take less:** a locate's work follows the bytes it reads, not its requests.
+Under `keys` MoR's locate sends {eval}`f2(LT.requests["MoR"])` of its `scan` requests but reads
+{eval}`f2(LT.bytes["MoR"])` of the bytes, with {eval}`f2(LT.instructions["MoR"])` of its twin's
+instructions. The key columns it skips are those of the initial load's 128 MiB row groups: it
+reads {eval}`f1(LT.initial_keys_mb["MoR"])` MB of them a write against
+{eval}`f1(LT.initial_scan_mb["MoR"])` under `scan`. The files MoR's writes add, a small row group
+each, keep their reads: {eval}`f1(LT.added_keys_mb["MoR"])` MB of key columns a write, against
+{eval}`f1(LT.added_scan_mb["MoR"])` under `scan`. The
+forecast cut the locate's work in proportion to its key-column requests.
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(LT.round(2).reset_index(),
+      caption="The locate over every write, under keys: its requests and bytes over the scan run's, "
+      "its instructions over the twin's; and a write's MB of key columns from the initial load's "
+      "files and from the files writes added, under scan and keys")
+```
+
+**Measured, not judged.** MoR (compacted)'s writes alone take
+{eval}`f1(K3S["keys"]["MoR (compacted)"])` s on S3 Express under `keys` against
+{eval}`f1(K3S.scan["MoR (compacted)"])` under `scan`. On Azure Blob, `keys` takes RMoR's write from
+{eval}`f1(K3A.scan["RMoR"])` to {eval}`f1(K3A["keys"]["RMoR"])` s, RMoW-external's from
+{eval}`f1(K3A.scan["RMoW-external"])` to {eval}`f1(K3A["keys"]["RMoW-external"])`, RMoR-density's
+from {eval}`f1(K3A.scan["RMoR-density"])` to {eval}`f1(K3A["keys"]["RMoR-density"])`, MoR's from
+{eval}`f1(K3A.scan["MoR"])` to {eval}`f1(K3A["keys"]["MoR"])` and MoR (compacted)'s from
+{eval}`f1(K3A.scan["MoR (compacted)"])` to {eval}`f1(K3A["keys"]["MoR (compacted)"])`.
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(K3[["store", "design", "writes", "scan", "keys", "less", "of_mor", "scan_last_first",
+          "keys_last_first"]].round(3),
+      caption="K3: a write's simulated latency (s), its mean over the 240 writes, under scan and keys; "
+      "the share less; under keys over MoR's; and the last 10 writes over the first 10")
+```
+
+**How it was judged:** as registered. A write's simulated latency is its `batch` phase: its
+requests priced by size from each store's latency test (lab/views/65_sized.sql) plus its work at
+its arm's pace, a mean over the 240 writes. Under `keys` both come from the run; under `scan` the
+requests from havoc's run and the work from its twin.
+
 ## Limits
 
 - **One seed, one lateness,** as registered; no watermark drops late rows.
 - **30 writes for RMoW-append,** so no steady state.
-- **No time from these runs.** Other users' work shared every job's cores, and the container
-  counted no instructions: requests and bytes only.
+- **No time from the `w128` runs.** Other users' work shared every job's cores, and the container
+  counted no instructions: requests and bytes only. K3's times come from the `w128-keys` runs and
+  the `w128` runs' laptop twins, which count instructions.
+- **A run's work is one measurement.** MoR's reads under `keys` run up to
+  {eval}`pct(RI[RI.design == "MoR"].ratio.max() - 1)` more instructions than its twin's with the same
+  requests and bytes (K1), so a few percent of a phase's work can differ between two runs of the
+  same reads.

@@ -612,7 +612,8 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
   ([lab/pages/model-128.md](lab/pages/model-128.md)), so the projection awaits a revision.
 - **The 128 MiB suite in simulated time** ([lab/pages/workloads-128.md](lab/pages/workloads-128.md);
   each phase's work from laptop twins of the nine runs, campaign `w128-twins`, which equal havoc's
-  in every record). On S3 Express, on the updates RMoR writes in 18.9 s on average against MoR's
+  in every record). On S3 Express, with writers that prune only to a write's range of keys
+  (`locate` `scan`), on the updates RMoR writes in 18.9 s on average against MoR's
   25.8 and reads a 1% range in 1.7 s against 6.5; RMoW-external is the fastest at both, 16.1 s and
   1.0 s, as its appended footers narrow its files' statistics and it reads no deletion vectors.
   MoR's writes and range reads slow as snapshots are added (its writes from 8.6 s over the first 10
@@ -622,8 +623,18 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
   copies multiply its row groups (58 to 2,480). On the inserts RMoR-density reads a range in 3.2 s
   against MoR's 10.1, for writes of 4.7 s against 0.45. Iceberg's compaction halves MoR's range
   read after 240 writes, for slower writes.
-- **Next:** the 128 MiB updates again with writers that prune row groups by each changed key
-  (`locate` `keys`; docs/HYPOTHESES.md, 2026-11-16), then the density hypothesis where density can
-  choose ([docs/drafts/density-plan-2026-11-16.md](docs/drafts/density-plan-2026-11-16.md)), and a
-  cloud run at 128 MiB after those ([docs/ROADMAP.md](docs/ROADMAP.md)). GCS needs APPEND in the
+- **Writers that prune row groups by each changed key at 128 MiB** (K1–K3 of 2026-11-16, campaign
+  `w128-keys` on the laptop, 2026-11-17; [lab/pages/suite-128.md](lab/pages/suite-128.md)): the
+  results page now times the updates from these runs, writes, reads and compactions alike. On S3 Express RMoR writes in 11.9 s on
+  average (18.9 before), RMoW-external in 10.7 (16.1), RMoR-density in 13.6 (20.3) and MoR in 22.6
+  (25.8). RMoR-density's writes now slow from 6.8 s over the first 10 to 10.8 over the last 10, in
+  the footers and deletion vectors of the files a write may change. K2 held; K3 held for the region
+  designs but not for MoR, whose write gained 12% (its bound was 5%): `keys` halves the bytes
+  its locate reads, and its work follows them. K1's control held in requests and bytes; MoR's full
+  scans ran 6.4% more instructions than in its twin (cause unknown), which at each run's own pace is
+  5.1% more time, within the spread of the other designs' reads between the two runs (5.3% less to
+  4.4% more).
+- **Next:** the density hypothesis where density can choose
+  ([docs/drafts/density-plan-2026-11-16.md](docs/drafts/density-plan-2026-11-16.md): a sparse
+  workload next), and a cloud run at 128 MiB after it ([docs/ROADMAP.md](docs/ROADMAP.md)). GCS needs APPEND in the
   fork first; split files can also run on standard S3.

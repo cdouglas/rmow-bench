@@ -603,8 +603,9 @@ lower.
   where RMoR's decode 5.5 (its writes read 74 files at the 240th to RMoR's 137, and no deletion
   vectors to RMoR's 182, which the decode span's opens and deletes include, but not obviously 2 s
   of them).
-- [ ] **The 128 MiB updates with writers that prune by key** (registered 2026-11-16,
-  HYPOTHESES.md K1–K3, commit 202bc66 on branch `keys-128`): `w128`'s five update configurations
+- [x] **The 128 MiB updates with writers that prune by key** (registered 2026-11-16,
+  HYPOTHESES.md K1–K3, commit 202bc66 on branch `keys-128`; ran 2026-11-17, judged on
+  lab/pages/suite-128.md: K2 held, K1 and K3 contradicted in part): `w128`'s five update configurations
   with `locate` `keys` (`configs/w128k-upd-*.json`, campaign `w128-keys`), on the laptop alone, one
   at a time with requests logged, from build snapshot `20261117T005411Z-202bc66bc369` (the twins'
   jar and fork jars). Queued behind catalog-bench's w3pl on the laptop lock
@@ -612,8 +613,17 @@ lower.
   RMoW-external's and RMoR-density's writes 33–39% faster, MoR's about as before. **Decided (the
   user, 2026-11-16):** once K1–K3 are judged, the results page uses these runs, and Appendix A
   shows what pruning by key takes off against the `scan` runs. The work is about patterns a Parquet
-  reader or writer *could* use, if they prove useful.
-- [ ] **Appendix A in two parts** (the user, 2026-11-16): *patterns*, information a reader or writer
+  reader or writer *could* use, if they prove useful. **Done 2026-11-17:** on S3 Express RMoR's
+  writes take 37% less, RMoW-external's 34%, RMoR-density's 33% and MoR's 12% (K3's bound for MoR
+  was 5%: its locate reads half the bytes, skipping the initial load's row groups, and its work
+  follows them, not its requests). RMoR-density's writes now slow from 6.8 s to 10.8 s (8.0 to 21.7
+  before), in each file's footer and deletion vector. Every record but the locate's matched the
+  `w128` runs, but MoR's full scans ran 6.4% more instructions than in its twin (cause unknown).
+  The results page times the updates from these runs, writes, reads and compactions alike (the
+  user, 2026-11-17); its Limits give the spread between the two runs' work.
+- [x] **Appendix A in two parts** (the user, 2026-11-16; done 2026-11-17 for the designs built,
+  with a table of which need appends; the re-cut by reference joins it when built, density plan
+  step 5): *patterns*, information a reader or writer
   could use with Parquet as it is (a footer and deletion vectors once per file, skipping row groups
   a DV covers whole, pruning by key, skipping pages), and *format changes*, what a stock reader must
   understand or tolerate (a footer at an offset inside the object, row groups out of order, a
@@ -703,9 +713,13 @@ lower.
     request each: about 1,070 a write for the cut, 850 for the deferred merges, 89 for compacted
     MoR. The model leaves it out, and it costs most of the cut's write on Azure Blob. Pruning row
     groups by each changed key, as files already are, would cut it: built as `locate` `keys`
-    (2026-11-10, 6db916a), not yet run at 128 MiB. Registered 2026-11-16 (K1–K3) and queued
-    (above): at 128 MiB the scan also reads each file's footer and deletion vector, which `keys`
-    leaves.
+    (2026-11-10, 6db916a); run at 128 MiB 2026-11-17 (K1–K3, above), and the results use it.
+    What it leaves is a file's: its footer (two requests) and its deletion vector, loaded before
+    its row groups are pruned (RMoR-density's last 10 writes: 317 and 157 requests against 35 for
+    the key column).
+  - [ ] **What `keys` leaves:** a writer that held footers across writes, or pruned a file's row
+    groups by key before loading its deletion vector, would read less. Neither is built; both are
+    patterns.
   - [ ] **The windows' footers:** the region designs' windows read the footer of every file whose
     metrics overlap the window (276 requests for the cut at 128 MiB, the model's 14).
   - [ ] (planned: density plan, steps 2–5) **Cold pieces merged back,** a **sparse workload** (where density can choose differently
