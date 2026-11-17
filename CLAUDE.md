@@ -61,8 +61,12 @@ bin/matrix.sh --build configs/local-compact-*.json   # several, from a build sna
   hypotheses) and reads the results once they are copied back into `results/`. Each job has
   whole idle cores, and its foreign load is sampled every second; only phases it did not touch
   decide CPU (`phase_load` in the lab, docker/README.md).
-- **Simulation runs turn `verifyRows` off.** The payload check costs about 70% of a read's CPU,
-  and CPU counts toward simulated latency. The id-and-version oracle stays on.
+- **Measured runs check no rows; verification runs check every row.** A run measures by default:
+  its reads only count their rows against the reference model. `--verify` makes a verification
+  run of the same config, whose reads hash every row's (id, version) (and, with `verifyRows`, its
+  payload) against the model; it issues the same requests and bytes, so `steps_diff` against it
+  vouches for the measured run, and the lab excludes it. Never put a check of correctness, or any
+  other per-row work of the harness's, inside a measured phase (README, Correctness).
 - **Duration:** a `local-*` configuration has taken 8–34 minutes, longest with all 9 arms
   (`elapsed_s` in each manifest). The README's S3 section says what
   `S3StoreTest` needs (versitygw in Docker; skipped without it), and its Azure section what

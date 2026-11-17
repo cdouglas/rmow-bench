@@ -43,8 +43,15 @@ beside runs after it:
 - **The laptop's thread clock runs 11.1% fast against its wall clock** (WSL2 on Hyper-V; manifest
   `host.thread_cpu_per_wall`). The lab divides by it (`run_clock`, since 2026-10-27). Cloud VMs'
   clocks agree with wall time.
-- **The payload check was about 70% of a read's CPU**, so simulation runs turn `verifyRows` off
-  and keep the id-and-version oracle.
+- **The payload check was about 70% of a read's CPU**, so simulation runs turned `verifyRows` off
+  and kept the id-and-version oracle. That oracle, a hash of each row's (id, version) inside the
+  read's decode, was still the harness's work in a measured phase: how the JIT compiled it moved
+  MoR's full scans by 6.4% of their instructions between two runs of the same reads (2026-11-17,
+  campaign `diag-mor`). Since then measured runs check only row counts, and verification runs
+  (`--verify`) check every row apart (README, Correctness). Measured without it (campaign
+  `oracle-out`), the oracle had been 0.6% to 2.9% of a read's instructions, 7.7% of MoR's full scans
+  in the run the JIT compiled it badly. Keep the harness's work per row group or per request,
+  never per row, in a measured phase.
 
 ## Machines
 

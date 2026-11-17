@@ -193,11 +193,21 @@ time (`user_ns`), the process's CPU time (`process_cpu_ns`), and, where the kern
 CPU's counters (`ThreadCounters`, through `perf_event_open`, with `kernel.perf_event_paranoid` at
 most 2), the thread's user-mode `instructions` and `cycles`. Thread CPU time moves with the clock
 speed and instructions do not, so instructions are a phase's work
-([docs/LESSONS.md](docs/LESSONS.md#measuring-work)). Every read is checked against a reference
-model,
-using an order-independent hash of (id, version), and a mismatch stops the run. With `verifyRows`
-(the default), every decoded row's payload is checked as well. That check is the harness's, not an
-engine's, and it costs about 70% of a read's CPU, so runs made for latency simulation turn it off.
+([docs/LESSONS.md](docs/LESSONS.md#measuring-work)).
+
+**Correctness is checked apart from what is measured** (since 2026-11-17). A run measures: its
+reads only count the rows they return, a batch at a time, and each count must equal the reference
+model's. A **verification run** (`--verify` on `bin/run.sh` and `bin/matrix.sh`, or a campaign's
+`flags`) checks every row instead: each read hashes the (id, version) of every row it returns
+(order-independent) and must equal the model's, and with `verifyRows` (the default) every decoded
+row's payload is checked as well. A mismatch stops the run. The checks read nothing, so a
+verification run issues the same requests and bytes as a measured run of its config, record for
+record (`MeasuredRunTest`), and vouches for it (`steps_diff`); it measures nothing itself, so the
+lab excludes it (manifest `verify`, lab/annotations.toml). The fuzzer verifies every run. Runs
+before 2026-11-17 measured with the (id, version) hash in their reads: 0.6% to 2.9% of a read's
+instructions as it usually compiled, and up to 7.7% of MoR's full scans as the JIT compiled it in
+one run, which moved them by 6.4% between two runs of the same reads (lab/pages/suite-128.md, the
+diagnostic under K1–K3; campaign `oracle-out`).
 
 **Where the time went** (`Spans`, since 2026-10-26). Each phase also splits its thread's time by
 kind of work, as wall and CPU time (`<kind>_ns`, `<kind>_cpu_ns`), each exclusive of the others:

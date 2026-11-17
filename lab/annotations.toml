@@ -40,8 +40,17 @@ select = ["where:label LIKE 'w128k-%'"]
 
 [campaigns.diag-mor]
 title = "A diagnostic of MoR's full scans under locate keys (docs/HYPOTHESES.md, 2026-11-17): w128k-upd-mor and w128-upd-mor for 20 writes each, on the laptop one at a time from build snapshot 20261117T005411Z-202bc66bc369, with the JIT's compilation log and the GC log (in the snapshot's logs/diag); every record equals the first 20 writes of its 240-write run (steps_diff)"
-select = ["where:label LIKE 'diag-mor-%'"]
+select = ["where:label LIKE 'diag-mor-%' AND json_extract(manifest, '$.verify') IS NULL"]
+
+[campaigns.oracle-out]
+title = "What the oracle cost a read (docs/HYPOTHESES.md, 2026-11-17): the diag-mor configurations again, measured without the oracle in their reads (verify false), from build snapshot 20261117T203716Z-2722f89e4829-dirty (branch oracle-out) with the JIT's compilation log, and a verification run of each (--verify, excluded) from 20261117T205656Z-2722f89e4829-dirty"
+select = ["where:label LIKE 'diag-mor-%' AND json_extract(manifest, '$.verify') IS NOT NULL"]
 
 [campaigns.prices]
 title = "The two latency tests (spikes) the simulated pages price requests with (analysis/tune.py SPIKES; region-cut): S3 Express from the base point's c7a.4xlarge in usw2-az3, and Azure Blob from a D8as_v6 in westus, both 2026-10-31 at 6f24575"
 select = ["spike/s3x-spike-20261031T163533Z", "spike/azure-spike-20261031T234510Z"]
+[[annotate]]
+select = "where:coalesce(try_cast(json_extract(manifest, '$.verify') AS BOOLEAN), false)"
+mark = "excluded"
+tags = ["verify"]
+note = "a verification run (--verify): its reads check every row against the reference model, so it measures nothing; it vouches for the measured runs of its config (steps_diff)"

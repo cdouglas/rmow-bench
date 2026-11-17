@@ -496,8 +496,9 @@ public final class Fuzz {
     Path storeRoot = runDir.resolve("store");
     Files.createDirectories(runDir);
     String runId = "run";
+    // a fuzzed run verifies: every read's rows against the reference model
     Runner.Options opts =
-        new Runner.Options(local ? storeRoot.toString() : null, local, dump, logs, logs);
+        new Runner.Options(local ? storeRoot.toString() : null, local, dump, logs, logs, true);
     new Runner(cfg, runDir, runId, opts).run();
     Map<String, JsonNode> last = checkStates(runDir);
     if (local) {

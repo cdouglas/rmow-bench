@@ -25,6 +25,14 @@ public final class TableHash {
     sum += Rows.rowHash(id, version);
   }
 
+  /**
+   * Counts {@code n} rows without hashing them: a measured read's, whose rows only the count
+   * checks (the hash's sum stays 0, so only {@link #count} compares).
+   */
+  public void addCount(long n) {
+    count += n;
+  }
+
   public void remove(long id, int version) {
     count -= 1;
     sum -= Rows.rowHash(id, version);

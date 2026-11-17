@@ -38,6 +38,10 @@ rmor_rewrite_share = { path = "config.layout.rmorRewriteShare", type = "DOUBLE" 
 reads_every = { path = "config.reads.every", type = "INTEGER" }
 oplog = "oplog_sha256"
 verify_rows = { path = "config.verifyRows", type = "BOOLEAN" }
+# a verification run (--verify, since 2026-11-17): its reads check every row against the model and
+# it is excluded (annotations.toml); a run without the field, before then, measured with the oracle
+# in its reads; one with verify = false measured without it
+verify = { path = "verify", type = "BOOLEAN" }
 cpu_model = "host.cpu_model"
 
 # The store spikes (S3ExpressSpike, AzureSpike) write results/spike/<label>-<UTC start>/:

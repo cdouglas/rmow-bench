@@ -65,14 +65,31 @@ public final class Runner {
    *     run directory, with its split task and each task's CPU, for latency models
    * @param logHeld write every change of what each phase's readers and writers hold to {@code
    *     held.jsonl} in the run directory ({@link Held})
+   * @param verify a verification run: every read hashes the (id, version) of each row it returns
+   *     (and checks its payload, with the config's {@code verifyRows}) and must equal the reference
+   *     model's. Without it a run measures: its reads only count the rows they return, a batch at a
+   *     time, and the count must equal the model's. A verification run's requests and bytes equal
+   *     the measured run's of the same config (the oracle reads nothing), so it vouches for it.
    */
   public record Options(
       String storeRoot,
       boolean keepStore,
       boolean dumpVersions,
       boolean logRequests,
-      boolean logHeld) {
-    public static final Options DEFAULT = new Options(null, false, false, false, false);
+      boolean logHeld,
+      boolean verify) {
+    /** A verification run: what tests and the fuzzer use. */
+    public static final Options DEFAULT = new Options(null, false, false, false, false, true);
+
+    /** A verification run with these options. */
+    public Options(
+        String storeRoot,
+        boolean keepStore,
+        boolean dumpVersions,
+        boolean logRequests,
+        boolean logHeld) {
+      this(storeRoot, keepStore, dumpVersions, logRequests, logHeld, true);
+    }
 
     /** Where the run's objects go: {@code storeRoot} moves a local store's, never a cloud's. */
     String storeRoot(BenchConfig cfg) {
@@ -237,7 +254,8 @@ public final class Runner {
               phases,
               cfg.layout,
               log,
-              cfg.verifyRows);
+              cfg.verifyRows,
+              options.verify());
       Arm arm = create(name, ctx);
       arm.load(InitialLoad.copy(io, base, ctx.root(), appends(name) ? io : null));
       arms.add(new ArmRun(arm, phases, trace));
@@ -424,7 +442,7 @@ public final class Runner {
     return out;
   }
 
-  private static void checkedRead(
+  private void checkedRead(
       ArmRun a,
       Reader reader,
       String phase,
@@ -435,7 +453,7 @@ public final class Runner {
     checkedRead(a, reader, phase, step, read, want, null);
   }
 
-  private static void checkedRead(
+  private void checkedRead(
       ArmRun a,
       Reader reader,
       String phase,
@@ -452,7 +470,9 @@ public final class Runner {
     }
     TableHash got = a.phases().run(phase, read, extra);
     extra.put("rows", got.count());
-    if (!got.equals(want)) {
+    // a verification run checks every row's (id, version); a measured run, whose reads only count
+    // their rows, the count
+    if (options.verify() ? !got.equals(want) : got.count() != want.count()) {
       throw new IllegalStateException(
           String.format(
               "%s %s%s (%s reader) at step %d read %s, the model holds %s",

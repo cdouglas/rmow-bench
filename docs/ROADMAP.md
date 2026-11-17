@@ -722,11 +722,20 @@ lower.
     groups by key before loading its deletion vector, would read less. Neither is built; both are
     patterns.
   - [ ] **The oracle's check in a read's work** (found 2026-11-17, diagnostic `diag-mor`): every read
-    hashes each row it returns into the id-and-version oracle inside its decode, so the check counts
-    in the read's work, and how the JIT compiles it moved MoR's full scans by 6.4% of their
-    instructions between two runs of the same reads. Open, the user's call: keep the check out of
-    the measured work (count it apart, or hash outside the decode's span), or keep the loop that
-    calls it from inlining it, so every run compiles it alike; and measure what it costs a read.
+    hashed each row it returns into the id-and-version oracle inside its decode, so the check counted
+    in the read's work, and how the JIT compiled it moved MoR's full scans by 6.4% of their
+    instructions between two runs of the same reads. **Decided (the user, 2026-11-17):** measured
+    runs check no rows, and the benchmark checks correctness apart, in verification runs
+    (`--verify`) that `steps_diff` ties to the measured ones; measurement in a run is off the
+    critical path or negligible, particularly for the cloud runs. Built on branch `oracle-out`
+    (README, Correctness); measured 2026-11-17 (campaign `oracle-out`): 0.6% to 2.9% of a read's
+    instructions as usually compiled, 7.7% of MoR's full scans in its `w128-keys` run; writes none.
+    Open: whether to rerun the 128 MiB laptop runs without it (the user's call), and the full
+    fuzzer calibration on havoc on both profiles (a 20-seed spot check of three mutants passed).
+    The instrumentation in the measured path is below what the runs resolve: `Held` takes its lock
+    once a row-group fetch or scan step (about 1,160 times a full scan at 128 MiB, uncontended in
+    one-thread reads), and the request log adds under 0.1% (the `w128-keys` runs logged requests,
+    their twins did not); both logs are written after each phase.
   - [ ] **The windows' footers:** the region designs' windows read the footer of every file whose
     metrics overlap the window (276 requests for the cut at 128 MiB, the model's 14).
   - [ ] (planned: density plan, steps 2–5) **Cold pieces merged back,** a **sparse workload** (where density can choose differently

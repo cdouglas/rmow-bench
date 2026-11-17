@@ -1834,3 +1834,26 @@ laptop, one at a time, from build snapshot 20261117T005411Z-202bc66bc369 (both e
 
 This changes no result: the results page already times the updates from the `w128-keys` runs and
 states the offset (workloads-128.md, Limits).
+
+## What the oracle cost a read: a measurement (registered 2026-11-17)
+
+Until 2026-11-17 every read hashed each row it returned into the id-and-version oracle, inside the
+read's measured phase, and how the JIT compiled that hash moved MoR's full scans by 6.4% of their
+instructions between two runs of the same reads (the diagnostic above). Since then a run measures
+without the oracle (its reads only count their rows, a batch at a time) and a verification run
+(`--verify`) checks every row apart (README, Correctness).
+
+**The runs:** `configs/diag-mor-keys20.json` and `configs/diag-mor-scan20.json` again, measured
+(without `--verify`), on the laptop one at a time from a build snapshot of this change, with the
+JIT's compilation log; and a verification run of each.
+
+**Measured, not judged:**
+- **What the oracle cost:** each read's user-mode instructions against the same read in the
+  diagnostic's runs, which ran the oracle in their reads (their requests and bytes must be equal,
+  `steps_diff`).
+- **Whether MoR's offset goes with it:** the full scans' instructions under `keys` against under
+  `scan`.
+- **Whether a verification run vouches for its measured run:** every record's requests, bytes and
+  rows equal (`steps_diff`), and the verification run passes.
+
+Whether to rerun the 128 MiB laptop runs without the oracle is decided from the first.

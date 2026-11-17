@@ -866,6 +866,68 @@ table(DG.round(2).reset_index().rename(columns={"step": "after write"}),
       "under scan, in the 240-write runs and the 20-write diagnostic")
 ```
 
+```{code-cell} ipython3
+:tags: [remove-cell]
+
+# The same two configurations measured without the oracle (campaign oracle-out, 2026-11-17: reads
+# only count their rows; docs/HYPOTHESES.md, "What the oracle cost a read"): each read's user-mode
+# instructions over the 20 writes, with the oracle (the diagnostic's runs) and without, and the
+# records that differ between them and between each measured run and its verification run
+OC_RUNS = {(loc, o): r for loc in ("keys", "scan") for o, r in [
+    ("oracle", run_in("diag-mor", f"diag-mor-{loc}20")),
+    ("none", q(f"""SELECT run_id FROM canonical_runs WHERE list_contains(campaigns, 'oracle-out')
+                   AND label = 'diag-mor-{loc}20'""").run_id.iloc[0]),
+    ("verify", q(f"""SELECT run_id FROM runs WHERE list_contains(campaigns, 'oracle-out')
+                     AND label = 'diag-mor-{loc}20' AND verify""").run_id.iloc[0])]}
+OC_READS = {"read_full": "full scan", "read_sorted": "sorted read", "read_recent": "newest 1%",
+            "read_window": "1% range read"}
+
+
+def oc_instr(run):
+    return q(f"""SELECT phase, sum(instructions + coalesce(pool_instructions, 0)) / 1e9 AS g, sum(rows) AS rows
+                 FROM steps WHERE run_id = '{run}' AND arm = 'mor-v3'
+                   AND (phase = 'batch' OR (phase IN ({", ".join(f"'{p}'" for p in OC_READS)})
+                                            AND reader = 'cached-skip'))
+                 GROUP BY 1""").set_index("phase")
+
+
+OC = []
+for loc in ("keys", "scan"):
+    a, b = oc_instr(OC_RUNS[loc, "oracle"]), oc_instr(OC_RUNS[loc, "none"])
+    for ph in ["batch"] + list(OC_READS):
+        OC.append(dict(locate=loc, what=OC_READS.get(ph, "snapshot write"), with_oracle=a.g[ph],
+                       without=b.g[ph], share=1 - b.g[ph] / a.g[ph],
+                       per_row=(a.g[ph] - b.g[ph]) * 1e9 / a.rows[ph] if ph != "batch" else float("nan")))
+OC = pd.DataFrame(OC)
+OCK = OC.set_index(["locate", "what"])
+OC_DIFF = {k: int(q(f"""SELECT count(*) FILTER (WHERE one_run_only OR len(differs) > 0) AS n
+                        FROM steps_diff('{OC_RUNS[loc, x]}', '{OC_RUNS[loc, "none"]}')""").n.iloc[0])
+           for loc in ("keys", "scan") for k, x in [((loc, "oracle"), "oracle"), ((loc, "verify"), "verify")]}
+OC_READ_SHARE = OC[(OC.locate == "scan") & (OC.what != "snapshot write")].share
+```
+
+Without the oracle the offset is gone. Since 2026-11-17 a run measures with no check of its rows in
+its reads, which only count them, and a verification run (`--verify`) checks every row apart
+(README, Correctness). Measured so, the same two configurations' full scans run
+{eval}`f1(OCK.without["keys", "full scan"])` G instructions under `keys` and
+{eval}`f1(OCK.without["scan", "full scan"])` G under `scan` over the 20 writes. Every record of each
+measured run equals the diagnostic's run ({eval}`OC_DIFF["keys", "oracle"]` and
+{eval}`OC_DIFF["scan", "oracle"]` records differ) and its verification run
+({eval}`OC_DIFF["keys", "verify"]` and {eval}`OC_DIFF["scan", "verify"]`), which passed. Compiled
+as under `scan`, the oracle was {eval}`pct(OC_READ_SHARE.min())` to
+{eval}`pct(OC_READ_SHARE.max())` of a read's instructions
+({eval}`f0(OCK.per_row["scan", "full scan"])` a row in a full scan); compiled as under `keys`, up
+to {eval}`pct(OCK.share["keys", "full scan"])` ({eval}`f0(OCK.per_row["keys", "full scan"])` a
+row). The writes did not hash rows: they run the same instructions within
+{eval}`pct(OC[OC.what == "snapshot write"].share.abs().max())`.
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(OC.round(3), caption="MoR over 20 writes: each read's and write's user-mode instructions (G) "
+      "with the oracle in the reads and without, the oracle's share, and its instructions a row read")
+```
+
 ## Limits
 
 - **One seed, one lateness,** as registered; no watermark drops late rows.

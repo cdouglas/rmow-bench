@@ -27,7 +27,7 @@ import org.apache.iceberg.IcebergBuild;
  *
  * <pre>
  *   bin/run.sh &lt;config.json&gt; [--out &lt;dir&gt;] [--store-root &lt;dir&gt;] [--keep-store] [--dump-versions]
- *       [--log-requests] [--log-held]
+ *       [--log-requests] [--log-held] [--verify]
  * </pre>
  *
  * Results go to {@code <out>/<label>-<config hash>/<UTC start time>/}: {@code manifest.json}
@@ -45,7 +45,13 @@ import org.apache.iceberg.IcebergBuild;
  *       {@code held.jsonl} (rows, and bytes by kind), for drawing memory against the stages of a
  *       phase;
  *   <li>{@code --log-requests} writes every request each phase issued to {@code requests.jsonl},
- *       with its split task and each task's CPU, for latency models.
+ *       with its split task and each task's CPU, for latency models;
+ *   <li>{@code --verify} makes the run a verification run: every read hashes each row it returns
+ *       into the id-and-version oracle (and checks its payload, with the config's {@code
+ *       verifyRows}) against the reference model. Without it the run measures: its reads only
+ *       count their rows, so no check of correctness runs in a measured phase. A verification
+ *       run issues the same requests and bytes as a measured run of its config, which it vouches
+ *       for ({@code steps_diff}); the manifest says which it is ({@code verify}).
  * </ul>
  *
  * <p>{@code bin/matrix.sh} runs from a snapshot of the build and names it, and its git state, in
@@ -60,7 +66,7 @@ public final class Main {
     if (args.length < 1) {
       System.err.println(
           "usage: run.sh <config.json> [--out <dir>] [--store-root <dir>] [--keep-store]"
-              + " [--dump-versions] [--log-requests] [--log-held]");
+              + " [--dump-versions] [--log-requests] [--log-held] [--verify]");
       System.exit(2);
     }
     Path out = Path.of("results");
@@ -69,6 +75,7 @@ public final class Main {
     boolean dumpVersions = false;
     boolean logRequests = false;
     boolean logHeld = false;
+    boolean verify = false;
     for (int i = 1; i < args.length; i++) {
       if (args[i].equals("--out") && i + 1 < args.length) {
         out = Path.of(args[++i]);
@@ -82,6 +89,8 @@ public final class Main {
         logRequests = true;
       } else if (args[i].equals("--log-held")) {
         logHeld = true;
+      } else if (args[i].equals("--verify")) {
+        verify = true;
       } else {
         throw new IllegalArgumentException("Unknown argument: " + args[i]);
       }
@@ -108,7 +117,9 @@ public final class Main {
     manifest.put("started", started);
     manifest.put("versions", versions());
     manifest.put("host", host());
-    Runner.Options options = new Runner.Options(storeRoot, keepStore, dumpVersions, logRequests, logHeld);
+    Runner.Options options =
+        new Runner.Options(storeRoot, keepStore, dumpVersions, logRequests, logHeld, verify);
+    manifest.put("verify", verify);
     manifest.put("store_root", options.storeRoot(cfg));
     Path manifestFile = runDir.resolve("manifest.json");
     pretty.writeValue(manifestFile.toFile(), manifest);

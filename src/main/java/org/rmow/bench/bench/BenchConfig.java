@@ -207,6 +207,6 @@ public final class BenchConfig {
   public LayoutSpec layout = new LayoutSpec();
   public List<String> arms = List.of("mor-v3", "rmow-a");
   public ReadSpec reads = new ReadSpec();
-  /** Check each decoded row's payload; costs the same CPU in every arm. */
+  /** In a verification run ({@code --verify}), check each decoded row's payload too. */
   public boolean verifyRows = true;
 }

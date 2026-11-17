@@ -194,6 +194,19 @@ final class Scans {
     return deleteFilter.hasPosDeletes() ? deleteFilter.deletedRowPositions() : null;
   }
 
+  /**
+   * Where a read's rows go: in a verification run each row's (id, version) is hashed into {@code
+   * h} for the reference model's check ({@link #hash}); in a measured run only the batch's live
+   * rows are counted, so the oracle adds nothing a row to the read's work.
+   */
+  static Consumer<RowBatch> sink(ArmContext ctx, TableHash h) {
+    if (ctx.oracle()) {
+      boolean payloads = ctx.checkPayloads();
+      return b -> hash(h, b, payloads);
+    }
+    return b -> h.addCount(b.size());
+  }
+
   /** Adds a batch's live rows to {@code h}, checking each one's payload when {@code verify}. */
   static void hash(TableHash h, RowBatch b, boolean verify) {
     for (int k = 0; k < b.size(); k++) {
@@ -295,7 +308,7 @@ final class Scans {
             () -> {
               TableHash h = new TableHash();
               scan(ctx, reader, f.file(), f.deletes(), Rows.SCHEMA, filter, footer, start, length,
-                  deletes, b -> hash(h, b, ctx.verifyRows()));
+                  deletes, sink(ctx, h));
               return h;
             });
       }
@@ -541,7 +554,11 @@ final class Scans {
           }
           lastTs = o.ts;
           lastId = o.id;
-          o.addTo(h, ctx.verifyRows());
+          if (ctx.oracle()) {
+            o.addTo(h, ctx.checkPayloads());
+          } else {
+            h.addCount(1);
+          }
           if (o.advance()) {
             open.add(o);
           } else {
@@ -697,12 +714,13 @@ final class Scans {
         throws IOException {
       DataFile df = run.file().file();
       List<long[]> rows = new ArrayList<>();
-      Map<Long, Record> records = ctx.verifyRows() ? new HashMap<>() : null;
+      Map<Long, Record> records = ctx.checkPayloads() ? new HashMap<>() : null;
+      boolean versions = ctx.oracle(); // a row's version serves only the oracle's hash
       scan(ctx, reader, df, run.file().deletes(), Rows.SCHEMA, Expressions.alwaysTrue(), null,
           -1, -1, deletes,
           b -> {
             for (int k = 0; k < b.size(); k++) {
-              rows.add(new long[] {b.ts(k), b.id(k), b.version(k)});
+              rows.add(new long[] {b.ts(k), b.id(k), versions ? b.version(k) : 0});
               if (records != null) {
                 records.put(b.id(k), b.record(k));
               }
@@ -786,7 +804,7 @@ final class Scans {
                 }
                 TableHash h = new TableHash();
                 scan(ctx, reader, object, f.deletes(), Rows.SCHEMA, filter, v.tail(), start,
-                    splitLength, b -> hash(h, b, ctx.verifyRows()));
+                    splitLength, sink(ctx, h));
                 return h;
               });
         }
