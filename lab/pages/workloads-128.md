@@ -326,6 +326,37 @@ RG = {n: [gb(ST[ST.label == l], n, step, col="row_groups") for step in (0, 240)]
                    ("w128-upd-external", "RMoW-external")]}
 COPY_RMOR = [written_mb("w128-upd-rmor", 1, 10), written_mb("w128-upd-rmor", 231, 240)]
 DEN_RISE = mean_over(SNU, "RMoR-density", WRITE, 231, 240) - mean_over(SNU, "RMoR-density", WRITE, 1, 10)
+
+# What reads and writes hold (README, What is held): the most a phase held at once, its encoded
+# bytes (the same in every run of a configuration; havoc's runs), a read's under cached-skip, a
+# probe's five windows the most of them
+HELD_OPS = {"batch": "snapshot write", "compact": "compaction", "read_window": "1% range read",
+            "read_full": "full scan", "read_sorted": "sorted read"}
+HELD_NAMES = ["MoR", "MoR (compacted)", "RMoR", "RMoW-external", "RMoW-append", "RMoR-density"]
+REGION = ["RMoR", "RMoW-external", "RMoW-append", "RMoR-density"]
+HELD = q("""SELECT r.label, s.arm, s.step, s.phase, max(s.held_bytes) / 1e9 AS gb
+            FROM steps s JOIN canonical_runs r USING (run_id)
+            WHERE list_contains(r.campaigns, 'w128') AND s.held_bytes IS NOT NULL
+              AND s.phase IN ('batch', 'compact', 'read_window', 'read_full', 'read_sorted')
+              AND (s.phase IN ('batch', 'compact') OR s.reader = 'cached-skip')
+            GROUP BY ALL""")
+HELD["name"] = [{(l, a): n for l, a, n in UPD + ING}[k] for k in zip(HELD.label, HELD.arm)]
+HELD["workload"] = np.where(HELD.label.str.contains("-upd-"), "updates", "inserts")
+HELD["what"] = HELD.phase.map(HELD_OPS)
+
+
+def held(name, what, workload="updates", step=None):
+    """The most a design's phase held (GB): over the run, or after one write."""
+    d = HELD[(HELD.name == name) & (HELD.what == what) & (HELD.workload == workload)]
+    return d.gb.max() if step is None else d[d.step == step].gb.iloc[0]
+
+
+def held_span(what, names=None):
+    """The least and the most, over the designs (all, or `names`) and both workloads, of the most a
+    phase held over the run (GB)."""
+    d = HELD[(HELD.what == what) & (HELD.name.isin(names or HELD_NAMES))]
+    m = d.groupby(["workload", "name"]).gb.max()
+    return m.min(), m.max()
 ```
 
 ## What it shows
@@ -377,6 +408,11 @@ DEN_RISE = mean_over(SNU, "RMoR-density", WRITE, 231, 240) - mean_over(SNU, "RMo
   {eval}`f1(v(U, S3X, "MoR", "write_s"))` on the updates and
   {eval}`f1(v(I, S3X, "MoR (compacted)", "write_s"))` s against
   {eval}`f2(v(I, S3X, "MoR", "write_s"))` on the inserts (sections 5 and 10).
+- **MoR's sorted read holds more as snapshots are added; the region designs' do not.** It holds
+  {eval}`f2(held("MoR", "sorted read"))` GB at its most on the updates and
+  {eval}`f2(held("MoR", "sorted read", "inserts"))` on the inserts, the region designs' at most
+  {eval}`f2(held_span("sorted read", REGION)[0])`–{eval}`f2(held_span("sorted read", REGION)[1])`.
+  Reads that take a row group at a time hold about one in every design (section 11).
 
 ## Setup
 
@@ -1051,6 +1087,99 @@ snapshot_chart(CMI, READS_U)
 :tags: [remove-input]
 
 fig.wl_snapshot_table(CMI, READ["window_s"], every=10)
+```
+
+## Memory
+
+### 11. What reads and writes hold
+
+```{code-cell} ipython3
+:tags: [remove-cell]
+
+SORTED = on_top(HELD[HELD.phase == "read_sorted"])
+
+
+def held_chart(d):
+    names = [n for n in HELD_NAMES if n in set(d.name)]
+    legend = alt.Legend(orient="bottom", direction="horizontal", title=None, symbolStrokeWidth=2, labelLimit=320)
+    return alt.Chart(d).mark_line(strokeWidth=2).encode(
+        x=X, y=alt.Y("gb:Q", title="sorted read held (GB)", scale=alt.Scale(zero=True)),
+        color=alt.Color("name:N", sort=names, legend=legend,
+                        scale=alt.Scale(domain=names, range=[colors(names)[n] for n in names])),
+        strokeDash=alt.StrokeDash("name:N", sort=names, legend=None, scale=alt.Scale(
+            domain=names, range=[[5, 3] if n in DASHED else [1, 0] for n in names])),
+        tooltip=["workload", "name", "step", alt.Tooltip("gb:Q", format=".2f")],
+    ).properties(width=WIDTH, height=180).facet(
+        column=alt.Column("workload:N", title=None, sort=["updates", "inserts"]))
+
+
+def held_table(d, every=40):
+    t = d[d.step % every == 0].assign(col=d.workload + ", " + d.name).pivot_table(
+        index="step", columns="col", values="gb")
+    cols = [f"{w}, {n}" for w in ["updates", "inserts"] for n in HELD_NAMES if f"{w}, {n}" in t.columns]
+    return table(t[cols].reset_index().rename(columns={"step": "snapshot"}).round(2),
+                 caption=f"What the sorted read held (GB) at every {every}th snapshot")
+
+
+PEAK = HELD.groupby(["workload", "name", "what"]).gb.max().unstack("what")
+PEAK = PEAK.reindex(columns=[w for w in HELD_OPS.values() if w in PEAK.columns]).reset_index()
+PEAK["workload"] = pd.Categorical(PEAK.workload, ["updates", "inserts"])
+PEAK["name"] = pd.Categorical(PEAK.name, HELD_NAMES)
+PEAK = PEAK.sort_values(["workload", "name"])
+WRITE_REST = HELD[(HELD.what == "snapshot write") & ~HELD.name.isin(["RMoW-append", "RMoW-external"])].gb.max()
+```
+
+What each design's reads and writes held at most at once, in GB of encoded data: the column
+chunks fetched for the row groups being decoded, a writer's buffered row group, data waiting for
+its request, and the deletion vectors loaded (the repository's README, What is held). It is counted where the code holds data, so every run of a configuration holds the
+same; it is not the JVM's heap. Reads run one at a time, on one thread.
+
+Reads that take a row group at a time hold about one row group in every design: at their most over
+the run, a 1% range read holds {eval}`f2(held_span("1% range read")[0])`–{eval}`f2(held_span("1% range read")[1])`
+GB and a full scan {eval}`f2(held_span("full scan")[0])`–{eval}`f2(held_span("full scan")[1])` GB on
+either workload, about a row group of 128 MiB and its deletion vectors.
+
+The sorted read is where the designs part. It returns the table in key order (event-time order on
+the inserts), so it holds at once a row group of every file whose range overlaps the next rows it
+returns. Each MoR write adds a file whose rows span much of that range (the new versions of rows in
+the ten or so regions it changed, or late rows reaching back in event time), so MoR's sorted read
+holds more after every write: {eval}`f2(held("MoR", "sorted read", step=10))` GB after the 10th
+write and {eval}`f2(held("MoR", "sorted read", step=240))` after the 240th on the updates,
+{eval}`f2(held("MoR", "sorted read", "inserts", step=10))` and
+{eval}`f2(held("MoR", "sorted read", "inserts", step=240))` on the inserts. Iceberg's compaction slows
+the climb ({eval}`f2(held("MoR (compacted)", "sorted read", step=240))` and
+{eval}`f2(held("MoR (compacted)", "sorted read", "inserts", step=240))` GB after 240 writes). The
+region designs keep each range of keys in row groups that do not overlap, but for RMoR-density's
+delta row groups, so theirs holds at most {eval}`f2(held_span("sorted read", REGION)[0])`–{eval}`f2(held_span("sorted read", REGION)[1])`
+GB, and RMoR's and RMoW-external's less as their pieces get smaller
+({eval}`f2(held("RMoR", "sorted read", step=240))` and
+{eval}`f2(held("RMoW-external", "sorted read", step=240))` GB after the 240th write).
+
+Writes hold little, except where a design sends its new data in one request. RMoW-append holds the
+row groups it appends to an object until the append ({eval}`f2(held("RMoW-append", "snapshot write"))`
+GB at most), and RMoW-external its new data file until the request that creates it
+({eval}`f2(held("RMoW-external", "snapshot write"))` GB), since a file the store can extend is created
+in one request. RMoR streams its file; every other write holds at most {eval}`f2(WRITE_REST)` GB.
+
+```{code-cell} ipython3
+:label: workloads-128-held
+:tags: [remove-input]
+:class: col-page-right
+
+held_chart(SORTED)
+```
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+held_table(SORTED)
+```
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(PEAK.rename(columns={"name": "design"}).round(2),
+      caption="The most each design's reads and writes held at once over the run (GB)")
 ```
 
 ## Limits
