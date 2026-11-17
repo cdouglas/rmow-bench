@@ -63,7 +63,7 @@ reads.
   - **An APPEND from an unseen snapshot** looks the object up when it writes.
   - **Tests:** the fork's aws, azure and gcp suites pass. New mock tests per store check that a
     create sends no lookup. The new contract cases need the real services.
-- [ ] **ADLS creates stay one request above the store's own appender:** 3 requests against 2.
+- [x] **ADLS creates stay one request above the store's own appender** (decided, kept): 3 requests against 2.
   An Append Blob is created empty, so only the staged rename makes a create all or nothing.
   This is decided: SAO keeps the atomic create.
 - [x] **Run the fork's contract suites on the real services** (done 2026-10-28, at af875ccfd1, the
@@ -160,7 +160,7 @@ reads.
     bytes on 7 arms. The one difference is 18 bytes per DV file, from Puffin's `created-by`
     (EXPERIMENTS.md, Builds). versitygw and Azurite match the model in every phase, with the
     stand-ins' counts.
-  - [ ] **Against the stores' own writes, in the cloud:** the spikes now time the store's own
+  - [x] **Against the stores' own writes, in the cloud** (measured in the spikes, not judged): the spikes now time the store's own
     appends and creates beside RMoW's, interleaved, measured but not judged (HYPOTHESES.md).
     That leaves nothing native in the runs, only in the spikes.
 - [x] **Where time goes, measured** (done 2026-10-26). Each phase splits its
@@ -174,7 +174,9 @@ reads.
   - Writes into an output stream count as encoding: Thrift writes a footer in many small writes,
     which would cost 2 µs each to time. The PUT is the stream's close.
   - The store client's own threads (Azure's event loop) are in `process_cpu_ns`, not `io`.
-- [ ] **Stacked bars of where time goes:** a lab page with phase and sub-phase (locate,
+- [x] **Stacked bars of where time goes** (superseded 2026-11-16: workloads-128.md, sections 4
+  and 9, splits each write and read into decode, encode, DVs and footers, other CPU and I/O on both
+  stores, and section 4 the write's scan from what it copies; process CPU beside was dropped): a lab page with phase and sub-phase (locate,
   merge-read, write, delete-write; each read) split into CPU and waiting, with process CPU shown
   beside, for the five arms. The view is done (`phase_breakdown`). Since 2026-11-02 the results
   pages (base-point and cloud-sweep, sections 2 and 3) split each write and full read into
@@ -202,7 +204,8 @@ reads.
   (`max_append_mib`, in `phase_latency`, `figures.replay` and injected latency). Older runs take
   them from their request logs, appends only. Only the 128 MiB scale runs have any (0.65 per
   RMoW-C batch, 59 ms on a 13.7 s batch on Azure); no number on any page moved.
-- [ ] **Iceberg's own writes above 256 MiB on Azure:** an output stream is one Put Blob up to
+- [ ] **Iceberg's own writes above 256 MiB on Azure** (now live: MoR (compacted)'s compactions at
+  128 MiB write files up to 512 MiB, priced as one PUT on workloads-128.md's Azure Blob): an output stream is one Put Blob up to
   256 MiB (README, The Azure store). A larger one is presumably several requests, the SDK's
   chunked upload, not yet counted; the model counts one PUT. **Counted on the Azure base point**
   (2026-11-01): RMoR-C's write files (418 MiB on average) went up as 85 Put Blocks a write on
@@ -336,7 +339,9 @@ reads.
     waits on the store fell 1.2 s from the earlier run. The results pages (base-point,
     cloud-sweep) take RMoR's times from these runs, each over the MoR of its own run; the model's
     pages keep the earlier runs they price.
-- [ ] **RMoR and RMoW-external with their row groups kept whole** (found 2026-11-04). Their
+- [x] **RMoR and RMoW-external with their row groups kept whole** (found 2026-11-04; built
+  2026-11-04 as `rmor-c-kept` and `rmor-c-footer-kept`, which every standing run of RMoR and
+  RMoW-external uses; docs/LESSONS.md). Their
   writer puts the rows of every row group a write rewrites in one list with the write's inserts,
   sorts it by event time and cuts it into new row groups. So late inserts land among old
   regions' rows, and a later update of a new region rewrites most of the recent files' row groups
@@ -398,12 +403,14 @@ hashes of the calibration's log and of the 1M-row recency and uniform logs.
     updated, as a MERGE does. The rows updated and deleted per batch are unchanged, and p counts
     up to updates plus deletes over `regionRows`. Logs at an update share of 0 are unchanged (the
     pinned hashes hold); no run had used the update share.
-  - [ ] **θ against p, after the sweeps** (decided 2026-10-29). RMoR-C's θ is a hybrid, choosing
+  - [x] **θ against p, after the sweeps** (superseded: the sweeps were retired on 2026-11-12, and
+    where θ can choose is step 2 of docs/drafts/density-plan-2026-11-16.md). RMoR-C's θ is a hybrid, choosing
     per region between DVs and a rewrite, and the story compares the alternatives before
     introducing one. The sweeps run θ = 0 (always rewrite), and TailCoW-C is the other end
     (never), so where RMoR-C's batch crosses TailCoW-C's along p, on each store's profile, is where
     θ belongs; the θ stage starts there.
-- [ ] **Arrival window:** sweep insert lateness (`lateMedianBatches`, `lateP99Batches`). It
+- [x] **Arrival window** (done 2026-11-08: the windows campaign's lateness twins at p99 1, 5 and
+  20; docs/LESSONS.md, The 16 MiB workloads): sweep insert lateness (`lateMedianBatches`, `lateP99Batches`). It
   exists but has never been swept; the sweeps take a p99 of 1 and 20 batches against the base's 5.
 
 **The base point leaves the skew and the update share no room** (found 2026-10-27, from the
@@ -479,15 +486,16 @@ lower.
   and RMoR-C's block-uploaded write files read slowly
   (lab/pages/cloud-sweep.md; the model and the verdicts in
   lab/pages/cloud-sweep-model.md).
-- [ ] **The two workloads apart** (decided 2026-11-05; HYPOTHESES.md, 2026-11-06). Updates
+- [x] **The two workloads apart** (decided 2026-11-05; HYPOTHESES.md, 2026-11-06; ran 2026-11-06/07,
+  campaigns `split` and `seal`, retired 2026-11-12, whose verdicts the `windows` runs carry). Updates
   only (the base point's 150,000 changes a write, clustered by region, no inserts) and inserts
   only (its 350,000 a write, sorted by event time, lateness p99 1, 5 and 20 writes), with
   `updateRead` `row`: `configs/upd-*.json` and `configs/ing-*.json`, campaign
   `docker/campaigns/split.json` on havoc (the user's runs). The ingest arms append alike at the
   base point (a write's inserts are sealed at once, so no tail merge happens); a writer that
   merges late rows into their row group is not built.
-- [ ] **Inserts merged by the writer** (hypothesis (b), open 2026-11-06). Two ways, not yet
-  chosen:
+- [x] **Inserts merged by the writer** (hypothesis (b), open 2026-11-06; both built and run: the
+  tiered seal judged by J1–J3, the event-time merge in the 128 MiB suite). Two ways:
   - **tiered, by arrival:** a tail seal above the row-group size (`tailSealBytes`, 16 MiB in
     every configuration so far, tied to the row-group size), so tail policy C merges consecutive
     writes' inserts into longer runs sorted by event time. A configuration, no code: registered
@@ -531,12 +539,14 @@ lower.
   4 MiB row groups still have column chunks of a few hundred KB. A wide table (100+ columns, read
   a few at a time) at 4, 16 and 128 MiB would show whether they carry over; on the laptop and
   havoc, no cloud run.
-- [ ] **The deferred merges at their own best settings**: the cloud run timed them only at 4 MiB
+- [x] **The deferred merges at their own best settings** (superseded: the tuner and its cloud check
+  were retired on 2026-11-12; RMoR-density runs at 128 MiB in `w128`): the cloud run timed them only at 4 MiB
   row groups, with RMoW-append's configuration, where the tuner prices them 1.09–1.47 times their
   best on S3 Express and 1.23–2.22 on Azure (lab/pages/tune-cloud.md, Limits). On Azure Blob under
   `scans` the tuner's pick on the whole grid is the deferred merges with 32 MiB row groups
   (`tune-upd-rg32m`, 27.1 s a write against compacted MoR's 27.8), which no cloud run has timed.
-- [ ] **The formula's misses**: a read's work per row group (small reads with 4 and 8 MiB row
+- [x] **The formula's misses** (superseded: the results pages price each phase with its twin's
+  measured work; the formula serves only simulation-cloud.md's forecast): a read's work per row group (small reads with 4 and 8 MiB row
   groups came out 19–44% low). Train on a row-group sweep, or count row groups read per phase.
 - [ ] **A writer that tunes itself**: the same prices could drive the writer, merging a row group
   when the reads expected before it next changes cost more than rewriting it.
@@ -570,21 +580,51 @@ lower.
   s, MoR in 25.2 s and 6.5 s; MoR's writes and range reads slow as snapshots are added. On the
   inserts RMoR-density reads a range in 3.2 s against MoR's 10.1, for writes of 4.1 s against
   0.45.
-- [ ] **Retire the 16 MiB workloads pages** that the 128 MiB results page replaces
+- [x] **Retire the 16 MiB workloads pages** that the 128 MiB results page replaces
   (`workloads.md`, and its cloud check `workloads-cloud.md`): the user decides which pages and
   runs go; first record them in EXPERIMENTS.md (Retired runs) and carry what still matters into
-  LESSONS.md.
-- [ ] **Two mechanisms the 128 MiB results page states without explaining**: RMoR-density's
+  LESSONS.md. **Done 2026-11-16** (the user: drop them if unusable): both pages and the 36 runs only
+  they read (campaigns `tune` and `workloads-curves`), recorded in EXPERIMENTS.md and LESSONS.md
+  (The 16 MiB workloads). The runs the simulation's cloud check reads stay with
+  simulation-cloud.md (`workloads-ref`, `workloads-cloud`, `windows`; 53 runs), until a cloud run
+  at 128 MiB replaces it.
+- [x] **Two mechanisms the 128 MiB results page states without explaining** (explained
+  2026-11-16, workloads-128.md sections 2 and 4). RMoR-density's writes slow in the scan that finds
+  their rows (2.2 to 13.3 s a write on S3 Express), which under `locate` `scan` reads the key column
+  of every row group in the write's range of keys, as its cut copies multiply its row groups (58 to
+  2,480). RMoW-external's write decodes less in that scan: it reads less of the key column (fewer
+  files pass on their statistics) and decodes each MB faster (23 ms against RMoR's 31), the one design
+  with no deletion vectors to apply; the designs with them slow per MB as they accumulate. Found on
+  the way: the lab priced a writer's footer read, two streamed GETs, as one (fixed in
+  `lab/views/65_sized.sql`; 0.27–0.60 s a write on S3 Express). As stated before: RMoR-density's
   update writes slow from 8.0 s over the first 10 to 20.9 s over the last 10 (S3 Express) as its
   requests a write grow from 8 to 1,299, while its bytes read rise to about 1.8 GB a write around
   writes 20 to 80 and fall back to about 550 MB; and RMoW-external's update writes decode 3.5 s
   where RMoR's decode 5.5 (its writes read 74 files at the 240th to RMoR's 137, and no deletion
   vectors to RMoR's 182, which the decode span's opens and deletes include, but not obviously 2 s
   of them).
+- [ ] **The 128 MiB updates with writers that prune by key** (registered 2026-11-16,
+  HYPOTHESES.md K1–K3, commit 202bc66 on branch `keys-128`): `w128`'s five update configurations
+  with `locate` `keys` (`configs/w128k-upd-*.json`, campaign `w128-keys`), on the laptop alone, one
+  at a time with requests logged, from build snapshot `20261117T005411Z-202bc66bc369` (the twins'
+  jar and fork jars). Queued behind catalog-bench's w3pl on the laptop lock
+  (`scratch-w128/keys.sh` in the session's project directory). Forecast: on S3 Express RMoR's,
+  RMoW-external's and RMoR-density's writes 33–39% faster, MoR's about as before. **Decided (the
+  user, 2026-11-16):** once K1–K3 are judged, the results page uses these runs, and Appendix A
+  shows what pruning by key takes off against the `scan` runs. The work is about patterns a Parquet
+  reader or writer *could* use, if they prove useful.
+- [ ] **Appendix A in two parts** (the user, 2026-11-16): *patterns*, information a reader or writer
+  could use with Parquet as it is (a footer and deletion vectors once per file, skipping row groups
+  a DV covers whole, pruning by key, skipping pages), and *format changes*, what a stock reader must
+  understand or tolerate (a footer at an offset inside the object, row groups out of order, a
+  re-cut by reference). For each design, say which it relies on and whether it needs appends:
+  RMoR-density needs none, though its gains rely on skipping row groups; RMoW-external and
+  RMoW-append do. The results pages show every design with the patterns, not without.
 - [ ] **The inserts model, revised for RMoR-density's merges** (only if the projection of RMoR,
   RMoW-external and RMoW-append is to stand beside the runs): it rewrites 53 MB of stored rows a
   write where the run rewrites 73.
-- [ ] **Reads at every snapshot, in a final cloud run** (decided 2026-11-12): every run so far
+- [ ] **Reads at every snapshot, in a final cloud run** (decided 2026-11-12; deferred by the user
+  2026-11-16 until the `keys` runs and the density plan's steps are settled): every run so far
   reads the table only after every 5th write (`reads.every` 5, one setting for every kind of read;
   `Runner.java`, the probe). Writes are measured at every snapshot. So the workloads pages'
   compaction charts sample a sawtooth every 5 snapshots. Compacted every 10 writes, the reads fall
@@ -595,7 +635,8 @@ lower.
   read takes about 0.5 s on S3 Express, against 10.5 of `wl-upd-base`'s 33 minutes there for
   every kind of read at 7 read points. Its control (the extra reads change no write record) is
   `SuiteKnobsTest`; the 128 MiB suite uses it on havoc first.
-- [x] **The write-up of the two workloads** (`split`, `seal`, `windows`; 2026-11-09,
+- [x] **The write-up of the two workloads** (retired 2026-11-16 for the 128 MiB results;
+  docs/LESSONS.md) (`split`, `seal`, `windows`; 2026-11-09,
   [lab/pages/workloads.md](../lab/pages/workloads.md), Results). Simulated, at 16 MiB row groups:
   each design's write against its range read and full scan, the inserts as a choice of when to
   merge late rows, where the time goes, and row groups of 4 to 32 MiB. The updates' sorted read is
@@ -605,7 +646,8 @@ lower.
   `skipDeadRowGroups` the sorted read leaves out each row group the file's deletes cover whole, as
   the full read does. The two workloads' reference runs and cloud run read sorted under
   `cached-skip`.
-- [ ] **The two workloads in the cloud** (decided 2026-11-10): measure what the workloads page
+- [x] **The two workloads in the cloud** (decided 2026-11-10; done 2026-11-11; its measured page
+  retired 2026-11-16, its calibration page simulation-cloud.md stands): measure what the workloads page
   simulates, on S3 Express and Azure Blob, and make it the results page's data. Steps:
   - [x] the base point and the sweeps moved to Calibration (their MoR skipped the update read);
     the workloads page gains whiskers and latency as snapshots are added (ee7f046);
@@ -636,7 +678,9 @@ lower.
   - [x] the cloud run (2026-11-11 at 0942497): on S3 Express a `c7a.4xlarge` per configuration
     (four at once, the fifth after), each after its twin and spike; on Azure Blob one `D8as_v6`, in
     turn, after one spike. L1-L4 held (`lab/pages/workloads-cloud.md`, docs/EXPERIMENTS.md).
-- [ ] **The density hypothesis at Iceberg's row-group size** (raised by the user 2026-11-09): use
+- [ ] **The density hypothesis at Iceberg's row-group size** (raised by the user 2026-11-09; the
+  work left is planned in [drafts/density-plan-2026-11-16.md](drafts/density-plan-2026-11-16.md),
+  not yet agreed): use
   the deletion vector's share of a row group to copy at a finer grain than the file, copying whole
   row groups, parts of them (runs of pages, which the writer aligns across columns every 20,000
   rows), or merging small cold pieces back. As built, the deferred merges only choose when to copy
@@ -659,13 +703,16 @@ lower.
     request each: about 1,070 a write for the cut, 850 for the deferred merges, 89 for compacted
     MoR. The model leaves it out, and it costs most of the cut's write on Azure Blob. Pruning row
     groups by each changed key, as files already are, would cut it: built as `locate` `keys`
-    (2026-11-10, 6db916a), not yet run at 128 MiB.
+    (2026-11-10, 6db916a), not yet run at 128 MiB. Registered 2026-11-16 (K1–K3) and queued
+    (above): at 128 MiB the scan also reads each file's footer and deletion vector, which `keys`
+    leaves.
   - [ ] **The windows' footers:** the region designs' windows read the footer of every file whose
     metrics overlap the window (276 requests for the cut at 128 MiB, the model's 14).
-  - [ ] **Cold pieces merged back,** a **sparse workload** (where density can choose differently
+  - [ ] (planned: density plan, steps 2–5) **Cold pieces merged back,** a **sparse workload** (where density can choose differently
     from "copy what changed"), **cuts of a fixed size** (`copy:shrink:rg`, which first needs the
     model to free killed copies' rows), and the **page-skipping reader** (step 0 done).
-- [ ] **Hot-region isolation** (a micro-benchmark question, not a Parquet benchmark). Can RMoW
+- [x] **Hot-region isolation** (folded 2026-11-16 into the density plan: the cut isolates changed
+  runs already, and step 3, merging cold pieces back, decides whether hot ones stay apart). Can RMoW
   isolate frequently updated regions as row groups of their own, and so cut its amplification?
   - RMoW sets row-group boundaries on every rewrite, so it can cut a hot range out as its own row
     group.
@@ -674,7 +721,8 @@ lower.
   - Compaction's packing of small row groups (`compactSmallRowGroups`) would undo the isolation, so
     it must leave hot ones alone.
   - Measure bytes rewritten per updated row, footer size and read GETs under the region skew.
-- [ ] **Register the hypotheses** before the runs that decide them. HYPOTHESES.md was refocused
+- [x] **Register the hypotheses** (a standing rule since, in CLAUDE.md; every campaign since has
+  its dated section) before the runs that decide them. HYPOTHESES.md was refocused
   on 2026-10-27 on the write and read trade-off; the earlier ones are the file at commit 1145f89.
   - [x] the calibration's C1–C4 (registered 2026-10-27);
   - [x] the sweeps' U1–U3, K1 and G1 (registered 2026-10-29);
@@ -685,10 +733,13 @@ lower.
   - [x] the sweeps in the cloud: S1, and U1, U2 (revised) and G1's times restated for measured
     wall time (registered 2026-11-01, a10b3e7), predicted from each configuration's twin on its
     S3 Express VM.
-- [ ] **A JFR run to check the held levels** against the heap: a sorted read of MoR-v3 at the base
+- [ ] **A JFR run to check the held levels** against the heap (still open: W2 and W5 judge sorted
+  reads' held peaks at 128 MiB; the base point it names was retired): a sorted read of MoR-v3 at the base
   point, whose counted level climbs by a row group per batch file, should move the heap after
   collection by about as much. A check of the measure, not a result.
-- [ ] **Cloud campaign,** on the fork build with the five arms, on S3 Express and Azure:
+- [x] **Cloud campaign,** on the fork build with the five arms, on S3 Express and Azure (done
+  2026-10-28 to 11-04: the calibration, the base point and the sweeps; retired 2026-11-12,
+  docs/LESSONS.md):
   - the base point;
   - settings on either side of each crossover the sweeps find;
   - each configuration's local twin rerun on the same build.
