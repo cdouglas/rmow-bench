@@ -582,17 +582,12 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
 - **The harness is done** (M0, M1): every arm passes the oracle on the in-memory and local
   stores (full reads, recent-window reads, and time travel across compactions), and `bin/fuzz.sh`
   checks random small configurations of every arm and reader (Fuzzing).
-- **The two workloads** (updates only, inserts only; [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md),
-  The two workloads), with every update reading the rows it rewrites and the locate pruned by each
-  changed key, are the standing results:
-  - simulated on S3 Express and Azure Blob from the laptop's work and havoc's requests
-    ([lab/pages/workloads.md](lab/pages/workloads.md));
-  - their main points measured on both stores on 2026-11-11 (L1–L4 held;
-    [lab/pages/workloads-cloud.md](lab/pages/workloads-cloud.md)). On the updates the region
-    designs write in 2.3–2.4 times MoR's time on S3 Express (1.5–2.2 on Azure Blob) and read a 1%
-    range 1.4–3.9 times as fast (1.5–6.4); on the inserts compacting MoR or sealing RMoR's tail
-    reads a range 2.1–2.7 times as fast as appending for 0.41–0.64 s more a write. Over the 30
-    writes MoR's range read grows 3.1–3.9 times, the region designs' 0.90–1.51 times.
+- **The two workloads at 16 MiB row groups** (updates only, inserts only), simulated and their
+  main points measured on S3 Express and Azure Blob on 2026-11-11 (L1–L4 held), were retired on
+  2026-11-16 for the 128 MiB results; what they taught is in [docs/LESSONS.md](docs/LESSONS.md).
+  The cloud check of the simulation stands
+  ([lab/pages/simulation-cloud.md](lab/pages/simulation-cloud.md)): priced from each VM's own
+  twin and latency test, within 4.0% of measured on S3 Express and 12.3% on Azure Blob.
 - **At Iceberg's 128 MiB row groups** (D1–D4, on havoc;
   [lab/pages/region-cut.md](lab/pages/region-cut.md)), RMoR with copies cut where a write changes
   reads 0.12 of what RMoR-density reads a write, with windows at 1.16 times their live bytes,
@@ -617,15 +612,18 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
   ([lab/pages/model-128.md](lab/pages/model-128.md)), so the projection awaits a revision.
 - **The 128 MiB suite in simulated time** ([lab/pages/workloads-128.md](lab/pages/workloads-128.md);
   each phase's work from laptop twins of the nine runs, campaign `w128-twins`, which equal havoc's
-  in every record). On S3 Express, on the updates RMoR writes in 18.5 s on average against MoR's
-  25.2 and reads a 1% range in 1.7 s against 6.5; RMoW-external is the fastest at both, 15.8 s and
+  in every record). On S3 Express, on the updates RMoR writes in 18.9 s on average against MoR's
+  25.8 and reads a 1% range in 1.7 s against 6.5; RMoW-external is the fastest at both, 16.1 s and
   1.0 s, as its appended footers narrow its files' statistics and it reads no deletion vectors.
-  MoR's writes and range reads slow as snapshots are added (its writes from 8.5 s over the first 10
-  to 32.2 s over the last 10), RMoR's and RMoW-external's hold steady, and RMoR-density's writes
-  slow from 8.0 s to 20.9 s. On the inserts RMoR-density reads a range in 3.2 s against MoR's
-  10.1, for writes of 4.1 s against 0.45. Iceberg's compaction halves MoR's range read after 240
-  writes, for slower writes. The page is to replace the 16 MiB workloads pages.
-- **Next:** the density hypothesis where density can choose: a workload of
-  sparse changes, cold pieces merged back, and the locate's requests
-  ([docs/ROADMAP.md](docs/ROADMAP.md)). GCS needs APPEND in the fork first; split files can also
-  run on standard S3.
+  MoR's writes and range reads slow as snapshots are added (its writes from 8.6 s over the first 10
+  to 33.3 s over the last 10), RMoR's and RMoW-external's hold steady, and RMoR-density's writes
+  slow from 8.0 s to 21.7 s, mostly in the scan that finds a write's rows (2.2 to 13.3 s a write):
+  it reads the key column of every row group in the write's range of keys, and RMoR-density's cut
+  copies multiply its row groups (58 to 2,480). On the inserts RMoR-density reads a range in 3.2 s
+  against MoR's 10.1, for writes of 4.7 s against 0.45. Iceberg's compaction halves MoR's range
+  read after 240 writes, for slower writes.
+- **Next:** the 128 MiB updates again with writers that prune row groups by each changed key
+  (`locate` `keys`; docs/HYPOTHESES.md, 2026-11-16), then the density hypothesis where density can
+  choose ([docs/drafts/density-plan-2026-11-16.md](docs/drafts/density-plan-2026-11-16.md)), and a
+  cloud run at 128 MiB after those ([docs/ROADMAP.md](docs/ROADMAP.md)). GCS needs APPEND in the
+  fork first; split files can also run on standard S3.

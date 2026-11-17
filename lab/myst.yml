@@ -15,8 +15,6 @@ project:
     - title: Results
       children:
         - file: pages/workloads-128.md
-        - file: pages/workloads.md
-        - file: pages/workloads-cloud.md
         - file: pages/reader-changes.md
     - title: Decisions
       children:

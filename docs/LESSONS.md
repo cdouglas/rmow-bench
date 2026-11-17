@@ -1,7 +1,8 @@
 # Lessons and decisions from the retired experiments
 
 On 2026-11-12 every run before the two workloads' current settings was deleted, with the lab
-pages that read them (EXPERIMENTS.md, Retired runs). This page keeps what they taught: why they
+pages that read them, and on 2026-11-16 the 16 MiB workloads pages with the runs only they read
+(EXPERIMENTS.md, Retired runs). This page keeps what they taught: why they
 no longer stand, how the benchmark measures, what the stores did that no model said, which
 designs were dropped and why, and which results should carry over. Numbers are the retired runs';
 treat them as directions, not as results to quote.
@@ -81,8 +82,14 @@ beside runs after it:
   latency at 64 KiB plus a slope mispriced the calibration's small GETs by +31% to +45% on S3
   Express and −43% for Azure's larger ones (C2, contradicted as registered), though CPU and store
   waits explained all but 0.6% of the phases' wall time. Priced by size, the base point came
-  within 1–11% (row reader) and 2–14% (vectorized) of measured, and the two workloads within 7.7%
-  and 12.3%.
+  within 1–11% (row reader) and 2–14% (vectorized) of measured, and the two workloads within 4.0%
+  and 12.3% (7.7% on S3 Express before the fix below).
+- **A footer read is two GETs.** A writer reads a Parquet footer as parquet-java does, in two
+  streamed GETs of one object (its last 8 bytes, then the footer). Until 2026-11-16 the lab's
+  `request_ops` merged the two into one GET, so every simulated write was priced one request short
+  for each file whose footer it read: at 128 MiB on S3 Express 0.27–0.60 s a write for RMoW-external,
+  RMoR, RMoR-density and MoR (0.60–1.35 s on Azure Blob), reads not at all. Fixed, the two
+  workloads' cloud runs priced from their own twins came within 4.0% on S3 Express, from 7.7%.
 - **What the model misses:** a multipart PUT over 48 MiB overlaps the writing, but the model
   charges it after (RMoR's write priced at 1.14 of measured); a removed loop is not priced at its
   phase's pace (RMoR's position-by-position check ran at 16–18 billion instructions a second
@@ -217,6 +224,45 @@ cloud run measured.
 - **Not carried over:** the early simulated claim that RMoW wins outright on Azure Blob (0.50 of
   MoR's write) came from endive's Azure profile; measured, the region designs' writes took 1.5–3.1
   times MoR's there (the two workloads, and the base point).
+
+## The 16 MiB workloads (retired 2026-11-16)
+
+The two workloads on the 1 GB table at 16 MiB row groups, 30 writes each, simulated
+(`lab/pages/workloads.md`) and their main points measured in the cloud on 2026-11-11
+(`workloads-cloud.md`), on campaigns `workloads-ref`, `workloads-curves`, `tune` and `windows`. The
+128 MiB results replaced them: an update region was about one 16 MiB row group, so copying a whole
+row group cost about what copying the region would, no design's choice of what to copy mattered,
+and no insert was merged into the row group its event time falls in. The pages are in git before
+the commit that deleted them (`git log --diff-filter=D -- lab/pages/workloads.md`). Their numbers,
+on S3 Express unless said, are directions for 128 MiB, not results:
+- **Updates:** the region designs took 2.2–2.4 times MoR's simulated write (1.6–1.7 on Azure Blob)
+  and read a 1% range up to 3.9 times as fast (6.7); measured, 2.3 times (1.5–1.7) and 2.8–3.9
+  times as fast (3.8–6.4: L2). They wrote 39 times MoR's bytes, 6.6 GB over 30 writes against 0.17.
+  MoR's range read grew 3.1 times from the 5th write to the 30th (measured 3.11; 3.93 on Azure
+  Blob); the region designs' stayed level.
+- **Compaction:** MoR compacted every 10 writes read a range in 0.39 s after 30 writes against
+  1.40 never compacted, for no slower write with its compactions spread over the writes (4.01 s
+  against 4.15: a compacted table is cheaper to update) and 0.18 GB more written; every 3 writes,
+  0.38–0.47 s for 0.68 GB.
+- **RMoR-density's θ** (1 to 0.06) moved its write little (4.8–5.4 s). At θ 1, never merging, it
+  read a range faster than MoR (0.51 s against 0.92): the gain came from the new versions waiting in
+  a delta row group per region, not from merging.
+- **Row groups of 4 to 32 MiB:** whole copies got dearer as row groups grew (RMoW-append's write
+  6.5 to 12.1 s, its range read 0.12 to 0.41 s), and on Azure Blob full scans faster (19.0 to 7.6 s,
+  fewer and larger requests; 6.8 and 6.9 on S3 Express).
+- **Inserts:** what mattered was whether late rows were merged. RMoR, merging its four newest
+  writes' files every 4th write into a 47 MB file cut into 16 MiB row groups, read a range 2.1 times
+  as fast as MoR for 0.36 s more a write (measured 2.1 times, 0.41 s: L3); RMoW-append, appending
+  the merge as one row group, gained little (1.88 s against 1.92). With 99% of rows at most a write
+  late MoR read a range in 0.69 s, near RMoR's 0.92 at five; merging four at a time up to 256 MiB
+  read in 0.73 s for 1.02 s a write (0.91 and 0.85 up to 160 MiB). MoR compacted every 10 writes
+  matched RMoR's reads for 0.47 s a write.
+- **The locate by key** took 12–17% off MoR's and RMoR-density's writes there (the
+  `workloads-curves` runs against `windows`').
+- **Measured against simulated:** the simulation of the main points came within 4.0% (S3 Express)
+  and 12.3% (Azure Blob) of the cloud runs, priced from each VM's own twin and latency test
+  ([simulation-cloud.md](../lab/pages/simulation-cloud.md), which stands with its runs until a
+  cloud run at 128 MiB replaces it).
 
 ## Harness bugs the runs found
 

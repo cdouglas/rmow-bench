@@ -147,7 +147,7 @@ bin/matrix.sh --build configs/local-compact-*.json   # several, from a build sna
 4. Run `lab ingest`, and add a campaign for the runs in `lab/annotations.toml`
    (`lab annotate '<label>-*' --campaign <name>`).
 5. Write the write-up as a lab page, `lab/pages/<name>.md` (the labbook skill), not a plain
-   markdown report, and add it to `lab/myst.yml`'s toc. Follow `workloads.md` (results) and
+   markdown report, and add it to `lab/myst.yml`'s toc. Follow `workloads-128.md` (results) and
    `region-cut.md` (a decision):
    - setup (configs, workload, arms, build snapshot), with the runs pinned by id;
    - tables and charts computed from the runs, each chart with its table;

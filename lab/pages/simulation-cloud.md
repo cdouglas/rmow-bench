@@ -141,8 +141,8 @@ refs = q("""SELECT run_id, label, host, left(git_sha, 7) AS build FROM canonical
 :tags: [remove-cell]
 
 # The checks registered before the run (docs/HYPOTHESES.md, "The two workloads in the cloud",
-# 2026-11-10) that are about the measurement: L1 and L4. L2 and L3, on the trade-offs, are on the
-# measured page (workloads-cloud.md).
+# 2026-11-10) that are about the measurement: L1 and L4. L2 and L3, on the trade-offs, were on the
+# measured page (workloads-cloud.md, retired 2026-11-16; docs/EXPERIMENTS.md has their verdicts).
 
 # L1: each cloud run and each S3 Express twin against havoc's run of its configuration: every
 # record's requests, bytes and table state (steps_diff), and the held peaks of the phases on one
@@ -190,9 +190,11 @@ COL_WHAT = {"write_s": WRITE, **READ}
 V = {"L1": "held" if l1_held else "contradicted", "L4": "held" if l4_held else "contradicted"}
 ```
 
-How the [workloads page](./workloads.md)'s simulation compares with its main points measured in
-the cloud on 2026-11-11 (the [measured page](./workloads-cloud.md)), and whether the cloud runs did
-the work the simulated runs counted.
+How the simulation of the two workloads at 16 MiB row groups compares with their main points
+measured in the cloud on 2026-11-11, and whether the cloud runs did the work the simulated runs
+counted. The results at 128 MiB ([workloads-128.md](./workloads-128.md)) are simulated the same way;
+until a cloud run at 128 MiB, this is the simulation's only measured check. The 16 MiB results pages
+were retired on 2026-11-16 (docs/LESSONS.md, The 16 MiB workloads).
 
 ## What it shows
 
@@ -214,7 +216,9 @@ the work the simulated runs counted.
 
 ## Setup
 
-**The runs.** The [measured page](./workloads-cloud.md)'s: each configuration once on each store
+**The runs.** Five configurations of the two workloads at 16 MiB row groups (on the updates every
+design, and MoR compacted every 10 writes; on the inserts MoR, MoR compacted, and RMoR and
+RMoW-append merging their four newest writes), each once on each store
 from a VM beside it, at {eval}`", ".join(sorted(runs.build.dropna().unique()))`. Each S3 Express VM
 also ran its configuration on its own disk (its twin), and each VM measured its store's latency
 first.
@@ -223,7 +227,7 @@ first.
 - *measured*, each phase's wall time in the cloud run;
 - *priced*, the simulation's model applied to the cloud run: the twin's CPU on the S3 Express VM
   plus the cloud run's requests priced by its VM's latency test;
-- *forecast*, the workloads page's simulation of the reference runs: havoc's requests and bytes,
+- *forecast*, the simulation of the reference runs, as the results pages simulate: havoc's requests and bytes,
   the laptop's CPU at its pace, requests priced by the latency tests of 2026-10-31.
 
 Each read's time is its mean over steps 5 to 30, and a write's over the 30 writes, with
@@ -274,8 +278,8 @@ table(A[["workload", "Store", "name", "what", "forecast", "priced", "measured", 
 ## The checks registered before the run
 
 Of the four hypotheses registered for the run in docs/HYPOTHESES.md ("The two workloads in the
-cloud", 2026-11-10), two are about the measurement; L2 and L3, on the trade-offs, are on the
-[measured page](./workloads-cloud.md).
+cloud", 2026-11-10), two are about the measurement; L2 and L3, on the trade-offs, held (docs/EXPERIMENTS.md;
+their page was retired with the 16 MiB workloads).
 
 - **L1, the cloud runs do the work havoc's runs counted: {eval}`V["L1"]`.** Each of the
   {eval}`len(l1)` runs ({eval}`n_s3x` on S3 Express, {eval}`n_az` on Azure Blob and

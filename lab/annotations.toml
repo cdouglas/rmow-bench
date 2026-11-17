@@ -10,17 +10,9 @@ select = ["source:micro"]
 title = "Reads of a range across the table (docs/HYPOTHESES.md, 2026-11-07, Q1-Q4): the split and seal campaigns' configurations but upd-base-scan, labelled win-*, with five windows of 1% read at each probe under every reader (by id on the updates, by event time on the inserts). On havoc at 479edb1 for requests, bytes and held memory, and on the laptop (bearyak, the same build) for instructions; the two must agree on every request and byte"
 select = ["where:label LIKE 'win-%' AND git_sha LIKE '479edb1%'"]
 
-[campaigns.tune]
-title = "Tuning write policy by simulation (docs/HYPOTHESES.md, 2026-11-08, T1-T4), the inserts' configurations (tune-ing-*), on havoc at 7cabf65 for requests and bytes and on the laptop for instructions: the workloads page's insert curves. The updates' configurations (tune-upd-*) were retired on 2026-11-12, replaced by workloads-curves (docs/EXPERIMENTS.md, Retired runs)"
-select = ["where:label LIKE 'tune-ing-%' AND host IN ('havoc', 'bearyak')"]
-
 [campaigns.workloads-ref]
 title = "The two workloads' main configurations, labelled wl-*, the references for their cloud run (docs/HYPOTHESES.md, 2026-11-10, L1-L4): the windows campaign's, with the locate pruned by each changed key and the sorted read skipping dead row groups, read through the skipping reader alone. On havoc at b49a57f for requests, bytes and held memory, and on the laptop (bearyak) at 0942497 for instructions; 0942497 adds only the fuzzer's layout.eagerBytes, which these leave unset"
 select = ["where:label LIKE 'wl-%' AND host IN ('havoc', 'bearyak')"]
-
-[campaigns.workloads-curves]
-title = "The workloads page's update curves with the reader changes of 6db916a, labelled wlc-upd-* (docker/campaigns/workloads-curves.json): MoR compacted every 3, 6 and 12 writes, RMoR-density at theta 1, 0.5, 0.25 and 0.12, and row groups of 4, 8 and 32 MiB, each the tune or windows campaign's configuration with workloads-ref's readers. On havoc for requests, bytes and held memory, and on the laptop (bearyak) for instructions"
-select = ["where:label LIKE 'wlc-%' AND host IN ('havoc', 'bearyak')"]
 
 [campaigns.workloads-cloud]
 title = "The two workloads in the cloud (docs/HYPOTHESES.md, 2026-11-10, L1-L4): the five wl-* configurations at 0942497 on S3 Express (a c7a.4xlarge each in usw2-az3, four at once and wl-ing-compact after, each after its twin on its own disk and its spike) and on Azure Blob (one D8as_v6 in westus, in turn, after one spike), 2026-11-11"
@@ -41,6 +33,10 @@ select = ["where:label LIKE 'w128-%' AND host = 'havoc'"]
 [campaigns.w128-twins]
 title = "Campaign w128's nine configurations again on the laptop, for their work: instruction counters, which havoc's container lacks (lab/pages/workloads-128.md prices havoc's requests and adds this work). At 7590d4a (build snapshot 20261115T071921Z-7590d4a6d299), one at a time with a 12g heap (w128-upd-external, which ran out of it, with 18g); their requests and bytes equal havoc's runs' record for record (steps_diff)"
 select = ["where:label LIKE 'w128-%' AND host <> 'havoc'"]
+
+[campaigns.w128-keys]
+title = "Campaign w128's five update configurations with writers that prune row groups by each changed key (locate keys), labelled w128k-upd-* (docs/HYPOTHESES.md, 2026-11-16, K1-K3): on the laptop alone, one at a time with requests logged, from build snapshot 20261117T005411Z-202bc66bc369 (commit 202bc66, its jar and libraries the w128 twins')"
+select = ["where:label LIKE 'w128k-%'"]
 
 [campaigns.prices]
 title = "The two latency tests (spikes) the simulated pages price requests with (analysis/tune.py SPIKES; region-cut): S3 Express from the base point's c7a.4xlarge in usw2-az3, and Azure Blob from a D8as_v6 in westus, both 2026-10-31 at 6f24575"
