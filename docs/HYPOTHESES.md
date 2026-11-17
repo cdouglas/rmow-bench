@@ -1804,3 +1804,33 @@ against its key-column bytes.
   pruned. A writer that held footers across writes, or pruned by key before loading a file's
   deletion vector, would read less; neither is built.
 - **One seed, one table;** the reads are those of `w128`, which `keys` does not change.
+
+## MoR's full scans under `keys`: a diagnostic (registered 2026-11-17)
+
+K1 found MoR's full scans in its `w128-keys` run running 6.4% more user-mode instructions than in its
+`w128` twin, with the same jars, JVM, requests and bytes: 0.2% at the scan before the first write,
+then a fixed ~20 G instructions a scan from about the 10th write on, all of it in decode CPU, and only
+in the `cached-skip` reader's scans (its sorted reads, its range reads and the writes' row reads
+within 1%; no other design's reads above 1.2%). The cause is not known. The leading guess is the JIT:
+the read follows the writes in one JVM, and under `scan` a write's locate decodes far more of the key
+column than under `keys`, so the decoder may be compiled from other profiles.
+
+**The runs:** MoR's update configuration under `keys` and under `scan`, 20 writes each
+(`configs/diag-mor-keys20.json`, `configs/diag-mor-scan20.json`: `w128k-upd-mor` and
+`w128-upd-mor` with `workload.batches` 20), full and sorted scans after writes 0, 10 and 20; on the
+laptop, one at a time, from build snapshot 20261117T005411Z-202bc66bc369 (both earlier runs' jars),
+12g heaps, with the JIT's compilation log (`-XX:+LogCompilation`) and the GC log.
+
+**Measured, not judged:**
+- **Whether the runs repeat the earlier ones:** each write's and read's requests and bytes against
+  the first 20 writes of `w128-upd-mor` and `w128k-upd-mor` (`steps_diff`), and each full scan's
+  instructions against theirs.
+- **Whether the offset follows the locate:** if the `keys` run's full scans after the 10th and 20th
+  writes again run ~20 G instructions more than the `scan` run's, the offset is systematic and
+  follows how the writers find their rows; if neither run differs from the other by more than 1%,
+  the earlier offset was one run's, not the locate's.
+- **What differs in the JIT:** the decoder's hot methods' compilations, inlining and
+  deoptimizations in the two logs.
+
+This changes no result: the results page already times the updates from the `w128-keys` runs and
+states the offset (workloads-128.md, Limits).

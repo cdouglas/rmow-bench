@@ -1268,8 +1268,11 @@ table(PEAK.rename(columns={"name": "design"}).round(2),
   instructions, which moves from run to run, but MoR's full scans ran
   {eval}`f"{MOR_FULL.instr:.1%}"` more instructions ({eval}`f"{MOR_FULL.instr0:.1%}"` at the scan
   before its first write, {eval}`f"{MOR_FULL.instr10:.1%}"` over the scans from its 10th write on),
-  where no other read or compaction differed by more than {eval}`f"{RW_OTHER:.1%}"`. What changed
-  between the runs is not known.
+  where no other read or compaction differed by more than {eval}`f"{RW_OTHER:.1%}"`. The extra
+  instructions are the benchmark's own: every read checks each row it returns against a hash of the rows' ids and
+  versions, which counts in its work, and in the run timed here the JVM compiled MoR's check into
+  the scan's loop in a form that runs more instructions a row ([the hypotheses
+  page](./suite-128.md), K1–K3, a diagnostic).
 - **Writers that find their rows read every footer and deletion vector** of each file whose keys
   may hold a changed key, a write at a time: a writer that held them across writes, or pruned by key
   before loading a file's deletion vector, would read less ([Appendix A](./reader-changes.md)).

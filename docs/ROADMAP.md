@@ -618,7 +618,8 @@ lower.
   was 5%: its locate reads half the bytes, skipping the initial load's row groups, and its work
   follows them, not its requests). RMoR-density's writes now slow from 6.8 s to 10.8 s (8.0 to 21.7
   before), in each file's footer and deletion vector. Every record but the locate's matched the
-  `w128` runs, but MoR's full scans ran 6.4% more instructions than in its twin (cause unknown).
+  `w128` runs, but MoR's full scans ran 6.4% more instructions than in its twin: a JIT compile of
+  the benchmark's check of each row (diagnostic `diag-mor`, 2026-11-17, suite-128.md).
   The results page times the updates from these runs, writes, reads and compactions alike (the
   user, 2026-11-17); its Limits give the spread between the two runs' work.
 - [x] **Appendix A in two parts** (the user, 2026-11-16; done 2026-11-17 for the designs built,
@@ -720,6 +721,12 @@ lower.
   - [ ] **What `keys` leaves:** a writer that held footers across writes, or pruned a file's row
     groups by key before loading its deletion vector, would read less. Neither is built; both are
     patterns.
+  - [ ] **The oracle's check in a read's work** (found 2026-11-17, diagnostic `diag-mor`): every read
+    hashes each row it returns into the id-and-version oracle inside its decode, so the check counts
+    in the read's work, and how the JIT compiles it moved MoR's full scans by 6.4% of their
+    instructions between two runs of the same reads. Open, the user's call: keep the check out of
+    the measured work (count it apart, or hash outside the decode's span), or keep the loop that
+    calls it from inlining it, so every run compiles it alike; and measure what it costs a read.
   - [ ] **The windows' footers:** the region designs' windows read the footer of every file whose
     metrics overlap the window (276 requests for the cut at 128 MiB, the model's 14).
   - [ ] (planned: density plan, steps 2–5) **Cold pieces merged back,** a **sparse workload** (where density can choose differently

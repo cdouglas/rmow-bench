@@ -631,7 +631,8 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
   the footers and deletion vectors of the files a write may change. K2 held; K3 held for the region
   designs but not for MoR, whose write gained 12% (its bound was 5%): `keys` halves the bytes
   its locate reads, and its work follows them. K1's control held in requests and bytes; MoR's full
-  scans ran 6.4% more instructions than in its twin (cause unknown), which at each run's own pace is
+  scans ran 6.4% more instructions than in its twin (a JIT compile of the benchmark's own check of
+  each row, found by a diagnostic rerun), which at each run's own pace is
   5.1% more time, within the spread of the other designs' reads between the two runs (5.3% less to
   4.4% more).
 - **Next:** the density hypothesis where density can choose

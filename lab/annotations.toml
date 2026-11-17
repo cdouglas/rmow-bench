@@ -38,6 +38,10 @@ select = ["where:label LIKE 'w128-%' AND host <> 'havoc'"]
 title = "Campaign w128's five update configurations with writers that prune row groups by each changed key (locate keys), labelled w128k-upd-* (docs/HYPOTHESES.md, 2026-11-16, K1-K3): on the laptop alone, one at a time with requests logged, from build snapshot 20261117T005411Z-202bc66bc369 (commit 202bc66, its jar and libraries the w128 twins')"
 select = ["where:label LIKE 'w128k-%'"]
 
+[campaigns.diag-mor]
+title = "A diagnostic of MoR's full scans under locate keys (docs/HYPOTHESES.md, 2026-11-17): w128k-upd-mor and w128-upd-mor for 20 writes each, on the laptop one at a time from build snapshot 20261117T005411Z-202bc66bc369, with the JIT's compilation log and the GC log (in the snapshot's logs/diag); every record equals the first 20 writes of its 240-write run (steps_diff)"
+select = ["where:label LIKE 'diag-mor-%'"]
+
 [campaigns.prices]
 title = "The two latency tests (spikes) the simulated pages price requests with (analysis/tune.py SPIKES; region-cut): S3 Express from the base point's c7a.4xlarge in usw2-az3, and Azure Blob from a D8as_v6 in westus, both 2026-10-31 at 6f24575"
 select = ["spike/s3x-spike-20261031T163533Z", "spike/azure-spike-20261031T234510Z"]

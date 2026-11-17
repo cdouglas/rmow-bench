@@ -815,6 +815,57 @@ requests priced by size from each store's latency test (lab/views/65_sized.sql) 
 its arm's pace, a mean over the 240 writes. Under `keys` both come from the run; under `scan` the
 requests from havoc's run and the work from its twin.
 
+### Why MoR's full scans ran more instructions (a diagnostic)
+
+```{code-cell} ipython3
+:tags: [remove-cell]
+
+# The diagnostic of 2026-11-17 (docs/HYPOTHESES.md; campaign diag-mor): MoR's update configuration
+# under keys and under scan for 20 writes each, from the same build, with the JIT's compilation log.
+# A full scan's user-mode instructions (G) after writes 0, 10 and 20 in each, and in the two
+# 240-write runs; and the records each short run shares with its 240-write run that differ
+DG_RUNS = {"keys, 240 writes": KR.keys_run["MoR"], "keys, 20 writes": run_in("diag-mor", "diag-mor-keys20"),
+           "scan, 20 writes": run_in("diag-mor", "diag-mor-scan20"), "scan, 240 writes (twin)": KR.twin_run["MoR"]}
+DG = pd.DataFrame({n: q(f"""SELECT step, (instructions + coalesce(pool_instructions, 0)) / 1e9 AS g FROM steps
+                            WHERE run_id = '{r}' AND arm = 'mor-v3' AND phase = 'read_full'
+                              AND reader = 'cached-skip' AND step IN (0, 10, 20)""").set_index("step").g
+                   for n, r in DG_RUNS.items()}).sort_index()
+DG_EXTRA = DG["keys, 20 writes"] - DG["scan, 20 writes"]
+DG_SAME = {n: int(q(f"""SELECT count(*) FILTER (WHERE one_run_only OR len(differs) > 0) AS n
+                        FROM steps_diff('{DG_RUNS[f"{n}, 20 writes"]}', '{b}') WHERE step <= 20""").n.iloc[0])
+           for n, b in [("keys", KR.keys_run["MoR"]), ("scan", KR.scan_run["MoR"])]}
+DG_ROWS = q(f"""SELECT rows FROM steps WHERE run_id = '{DG_RUNS["keys, 20 writes"]}'
+                AND arm = 'mor-v3' AND phase = 'read_full' AND reader = 'cached-skip' AND step = 10""").rows.iloc[0]
+```
+
+K1's one miss repeats exactly. Run again for 20 writes each from the same build, MoR's
+configuration under `keys` and under `scan` match their 240-write runs in every record of those
+writes ({eval}`DG_SAME["keys"]` and {eval}`DG_SAME["scan"]` records differ), and a full scan under
+`keys` again runs {eval}`f1(DG_EXTRA[10])` G more instructions after the 10th write and
+{eval}`f1(DG_EXTRA[20])` G more after the 20th, against {eval}`f1(DG_EXTRA[0])` G before the first:
+about {eval}`f0(DG_EXTRA[10] * 1e9 / DG_ROWS)` instructions a row it returns.
+
+The JIT's compilation logs say why (the build snapshot's `logs/diag`). Every read hashes each row's
+id and version into the benchmark's oracle (`Scans.hash`, `TableHash.add`), a check of the rows it
+returns, inside the read's decode. Both runs compile that hash early with its calls inlined. At the
+first write the JIT recompiles the loop that hands each batch to it (`Scans.decode`), in both runs.
+Under `scan` the recompiled loop reaches the hash through a virtual call, once a batch, into the
+hash's own compiled code. Under `keys` the JIT inlines the reads' batch consumer, and the hash with
+it, into the loop (the loop's profile there held the reads' consumer alone), which then outgrows
+the compiler's inlining budget
+(`NodeCountInliningCutoff`), and three calls a row stay calls (`TableHash.add`, `RowBatch.version`,
+`ArrowBuf.addr`). The extra work is the benchmark's check of the rows, not the reader's: no design's
+reads decode or apply deletion vectors differently. Why the other designs' scans escape it was not
+looked into.
+
+```{code-cell} ipython3
+:tags: [remove-input]
+
+table(DG.round(2).reset_index().rename(columns={"step": "after write"}),
+      caption="MoR's full scan: user-mode instructions (G) after writes 0, 10 and 20, under keys and "
+      "under scan, in the 240-write runs and the 20-write diagnostic")
+```
+
 ## Limits
 
 - **One seed, one lateness,** as registered; no watermark drops late rows.
@@ -825,4 +876,5 @@ requests from havoc's run and the work from its twin.
 - **A run's work is one measurement.** MoR's reads under `keys` run up to
   {eval}`pct(RI[RI.design == "MoR"].ratio.max() - 1)` more instructions than its twin's with the same
   requests and bytes (K1), so a few percent of a phase's work can differ between two runs of the
-  same reads.
+  same reads. The diagnostic above traces MoR's to how the JIT compiles the benchmark's check of
+  each row, which counts in every read's work.
