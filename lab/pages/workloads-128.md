@@ -279,6 +279,53 @@ CMU, CMI = snapshots(UPD, CMP, READS_U), snapshots(ING, CMP, READS_U)
 WRU, STU = written(UPD), stored(UPD)
 WRI, STI = written(ING), stored(ING)
 WR_MOR = [at_step("w128-upd-mor", "batch", n) for n in (1, 240)]
+
+
+def locate(label, first, last, spike=tune.SPIKES["s3x"]):
+    """The scan that finds the rows a write changes (phase locate, a write's first requests) over
+    writes first to last, a write's mean: its requests by what they read (each file's footer, in two;
+    its deletion vector; the key column), their price by the store's latency test, and the twin's
+    work (s)."""
+    run = q(f"""SELECT run_id FROM canonical_runs WHERE list_contains(campaigns, 'w128')
+                AND label = '{label}'""").run_id.iloc[0]
+    n = last - first + 1
+    d = q(f"""
+        WITH loc AS (SELECT step, requests AS n FROM steps
+                     WHERE run_id = '{run}' AND phase = 'locate' AND step BETWEEN {first} AND {last}),
+        o AS (SELECT step, seq, row_number() OVER (PARTITION BY step ORDER BY seq) AS i FROM request_ops
+              WHERE run_id = '{run}' AND phase = 'batch' AND step BETWEEN {first} AND {last}),
+        rq AS (SELECT step, seq, kind, object FROM requests
+               WHERE run_id = '{run}' AND phase = 'batch' AND step BETWEEN {first} AND {last}),
+        pr AS (SELECT step, seq, price_ms FROM sized_requests('{run}', '{spike}')
+               WHERE phase = 'batch' AND step BETWEEN {first} AND {last})
+        SELECT CASE WHEN rq.object LIKE '%.puffin' THEN 'dvs' WHEN rq.kind = 'get_stream' THEN 'footers'
+                    ELSE 'keys' END AS what, count(*) / {n} AS requests, sum(pr.price_ms) / {n} / 1e3 AS s
+        FROM o JOIN loc USING (step) JOIN rq USING (step, seq) JOIN pr USING (step, seq)
+        WHERE o.i <= loc.n GROUP BY 1""").set_index("what")
+    work = q(f"""SELECT avg(w.work_ms) / 1e3 AS s FROM phase_work w JOIN canonical_runs r USING (run_id)
+                 WHERE list_contains(r.campaigns, 'w128-twins') AND r.label = '{label}' AND w.phase = 'locate'
+                   AND w.step BETWEEN {first} AND {last}""").s.iloc[0]
+    out = {k: float(d.requests.get(w, 0.0)) for k, w in [("footers", "footers"), ("dvs", "dvs"), ("key_column", "keys")]}
+    return pd.Series({**out, "requests": sum(out.values()), "s": float(d.s.sum()) + work})
+
+
+LOC = {(n, b): locate(l, *span) for l, n in [("w128-upd-density", "RMoR-density"), ("w128-upd-rmor", "RMoR"),
+                                            ("w128-upd-mor", "MoR"), ("w128-upd-external", "RMoW-external")]
+       for b, span in [("first", (1, 10)), ("last", (231, 240))]}
+
+
+def written_mb(label, first, last):
+    """Havoc's run's writes over writes first to last: MB written, a write's mean."""
+    return q(f"""SELECT avg(s.bytes_written) / 1e6 AS mb FROM steps s JOIN canonical_runs r USING (run_id)
+                 WHERE list_contains(r.campaigns, 'w128') AND r.label = '{label}' AND s.phase = 'batch'
+                   AND s.step BETWEEN {first} AND {last}""").mb.iloc[0]
+
+
+RG = {n: [gb(ST[ST.label == l], n, step, col="row_groups") for step in (0, 240)]
+      for l, n in [("w128-upd-density", "RMoR-density"), ("w128-upd-rmor", "RMoR"), ("w128-upd-mor", "MoR"),
+                   ("w128-upd-external", "RMoW-external")]}
+COPY_RMOR = [written_mb("w128-upd-rmor", 1, 10), written_mb("w128-upd-rmor", 231, 240)]
+DEN_RISE = mean_over(SNU, "RMoR-density", WRITE, 231, 240) - mean_over(SNU, "RMoR-density", WRITE, 1, 10)
 ```
 
 ## What it shows
@@ -299,6 +346,13 @@ WR_MOR = [at_step("w128-upd-mor", "batch", n) for n in (1, 240)]
   {eval}`f0(WR_MOR[1].mb)` MB at the 240th, and its range read takes
   {eval}`f"{at(SNU, 'MoR', READ['window_s'], 240) / at(SNU, 'MoR', READ['window_s'], 1):.1f}"` times as
   long after 240 writes as after the first on S3 Express (section 2).
+- **RMoR-density's writes slow as its row groups multiply.** It cuts what it copies into pieces,
+  each a row group of its own ({eval}`f0(RG["RMoR-density"][1])` after 240 writes, from
+  {eval}`f0(RG["RMoR-density"][0])`), and a write reads the key column of every row group in its
+  range of keys to find the rows it changes. That scan takes
+  {eval}`f1(LOC["RMoR-density", "first"].s)` s a write over the first 10 writes and
+  {eval}`f1(LOC["RMoR-density", "last"].s)` s over the last 10 on S3 Express, most of the
+  {eval}`f1(DEN_RISE)` s its write slows by (section 2).
 - **RMoR's full scans slow on Azure Blob:** it reads the table in pieces of 1 to 16 MB, which Azure
   Blob serves far more slowly than whole row groups, so after 240 writes a scan takes
   {eval}`f0(at(SNU, "RMoR", READ["full_s"], 240, AZ))` s against MoR's
@@ -485,6 +539,7 @@ def files_read(label, phase, step=240):
 
 FR = {(n, what): files_read(l, phase) for l, n in [("w128-upd-rmor", "RMoR"), ("w128-upd-external", "RMoW-external")]
       for what, phase in [("write", "batch"), ("window", "read_window")]}
+
 ```
 
 MoR's writes slow as writes are added: on S3 Express a write takes
@@ -501,6 +556,27 @@ take {eval}`f1(mean_over(SNU, "RMoR", WRITE, 1, 10))` s over the first 10 and
 {eval}`f1(mean_over(SNU, "RMoR-density", WRITE, 231, 240))` s over the last 10, and the requests a
 write sends grow from {eval}`f0(WR_DEN[0].requests)` at its first to
 {eval}`f0(WR_DEN[1].requests)` at its 240th.
+
+Most of RMoR-density's slowing is the scan that finds a write's rows. For each file whose keys may
+hold a changed key, it reads the file's footer (two requests) and its deletion vector, then the key
+column of every row group between the write's smallest and largest changed key (setup), one request
+each. RMoR-density cuts what it copies into pieces, each a row group of its own, so its table goes
+from {eval}`f0(RG["RMoR-density"][0])` row groups to {eval}`f0(RG["RMoR-density"][1])` over the 240
+writes, and the scan with it: over the first 10 writes it sends {eval}`f0(LOC["RMoR-density", "first"].requests)`
+requests a write and takes {eval}`f1(LOC["RMoR-density", "first"].s)` s on S3 Express, over the last
+10 {eval}`f0(LOC["RMoR-density", "last"].requests)` requests ({eval}`f0(LOC["RMoR-density", "last"].footers)`
+for footers, {eval}`f0(LOC["RMoR-density", "last"].dvs)` for deletion vectors and
+{eval}`f0(LOC["RMoR-density", "last"].key_column)` for the key column) and
+{eval}`f1(LOC["RMoR-density", "last"].s)` s, {eval}`f1(LOC["RMoR-density", "last"].s - LOC["RMoR-density", "first"].s)`
+of the {eval}`f1(DEN_RISE)` s its write slows by. RMoR's scan grows too, from
+{eval}`f1(LOC["RMoR", "first"].s)` to {eval}`f1(LOC["RMoR", "last"].s)` s, over a table cut into
+{eval}`f0(RG["RMoR"][1])` row groups (dead ones included), but RMoR copies less as its pieces get
+smaller ({eval}`f0(COPY_RMOR[0])` MB a write over the first 10 writes, {eval}`f0(COPY_RMOR[1])` over
+the last 10), which offsets it. RMoR-density copies little from the start, since it defers. MoR's
+scan grows from {eval}`f1(LOC["MoR", "first"].s)` to {eval}`f1(LOC["MoR", "last"].s)` s, a footer
+and a deletion vector for each file its writes added, and RMoW-external's least, from
+{eval}`f1(LOC["RMoW-external", "first"].s)` to {eval}`f1(LOC["RMoW-external", "last"].s)` s, over files
+whose statistics its footers narrow (below).
 
 MoR's 1% range read slows the same way, from {eval}`f1(at(SNU, "MoR", READ["window_s"], 1))` s after
 the first write to {eval}`f1(at(SNU, "MoR", READ["window_s"], 240))` s after the 240th on S3
@@ -624,6 +700,26 @@ storage_table(STU, UNAMES)
 :tags: [remove-cell]
 
 UP = parts(UPD, [n for n in UN if n != "RMoW-append"])
+
+
+def twin_phase(label, phase, first=1, last=240):
+    """The laptop twin's part of a write (locate: the scan for the rows to change; merge-read: the
+    read of what it copies) over writes first to last: decode CPU a write (s, on the wall clock), MB
+    read a write, and decode ms a MB."""
+    return q(f"""SELECT sum(s.decode_cpu_ns / c.cpu_per_wall) / 1e9 / count(*) AS decode_s,
+                        sum(s.bytes_read) / 1e6 / count(*) AS mb,
+                        sum(s.decode_cpu_ns / c.cpu_per_wall) / 1e6 / (sum(s.bytes_read) / 1e6) AS ms_mb
+                 FROM steps s JOIN canonical_runs r USING (run_id) JOIN run_clock c USING (run_id)
+                 WHERE list_contains(r.campaigns, 'w128-twins') AND r.label = '{label}' AND s.phase = '{phase}'
+                   AND s.step BETWEEN {first} AND {last}""").iloc[0]
+
+
+DEC = {(n, ph): twin_phase(l, ph) for l, n in [("w128-upd-rmor", "RMoR"), ("w128-upd-external", "RMoW-external")]
+       for ph in ("locate", "merge-read")}
+DEC_MB = {(n, b): twin_phase(l, "locate", *span).ms_mb
+          for l, n in [("w128-upd-mor", "MoR"), ("w128-upd-density", "RMoR-density"), ("w128-upd-rmor", "RMoR"),
+                       ("w128-upd-external", "RMoW-external")]
+          for b, span in [("first", (1, 10)), ("last", (231, 240))]}
 ```
 
 On S3 Express MoR's write spends {eval}`f1(part_s(UP, "MoR", WRITE, "decode"))` s decoding the
@@ -635,7 +731,25 @@ s encoding the pieces of row groups it copies. RMoW-external's spends
 {eval}`f1(part_s(UP, "RMoW-external", WRITE, "I/O"))` s on I/O, and its range read
 {eval}`f2(part_s(UP, "RMoW-external", READ["window_s"], "I/O"))` s on I/O against RMoR's
 {eval}`f2(part_s(UP, "RMoR", READ["window_s"], "I/O"))`: it opens fewer files and reads no deletion
-vectors (section 2). MoR's range read is
+vectors (section 2).
+
+RMoW-external's write decodes less than RMoR's in its scan for the rows to change, not in what it
+copies. By the laptop twins' CPU, RMoR's scan decodes for {eval}`f1(DEC["RMoR", "locate"].decode_s)` s
+a write and RMoW-external's for {eval}`f1(DEC["RMoW-external", "locate"].decode_s)`, while their reads
+of the rows they copy decode alike ({eval}`f2(DEC["RMoR", "merge-read"].decode_s)` and
+{eval}`f2(DEC["RMoW-external", "merge-read"].decode_s)` s). RMoW-external's scan reads less of the key
+column, {eval}`f0(DEC["RMoW-external", "locate"].mb)` MB a write against
+{eval}`f0(DEC["RMoR", "locate"].mb)`, as fewer of its files pass on their statistics, and decodes each
+MB faster, {eval}`f0(DEC["RMoW-external", "locate"].ms_mb)` ms against
+{eval}`f0(DEC["RMoR", "locate"].ms_mb)`. It is the one design whose scan applies no deletion vectors
+to the rows it decodes, and it stays as fast as its table ages
+({eval}`f0(DEC_MB["RMoW-external", "first"])` ms a MB over the first 10 writes,
+{eval}`f0(DEC_MB["RMoW-external", "last"])` over the last 10), where the designs with deletion
+vectors decode more slowly as they accumulate: MoR from {eval}`f0(DEC_MB["MoR", "first"])` to
+{eval}`f0(DEC_MB["MoR", "last"])` ms a MB, RMoR-density from {eval}`f0(DEC_MB["RMoR-density", "first"])`
+to {eval}`f0(DEC_MB["RMoR-density", "last"])`, and RMoR, with deletion vectors over its copied
+pieces from its first writes, {eval}`f0(DEC_MB["RMoR", "first"])` and
+{eval}`f0(DEC_MB["RMoR", "last"])`. MoR's range read is
 {eval}`f"{share_of(UP, S3X, 'MoR', READ['window_s'], 'I/O'):.0%}"` I/O. On Azure Blob RMoR's full
 scan spends {eval}`f0(part_s(UP, "RMoR", READ["full_s"], "I/O", AZ))` s on I/O against MoR's
 {eval}`f0(part_s(UP, "MoR", READ["full_s"], "I/O", AZ))`, for its smaller reads (section 2).
@@ -943,8 +1057,9 @@ fig.wl_snapshot_table(CMI, READ["window_s"], every=10)
 
 - **Simulated, not measured.** No run at 128 MiB has run in the cloud; the times price havoc's
   requests by size and add the laptop's CPU.
-- **One table, one seed.** The narrow 11-column table of the 16 MiB pages at 8 times the rows.
-- **Writers prune row groups only to a write's range of keys,** not by each changed key, as the
-  16 MiB pages' runs did.
+- **One table, one seed.** The narrow 11-column table of the 16 MiB runs at 8 times the rows.
+- **Writers prune row groups only to a write's range of keys,** not by each changed key (`locate`
+  `keys`, [Appendix A](./reader-changes.md)), as the 16 MiB runs did. The scan for a write's rows
+  (section 2) reads the key column of every row group in that range.
 - **RMoR, RMoW-external and RMoW-append did not run on the inserts,** and RMoW-append ran 30 of
   the updates' 240 writes.
