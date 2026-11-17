@@ -36,7 +36,11 @@ select = ["where:label LIKE 'w128-%' AND host <> 'havoc'"]
 
 [campaigns.w128-keys]
 title = "Campaign w128's five update configurations with writers that prune row groups by each changed key (locate keys), labelled w128k-upd-* (docs/HYPOTHESES.md, 2026-11-16, K1-K3): on the laptop alone, one at a time with requests logged, from build snapshot 20261117T005411Z-202bc66bc369 (commit 202bc66, its jar and libraries the w128 twins')"
-select = ["where:label LIKE 'w128k-%'"]
+select = ["where:label LIKE 'w128k-%' AND json_extract(manifest, '$.verify') IS NULL"]
+
+[campaigns.w128-keys-2]
+title = "Campaign w128-keys again, measured without the oracle in the reads (2026-11-17, README Correctness: they only count their rows), on the laptop alone, one at a time with requests logged, from a build snapshot of main; and a verification run of each (--verify, on havoc, excluded), which steps_diff ties to it. The results pages time the updates from these runs; suite-128.md judged K1-K3 on w128-keys"
+select = ["where:label LIKE 'w128k-%' AND json_extract(manifest, '$.verify') IS NOT NULL"]
 
 [campaigns.diag-mor]
 title = "A diagnostic of MoR's full scans under locate keys (docs/HYPOTHESES.md, 2026-11-17): w128k-upd-mor and w128-upd-mor for 20 writes each, on the laptop one at a time from build snapshot 20261117T005411Z-202bc66bc369, with the JIT's compilation log and the GC log (in the snapshot's logs/diag); every record equals the first 20 writes of its 240-write run (steps_diff)"
