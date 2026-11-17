@@ -1727,3 +1727,80 @@ tenth.)
 
 **Measured, not judged:** requests, above all RMoR-density's for its delta row groups, which the model
 leaves out: each one a read touches is a request of its own, and every footer lists them.
+
+## The 128 MiB updates with writers that prune by key (registered 2026-11-16)
+
+**What it decides:** how much of the region designs' write at 128 MiB is finding the rows a write
+changes, and whether writers that prune row groups by each changed key (`layout.locate` `keys`,
+built 2026-11-10 and used by the 16 MiB runs) change the designs' trade-off. Campaign `w128` ran
+`scan`: in each file whose key range may hold a changed key, a write reads the key column of every
+row group between its smallest and largest changed key. RMoR, RMoW-external and RMoR-density cut
+what they copy into pieces, each a row group, so their tables grow from 58 row groups to 766-4,267
+over the 240 writes, and the scan with them. On S3 Express, simulated (lab/pages/workloads-128.md,
+section 2; requests priced with the fix of 2026-11-16 that prices a writer's footer read as two
+GETs), RMoR-density's scan takes 2.2 s a write over its first 10 writes and 13.3 s over its last
+10, 11.1 s of the 13.6 s its write slows by; RMoR's grows from 2.8 to 11.4 s, MoR's from 2.2 to
+10.7, RMoW-external's from 2.2 to 6.9.
+
+**What a write's scan reads** (havoc's request logs, the last 10 writes): for each file that may
+hold a changed key, its footer (two requests: the writer holds footers only within a write) and,
+before any row group is pruned, its deletion vector (`MorArm.scan` loads it to skip dead row
+groups); then the key column, a request a row group. `keys` changes only the last: RMoR-density
+reads 317 footer, 157 deletion-vector and 735 key-column requests a write, RMoR 283, 141 and 664,
+RMoW-external 152, 0 and 565, MoR 483, 240 and 267.
+
+**The forecast:** under `keys` a write reads the key column of at most the row groups it copies
+or updates (its `merge-read` and `update-read` requests), and its scan's work falls with its
+key-column reads; the footers, deletion vectors, reads and everything else stay as `scan` ran
+them. Simulated as workloads-128.md does (havoc's requests priced by size, the laptop twins' work):
+
+| | write, S3 Express: `scan` → `keys` | Azure Blob | last 10 writes over first 10 (S3 Express) | the scan's requests, last 10 writes |
+|---|---|---|---|---|
+| MoR | 25.8 → 25.6 s | 35.1 → 34.8 s | 3.9 → 4.2 | 990 → 984 |
+| MoR (compacted), writes alone | 23.5 → 21.5 | 24.2 → 21.5 | 3.2 → 3.3 | 75 → 63 |
+| RMoR | 18.9 → 11.6 | 29.2 → 14.9 | 1.19 → 0.76 | 1,088 → 485 |
+| RMoW-external | 16.1 → 10.7 | 24.9 → 13.1 | 0.90 → 0.61 | 717 → 184 |
+| RMoR-density | 20.3 → 13.3 | 28.1 → 16.2 | 2.70 → 1.77 | 1,210 → 547 |
+
+MoR's write files each hold one row group whose keys span the ten or so regions the write changed,
+so nearly every later write's keys fall in it: `keys` prunes almost none of them.
+
+**Setup:**
+- **Configurations:** `configs/w128k-upd-{mor,compact,rmor,external,density}.json`, each its `w128`
+  configuration with `locate` `keys` and nothing else changed. RMoW-append finds its rows from its
+  footers' statistics, and on the inserts the event-time merge finds its row groups from its index,
+  so neither changes; they do not run again.
+- **Where:** the laptop alone, one run at a time under the laptop lock (a 12g heap; RMoW-external
+  18g), from one build snapshot of the commit that registers this, with requests logged: a run there
+  counts requests, bytes and work. Logging adds an event a request, which K1 checks against the
+  `w128` twins, run without it.
+
+**How it is judged:** as W1–W5 and workloads-128.md: a write's mean over the 240 writes, simulated
+on S3 Express and Azure Blob by each run's requests priced by size and its own work.
+
+**Predicted:**
+- **K1 (a control): each run equals its `w128` run in every record but its writes', and its writes
+  differ only in the scan.** Every read, compaction and state record has the same requests, bytes and
+  table state (`steps_diff` against havoc's run); each write writes the same bytes, and its other
+  phases send the same requests; its scan reads the same files' footers and deletion vectors. The
+  reads' user-mode instructions come within 2% of the twins' (logging requests adds little).
+- **K2: over the last 10 writes, the scan sends at most 0.55 of its `scan` requests for RMoR and
+  RMoR-density, at most 0.35 for RMoW-external, and at least 0.85 for MoR** (forecast 0.45, 0.45,
+  0.26, 0.99).
+- **K3: on S3 Express RMoR's, RMoW-external's and RMoR-density's writes take at least 20% less on
+  average than under `scan`, MoR's at most 5% less, so each region design writes in at most 0.6 of
+  MoR's time** (forecast 39%, 33%, 34% and 1% less; 0.45, 0.42 and 0.52 of MoR's, against 0.73,
+  0.62 and 0.79 under `scan`). **RMoR-density's last 10 writes take at most twice its first 10**
+  (forecast 1.77, `scan` 2.70).
+
+**Measured, not judged:** MoR (compacted)'s writes and compactions; Azure Blob; each scan's work
+against its key-column bytes.
+
+**Limits:**
+- **The forecast's work** falls in proportion to the key-column reads, an assumption: the scan
+  also parses footers and loads deletion vectors, which `keys` leaves as they are.
+- **What `keys` leaves:** each file that may hold a key still costs its footer, two requests a
+  write, and in every design with deletion vectors its vector, loaded before its row groups are
+  pruned. A writer that held footers across writes, or pruned by key before loading a file's
+  deletion vector, would read less; neither is built.
+- **One seed, one table;** the reads are those of `w128`, which `keys` does not change.
