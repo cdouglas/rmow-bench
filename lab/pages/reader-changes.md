@@ -14,7 +14,7 @@ from labbook import figures_module, q, table
 fig = figures_module()
 tune = fig.tuner()
 
-# What pruning row groups by key takes off the updates' writes at 128 MiB: each w128-keys run (locate
+# What pruning row groups by key takes off the updates' writes at 128 MiB: each w128-keys-2 run (locate
 # keys, the laptop) against its configuration's w128 run (locate scan: havoc's requests, its laptop
 # twin's work), a write's simulated latency (s) at every write
 KD = [("MoR", "mor", "mor-v3"), ("MoR (compacted)", "compact", "mor-v3"), ("RMoR", "rmor", "rmor-c-kept"),
@@ -38,7 +38,7 @@ def write_s(run, arm, spike, work_run=None):
 
 rows = []
 for n, k, arm in KD:
-    keys, scan, twin = (run_in("w128-keys", f"w128k-upd-{k}"), run_in("w128", f"w128-upd-{k}"),
+    keys, scan, twin = (run_in("w128-keys-2", f"w128k-upd-{k}"), run_in("w128", f"w128-upd-{k}"),
                         run_in("w128-twins", f"w128-upd-{k}"))
     for store, spike in STORES.items():
         sc, ke = write_s(scan, arm, spike, twin), write_s(keys, arm, spike)

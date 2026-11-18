@@ -634,17 +634,24 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
   against MoR's 10.1, for writes of 4.7 s against 0.45. Iceberg's compaction halves MoR's range
   read after 240 writes, for slower writes.
 - **Writers that prune row groups by each changed key at 128 MiB** (K1–K3 of 2026-11-16, campaign
-  `w128-keys` on the laptop, 2026-11-17; [lab/pages/suite-128.md](lab/pages/suite-128.md)): the
-  results page now times the updates from these runs, writes, reads and compactions alike. On S3 Express RMoR writes in 11.9 s on
-  average (18.9 before), RMoW-external in 10.7 (16.1), RMoR-density in 13.6 (20.3) and MoR in 22.6
-  (25.8). RMoR-density's writes now slow from 6.8 s over the first 10 to 10.8 over the last 10, in
-  the footers and deletion vectors of the files a write may change. K2 held; K3 held for the region
+  `w128-keys` on the laptop, 2026-11-17; [lab/pages/suite-128.md](lab/pages/suite-128.md)): K2 held; K3 held for the region
   designs but not for MoR, whose write gained 12% (its bound was 5%): `keys` halves the bytes
   its locate reads, and its work follows them. K1's control held in requests and bytes; MoR's full
   scans ran 6.4% more instructions than in its twin (a JIT compile of the benchmark's own check of
   each row, found by a diagnostic rerun), which at each run's own pace is
   5.1% more time, within the spread of the other designs' reads between the two runs (5.3% less to
-  4.4% more).
+  4.4% more). The check has since left measured runs (README, Correctness).
+- **The 128 MiB updates measured without the check** (campaign `w128-keys-2` on the laptop,
+  2026-11-18, each run equal in every record to its `w128-keys` run and to its verification run
+  on havoc, which checked every row: four of the five so far, RMoR-density's still running;
+  [lab/pages/workloads-128.md](lab/pages/workloads-128.md)): the results page times the updates
+  from these runs, writes, reads and compactions alike. On S3 Express RMoR writes in 11.8 s on
+  average (18.9 with writers that prune only to a write's range of keys), RMoW-external in 11.2
+  (16.1), RMoR-density in 13.7 (20.3) and MoR in 22.6 (25.8). RMoR-density's writes slow from
+  6.9 s over the first 10 to 10.9 over the last 10, in the footers and deletion vectors of the
+  files a write may change. Without the check the reads ran up to 7.9% fewer instructions (MoR's
+  full scans); the writes ran the same instructions to within 2.2%, at a pace that moved from 7%
+  faster to 9% slower between the two runs.
 - **Next:** the density hypothesis where density can choose
   ([docs/drafts/density-plan-2026-11-16.md](docs/drafts/density-plan-2026-11-16.md): a sparse
   workload next), and a cloud run at 128 MiB after it ([docs/ROADMAP.md](docs/ROADMAP.md)). GCS needs APPEND in the
