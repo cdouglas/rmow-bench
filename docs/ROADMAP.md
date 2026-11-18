@@ -732,13 +732,15 @@ lower.
     instructions as usually compiled, 7.7% of MoR's full scans in its `w128-keys` run; writes none.
     Done 2026-11-18: the five 128 MiB update runs ran again without it (campaign `w128-keys-2`,
     which the results page times the updates from), with a verification run of each on havoc
-    (`w128-keys-verify`: MoR's, MoR (compacted)'s, RMoR's and RMoW-external's passed and equal their
-    measured runs in every record; RMoR-density's still running), and the planted bugs'
-    calibration at 6daa887 passed on all three profiles (`results/fuzz/cal-6daa887-*`). Left:
-    RMoW-append's and the inserts' laptop twins (`w128-twins`) ran with it, a few percent of their
-    reads' work (workloads-128.md, Limits).
-    **Decided (the user, 2026-11-18):** rerun those four without it (campaign `w128-twins-2`,
-    docs/HYPOTHESES.md 2026-11-18), queued on the laptop; then the page times them from it.
+    (`w128-keys-verify`: all five passed and equal their measured runs in every record), and the
+    planted bugs' calibration at 6daa887 passed on all three profiles
+    (`results/fuzz/cal-6daa887-*`).
+    RMoW-append's and the inserts' laptop twins (`w128-twins`) had run with it, a few percent of
+    their reads' work. **Decided (the user, 2026-11-18):** rerun those four without it, and delete
+    the old four once the reruns check out. Done 2026-11-18: campaign `w128-twins-2`
+    (docs/HYPOTHESES.md 2026-11-18), each run equal in every record to the twin it replaced and to
+    havoc's run; the results page times RMoW-append and the inserts from it, and the old four are
+    deleted (docs/EXPERIMENTS.md, Retired runs).
     The instrumentation in the measured path is below what the runs resolve: `Held` takes its lock
     once a row-group fetch or scan step (about 1,160 times a full scan at 128 MiB, uncontended in
     one-thread reads), and the request log adds under 0.1% (the `w128-keys` runs logged requests,

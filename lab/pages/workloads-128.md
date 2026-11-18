@@ -58,14 +58,14 @@ def spec(runs, names=None):
 # Simulated time per phase: a run's requests priced by size from each store's latency test, plus the
 # phase's work (user-mode instructions at the arm's pace on the laptop, views/35_work.sql). The
 # updates are timed from their w128-keys-2 runs (below); RMoW-append and the inserts from havoc's
-# requests and the work their laptop twins measured (campaign w128-twins). Nothing stands in for a
+# requests and the work their laptop twins measured (campaign w128-twins-2). Nothing stands in for a
 # twin that has not run.
 class TwinsOnly:
     def predict(self, d):
         return np.full(len(d), np.nan)
 
 
-GRID = "(list_contains(campaigns, 'w128') OR list_contains(campaigns, 'w128-twins'))"
+GRID = "(list_contains(campaigns, 'w128') OR list_contains(campaigns, 'w128-twins-2'))"
 tune.READS["sorted"] = ("read_sorted", "cached-skip")
 tune.WORKLOADS["w128_upd"] = "label = 'w128-upd-append'"
 tune.WORKLOADS["w128_ing"] = "regexp_matches(label, '^w128-ing-')"
@@ -261,7 +261,7 @@ SELECT replace(r.label, 'w128k-', 'w128-') AS label, b.arm, b.phase, b.component
 FROM phase_breakdown b JOIN canonical_runs r USING (run_id)
 WHERE b.thread = 'phase' AND b.component LIKE '%CPU'
   AND (list_contains(r.campaigns, 'w128-keys-2')
-       OR (list_contains(r.campaigns, 'w128-twins') AND r.label NOT IN ({KEYS_IN})))
+       OR list_contains(r.campaigns, 'w128-twins-2'))
   AND ((b.phase = 'batch' AND b.step >= 1)
        OR (b.step >= 5 AND b.phase IN ('read_full', 'read_window', 'read_sorted') AND b.reader = 'cached-skip'))
 GROUP BY ALL""")
@@ -301,15 +301,14 @@ def part_s(d, name, what, part=None, store=S3X):
     return (g[g.part == part] if part else g).s.sum()
 
 
-# the runs the page reads: the twins of the configurations timed from w128-keys-2 runs give it nothing
+# the runs the page reads
 runs = q(f"""SELECT run_id, label, host, left(git_sha, 7) AS build,
                     CASE WHEN list_contains(campaigns, 'w128-keys-2') THEN 'times'
                          WHEN host = 'havoc' AND label IN ({KEYS_IN}) THEN 'data written, storage, memory held'
                          WHEN host = 'havoc' THEN 'requests and bytes; data written, storage, memory held'
                          ELSE 'work' END AS gives
              FROM canonical_runs
-             WHERE ({GRID} AND NOT (host <> 'havoc' AND label IN ({KEYS_IN})))
-                OR list_contains(campaigns, 'w128-keys-2')
+             WHERE {GRID} OR list_contains(campaigns, 'w128-keys-2')
              ORDER BY replace(label, 'w128k-', 'w128-'), label, host""")
 ```
 
@@ -399,9 +398,14 @@ RW = q("""
            (k.ms / k.instr) / (t.ms / t.instr) - 1 AS pace
     FROM w k JOIN w t ON k.label = t.label AND k.phase = t.phase AND k.new AND NOT t.new""")
 RW_WRITES = RW[RW.phase.isin(["batch", "compact"])]
-RW_READS = RW[~RW.phase.isin(["batch", "compact"])]
-MOR_FULL = RW[(RW.label == "w128-upd-mor") & (RW.phase == "read_full")].iloc[0]
-assert RW_READS.instr.min() == MOR_FULL.instr  # the Limits name the most fewer as MoR's full scans
+# Each laptop twin of RMoW-append and the inserts (campaign w128-twins-2) against its configuration's
+# run on havoc: every record's requests and bytes the same (the build stops otherwise)
+TWINS = q("""SELECT t.label, t.run_id AS twin, h.run_id AS havoc
+             FROM canonical_runs t JOIN canonical_runs h USING (label)
+             WHERE list_contains(t.campaigns, 'w128-twins-2') AND list_contains(h.campaigns, 'w128')""")
+SAME_TWIN = sum(q(f"""SELECT count(*) AS n FROM steps_diff('{t.havoc}', '{t.twin}')
+                      WHERE one_run_only OR len(differs) > 0""").n.iloc[0] for t in TWINS.itertuples())
+assert len(TWINS) == len(ING) + 1 and SAME_TWIN == 0, (len(TWINS), SAME_TWIN)
 DEN_RISE = mean_over(SNU, "RMoR-density", WRITE, 231, 240) - mean_over(SNU, "RMoR-density", WRITE, 1, 10)
 
 # What reads and writes hold (README, What is held): the most a phase held at once, its encoded
@@ -553,10 +557,10 @@ kept (no run deletes anything) and with the snapshots before the newest expired.
 
 **How the times are simulated.** The updates are timed from one run of each configuration on the
 laptop, which counts requests, bytes and instructions, with writers that find their rows by key, as
-above; their reads only count the rows they return, leaving the check of each row to separate runs
-(README, Correctness). RMoW-append, which finds its rows from its footers alone, and the inserts are timed from
+above. RMoW-append, which finds its rows from its footers alone, and the inserts are timed from
 runs on havoc, which counted requests and bytes, and their twins on the laptop, which replay the
-same op log and count instructions. A phase's time is its CPU at the laptop's speed, plus its
+same op log and count instructions. Every read timed here only counts the rows it returns, leaving
+the check of each row to separate runs (README, Correctness). A phase's time is its CPU at the laptop's speed, plus its
 requests priced by size from a latency test of the store (S3 Express on a `c7a.4xlarge` in
 usw2-az3, Azure Blob on a `D8as_v6` in westus). What each design writes, stores and holds is
 counted from havoc's runs, which the laptop's runs of the updates match byte for byte ([the
@@ -1270,14 +1274,9 @@ table(PEAK.rename(columns={"name": "design"}).round(2),
   {eval}`f"{RW_WRITES.instr.abs().max():.1%}"`, yet took from
   {eval}`f"{-RW_WRITES.time.min():.1%}"` less to {eval}`f"{RW_WRITES.time.max():.1%}"` more time:
   the pace of the same instructions moves from run to run, with the laptop's clock and what else it
-  runs. A difference in work between two designs smaller than that may be the pace's.
-- **The benchmark's check of each row is out of the updates' reads, but not RMoW-append's or the
-  inserts'.** The earlier runs' reads checked each row they returned against a hash of the rows' ids
-  and versions, which counted in their work. The runs timed here only count the rows (README,
-  Correctness), and their reads ran up to {eval}`f"{-RW_READS.instr.min():.1%}"` fewer instructions
-  (MoR's full scans, where the JVM had compiled the check into the scan's loop) and at most
-  {eval}`f"{RW_READS.instr.max():.1%}"` more. RMoW-append's and the inserts' laptop twins ran before
-  the check left the measured reads, so their reads' work includes it.
+  runs. A difference in work between two designs smaller than that may be the pace's. It moved more
+  between RMoW-append's and the inserts' twins and the earlier twins they replaced
+  (docs/EXPERIMENTS.md, Retired runs).
 - **Writers that find their rows read every footer and deletion vector** of each file whose keys
   may hold a changed key, a write at a time: a writer that held them across writes, or pruned by key
   before loading a file's deletion vector, would read less ([Appendix A](./reader-changes.md)).

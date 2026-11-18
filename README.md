@@ -631,8 +631,8 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
   slow from 8.0 s to 21.7 s, mostly in the scan that finds a write's rows (2.2 to 13.3 s a write):
   it reads the key column of every row group in the write's range of keys, and RMoR-density's cut
   copies multiply its row groups (58 to 2,480). On the inserts RMoR-density reads a range in 3.2 s
-  against MoR's 10.1, for writes of 4.7 s against 0.45. Iceberg's compaction halves MoR's range
-  read after 240 writes, for slower writes.
+  against MoR's 10.1, for writes of 4.7 s against 0.45 (from twins since rerun without the check,
+  below). Iceberg's compaction halves MoR's range read after 240 writes, for slower writes.
 - **Writers that prune row groups by each changed key at 128 MiB** (K1–K3 of 2026-11-16, campaign
   `w128-keys` on the laptop, 2026-11-17; [lab/pages/suite-128.md](lab/pages/suite-128.md)): K2 held; K3 held for the region
   designs but not for MoR, whose write gained 12% (its bound was 5%): `keys` halves the bytes
@@ -643,7 +643,7 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
   4.4% more). The check has since left measured runs (README, Correctness).
 - **The 128 MiB updates measured without the check** (campaign `w128-keys-2` on the laptop,
   2026-11-18, each run equal in every record to its `w128-keys` run and to its verification run
-  on havoc, which checked every row: four of the five so far, RMoR-density's still running;
+  on havoc, which checked every row;
   [lab/pages/workloads-128.md](lab/pages/workloads-128.md)): the results page times the updates
   from these runs, writes, reads and compactions alike. On S3 Express RMoR writes in 11.8 s on
   average (18.9 with writers that prune only to a write's range of keys), RMoW-external in 11.2
@@ -652,6 +652,13 @@ pyarrow's dataset API and refused by its plain reader and by DuckDB, which read 
   files a write may change. Without the check the reads ran up to 7.9% fewer instructions (MoR's
   full scans); the writes ran the same instructions to within 2.2%, at a pace that moved from 7%
   faster to 9% slower between the two runs.
+- **RMoW-append's and the inserts' twins measured without the check** (campaign `w128-twins-2` on
+  the laptop, 2026-11-18, each equal in every record to havoc's run and to the twin it replaced,
+  since deleted; [lab/pages/workloads-128.md](lab/pages/workloads-128.md)): on S3 Express
+  RMoR-density reads a range on the inserts in 3.3 s against MoR's 10.1, for writes of 5.1 s
+  against 0.46. Without the check their reads ran 0.2% to 6.2% fewer instructions; RMoR-density's
+  and RMoW-append's reruns ran at a slower pace, so their writes took 18% and 12% more time for the
+  same instructions.
 - **Next:** the density hypothesis where density can choose
   ([docs/drafts/density-plan-2026-11-16.md](docs/drafts/density-plan-2026-11-16.md): a sparse
   workload next), and a cloud run at 128 MiB after it ([docs/ROADMAP.md](docs/ROADMAP.md)). GCS needs APPEND in the
