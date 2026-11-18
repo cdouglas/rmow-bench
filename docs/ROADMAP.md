@@ -721,7 +721,7 @@ lower.
   - [ ] **What `keys` leaves:** a writer that held footers across writes, or pruned a file's row
     groups by key before loading its deletion vector, would read less. Neither is built; both are
     patterns.
-  - [ ] **The oracle's check in a read's work** (found 2026-11-17, diagnostic `diag-mor`): every read
+  - [x] **The oracle's check in a read's work** (found 2026-11-17, diagnostic `diag-mor`): every read
     hashed each row it returns into the id-and-version oracle inside its decode, so the check counted
     in the read's work, and how the JIT compiled it moved MoR's full scans by 6.4% of their
     instructions between two runs of the same reads. **Decided (the user, 2026-11-17):** measured
@@ -730,8 +730,15 @@ lower.
     critical path or negligible, particularly for the cloud runs. Built on branch `oracle-out`
     (README, Correctness); measured 2026-11-17 (campaign `oracle-out`): 0.6% to 2.9% of a read's
     instructions as usually compiled, 7.7% of MoR's full scans in its `w128-keys` run; writes none.
-    Open: whether to rerun the 128 MiB laptop runs without it (the user's call), and the full
-    fuzzer calibration on havoc on both profiles (a 20-seed spot check of three mutants passed).
+    Done 2026-11-18: the five 128 MiB update runs ran again without it (campaign `w128-keys-2`,
+    which the results page times the updates from), with a verification run of each on havoc
+    (`w128-keys-verify`: MoR's, MoR (compacted)'s, RMoR's and RMoW-external's passed and equal their
+    measured runs in every record; RMoR-density's still running), and the planted bugs'
+    calibration at 6daa887 passed on all three profiles (`results/fuzz/cal-6daa887-*`). Left:
+    RMoW-append's and the inserts' laptop twins (`w128-twins`) ran with it, a few percent of their
+    reads' work (workloads-128.md, Limits).
+    **Decided (the user, 2026-11-18):** rerun those four without it (campaign `w128-twins-2`,
+    docs/HYPOTHESES.md 2026-11-18), queued on the laptop; then the page times them from it.
     The instrumentation in the measured path is below what the runs resolve: `Held` takes its lock
     once a row-group fetch or scan step (about 1,160 times a full scan at 128 MiB, uncontended in
     one-thread reads), and the request log adds under 0.1% (the `w128-keys` runs logged requests,

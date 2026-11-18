@@ -1857,3 +1857,23 @@ JIT's compilation log; and a verification run of each.
   rows equal (`steps_diff`), and the verification run passes.
 
 Whether to rerun the 128 MiB laptop runs without the oracle is decided from the first.
+
+## The 128 MiB twins of RMoW-append and the inserts without the oracle: a measurement (registered 2026-11-18)
+
+The results page times the updates from runs measured without the oracle (campaign `w128-keys-2`),
+but RMoW-append's updates and the inserts from laptop twins (campaign `w128-twins`, 2026-11-15)
+whose reads hashed every row they returned inside the measured phase. These four run again,
+measured, so that every time on the page is measured alike.
+
+**The runs:** `configs/w128-upd-append.json`, `configs/w128-ing-mor.json`,
+`configs/w128-ing-compact.json` and `configs/w128-ing-density.json`, on the laptop one at a time
+under the laptop lock with a 12g heap and no request log, as the twins ran, from build snapshot
+20261117T225741Z-6daa88784286 (main 6daa887, the fork at a32bc97: the `w128-keys-2` runs' jar and
+libraries). Campaign `w128-twins-2`. They have no verification runs of their own: havoc's `w128`
+run of each configuration checked every row it read, and `steps_diff` ties each run to it.
+
+**Measured, not judged:**
+- **That they repeat what they replace:** every record's requests, bytes and rows equal havoc's
+  `w128` run of the configuration and its earlier twin (`steps_diff`).
+- **What the oracle cost these reads:** each read's user-mode instructions against the earlier
+  twin's, and the writes' and compactions', which never ran it.
