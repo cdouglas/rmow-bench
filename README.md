@@ -105,14 +105,6 @@ keep the designs' reads and writes comparable to stock Iceberg's. All of it is i
 | [docs/drafts/](docs/drafts/) | Plans in progress, among them the density plan. |
 | `lab/` | The results database and pages: `lab serve` shows them as a site. |
 
-Until 2026-11-18 this file held the reference sections, and earlier documents cite them as
-"README, <section>". They moved, under the same names: Build and run, Fuzzing, What is measured
-(with Correctness, Where the time went, What is held), I/O parity rules, Layout of the code and
-Compatibility to [docs/HARNESS.md](docs/HARNESS.md); Arms, Knobs and The workload to
-[docs/CONFIG.md](docs/CONFIG.md); The S3 store, The Azure store and Appends to
-[docs/STORES.md](docs/STORES.md). The findings its Status section listed are in
-docs/EXPERIMENTS.md.
-
 ## Status
 
 - **Results at 128 MiB** ([lab/pages/workloads-128.md](lab/pages/workloads-128.md)): every design
