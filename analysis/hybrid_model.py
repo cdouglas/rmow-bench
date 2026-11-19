@@ -243,6 +243,17 @@ def run_updates(data, policy, arg, by_region=False):
         k = np.searchsorted(cs, lo)
         cand = (k < len(cs)) & (cs[np.minimum(k, len(cs) - 1)] <= hi)
         cand_rows = int(sum(len(t.rows[p]) for p, c in zip(ps, cand) if c))
+        # the locate's requests (layout.locate keys): for each file whose id bounds may hold a
+        # target, its footer (two GETs, as a writer reads one) and its deletion vector if it has
+        # one; then the id column of each row group whose statistics may hold one
+        objs = [lst for lst in t.objects.values() if any(t.live(q) > 0 for q in lst)]
+        olo = np.array([min(t.lo[q] for q in lst) for lst in objs])
+        ohi = np.array([max(t.hi[q] for q in lst) for lst in objs])
+        k = np.searchsorted(cs, olo)
+        ocand = (k < len(cs)) & (cs[np.minimum(k, len(cs) - 1)] <= ohi)
+        loc_files = int(ocand.sum())
+        loc_dvs = sum(1 for lst, c in zip(objs, ocand) if c and any(t.ndead[q] for q in lst))
+        loc_rgs = int(cand.sum())
         # a reader that locates by the page index reads the id pages whose range holds a target
         cand_page_rows = 0
         # each request's MB, by reader: the write's reads, and what it writes (an append to each
@@ -428,7 +439,10 @@ def run_updates(data, policy, arg, by_region=False):
         wr = dict(written=written * B / 1e6, compacted=compacted * B / 1e6,
                   wread_rg=(ID_SHARE * cand_rows + wread_rg) * B / 1e6,
                   wread_pg=(ID_SHARE * cand_page_rows + wread_pg) * B / 1e6,
-                  wread_rg_sizes=rsz["rg"], wread_pg_sizes=rsz["pg"], wput_sizes=wsz)
+                  wread_rg_sizes=rsz["rg"], wread_pg_sizes=rsz["pg"], wput_sizes=wsz,
+                  loc_files=loc_files, loc_dvs=loc_dvs, loc_rgs=loc_rgs,
+                  loc_requests=2 * loc_files + loc_dvs + loc_rgs,
+                  wread_requests=2 * loc_files + loc_dvs + len(rsz["rg"]))
         if not reading(w, len(writes)):
             out.append(wr)
             continue
@@ -886,7 +900,7 @@ def summarize(name, out, keys):
 
 
 UPDATE_KEYS = ["written", "max:written", "compacted", "read_blind", "read_rows", "read_iceberg",
-               "read_pages",
+               "read_pages", "wread_rg", "loc_requests", "end:loc_requests", "wread_requests",
                "requests", "end:requests", "end:objects", "end:pieces", "read_live",
                "page_read_live", "win_requests", "win_read_live", "newest_requests",
                "newest_read_live", "end:sorted_open", "end:sorted_held"]

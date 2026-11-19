@@ -91,6 +91,7 @@ footer must recompute them (or drop the statistics): one more reason it is a for
    the hypothesis.
    - Model it first (`analysis/hybrid_model.py`: check it handles `updateShare` 0). Include the scan
      and the per-file footers and DVs: the model's omission of the scan is what contradicted D3.
+     Done 2026-11-18 ([Step 2: the model](#step-2-the-model-2026-11-18)).
    - Register, then run MoR, MoR (compacted), RMoR and RMoR-density at two or three θ at 128 MiB
      under `keys`, on the laptop under the lock, or on havoc with laptop twins.
 3. **Merging pieces back, as a compaction** (decided). A compaction, not the writer, so its cost
@@ -138,6 +139,62 @@ footer must recompute them (or drop the statistics): one more reason it is a for
 - Hot-region isolation (ROADMAP) is what the cut does for changed runs; step 3 decides whether hot
   pieces stay apart.
 
+## Step 2: the model (2026-11-18)
+
+**The op log:** the `w128k-upd-*` configurations' workload with `updateShare` 0, so each change is
+a row of its own (`REGIONS`, skew 1; 150,000 changes a write over 240 writes on 205,480,000 rows;
+SHA-256 16b5639b...). It was generated outside a run by `OpLogGenerator` from the 6daa887 build
+snapshot, with a launcher that reproduces the clustered log (22ced251) byte for byte.
+
+**The model** (`analysis/hybrid_model.py updates --rg-mib 128 --target-mib 512 --read-every 40`)
+now counts the locate's requests under `keys`: two for each candidate file's footer, one for its
+deletion vector, and one for the id column of each candidate row group. On the clustered log, with
+RMoR-density as run (`copy:split:rg:0.06`), it counts 28 a write over the first 10 writes and 541
+over the last 10. The `w128-keys-2` run measured 28.2 and 510: footers 337 against 317, deletion
+vectors 167 against 157, id columns 37 against 35. Its rows are 28.6 bytes (Parquet's about 31),
+so its numbers are ratios between designs; nothing here is priced yet.
+
+**How the changes fall** over the model's 49 row groups of 4,256,000 rows:
+- Every write changes rows in every row group. The hottest takes 10% of the changes (about 15,000
+  a write), the median about 2,200 and the coldest about 520.
+- By the 240th write, 5% to 29% of a row group's rows have changed (median 11%).
+- θ 0.06 is first reached at write 3, by half the row groups at write 133, and by 48 of 49 at
+  write 228. θ 0.15 is reached by 15 row groups, θ 0.25 by 3.
+
+**What that means in this workload:**
+- Every design's write reads the whole table, about 6.1 to 7.1 GB of the model's rows a write.
+  `updateRead` `row` reads every row group holding a row the write updates, and every row group
+  holds one. The designs differ in what they write, in the locate's requests, and in their reads.
+- Copying at once (RMoR, θ 0) copies the whole table every write, 1.6 TB over 240 writes. It is
+  left to the model, without a run.
+- The cut copies whole row groups: changes this sparse touch nearly every stride.
+
+| After 240 writes (model) | MoR | MoR compacted every 5 writes | RMoR-density θ 0.02 | θ 0.06 (as run) | θ 0.15 |
+|---|---|---|---|---|---|
+| MB written a write (mean) | 3.6 | 3.6, and 40 compacted | 188 | 53 | 12 |
+| Locate requests a write, last 10 writes | 1,025 | 104 | 1,178 | 3,579 | 9,704 |
+| A 1% window's bytes, against its live bytes | 18.3 | 6.9 | 3.3 | 3.4 | 3.6 |
+| A 1% window's requests | 723 | 9 | 56 | 198 | 766 |
+| A full scan's requests | 794 | 82 | 1,102 | 3,329 | 9,596 |
+| Row groups | 289 | 55 | 971 | 2,848 | 9,091 |
+
+- **RMoR-density's range reads come closest to their live bytes at every θ:** 3.3 to 3.6 times,
+  against MoR's 18 and MoR compacted's 6.9. A 1% window reads the 128 MiB row group holding it
+  (about 2% of the table) and that row group's deltas.
+- **But its deltas pile up.** As built (`defer.deltas` `region`), each write puts a row group of
+  new versions for every base row group it changes, and here it changes all of them: 49 a write, of
+  about 2,500 rows each. They are folded in only when their row group is copied. At θ 0.06 the
+  table holds 2,848 row groups after 240 writes. The locate reads each one's id column every write,
+  3,579 requests against MoR's 1,025 and MoR compacted's 104, and a full scan sends 3,329.
+- **θ trades one cost for the other.** At θ 0.15 the deltas pile up further (9,091 row groups). At
+  θ 0.02 the copies come often enough to fold them (971), for 188 MB a write.
+- **MoR compacted is the design to beat on requests.** Iceberg's bin-pack every 5 writes keeps 55
+  row groups, for 40 MB a write of compaction and windows of 6.9 times their live bytes.
+- **For step 2:** run as it is, RMoR-density sends 6 to 120 times MoR compacted's requests, at
+  any θ. Merging pieces back (step 3) is what would fold the deltas
+  without copying their base row groups. **Open (the user):** run step 2 as it is, measuring the
+  pile-up, or bring step 3 forward and run RMoR-density with it.
+
 ## Decided (the user, 2026-11-16/17)
 
 - The sparse workload has hot regions (`REGIONS`).
@@ -156,4 +213,6 @@ footer must recompute them (or drop the statistics): one more reason it is a for
 - Steps 3–5: each a build, a fuzz round and its calibration, and a campaign: two to four sessions
   each.
 - Memory: a model process at 205 million rows takes about 9 GB and the op-log generator about 10;
-  run at most two models at once, and the generator alone (docs/LESSONS.md, Machines).
+  run at most two models at once, and the generator alone (docs/LESSONS.md, Machines). On the
+  sparse log (2026-11-18), θ 0.02 and the clustered log needed more than 7 GB (under 13 GB and
+  11 GB), and the generator took 5.6 GB at `-Xmx6g`.
