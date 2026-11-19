@@ -1,4 +1,4 @@
--- Where a phase's time went (README, What is measured). Since 2026-10-26 each phase records, for
+-- Where a phase's time went (docs/HARNESS.md, What is measured). Since 2026-10-26 each phase records, for
 -- its thread, the wall and CPU time of each kind of work (Spans), exclusive of the others:
 --   io       calls into the store: the client's work (checksums, HTTP, TLS) and the wait for it
 --   encode   Parquet encoding of rows: data files and RMoW's regions

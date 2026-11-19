@@ -1,6 +1,6 @@
 # Plan (as approved 2026-10-20)
 
-Copied from the planning session. Deviations since: see README.md, Status, and docs/DESIGN.md (the hybrid RMoW-DV arms were moved forward from "deferred" after the first local results).
+Copied from the planning session. Deviations since: see docs/EXPERIMENTS.md and docs/DESIGN.md (the hybrid RMoW-DV arms were moved forward from "deferred" after the first local results).
 
 
 ## Context

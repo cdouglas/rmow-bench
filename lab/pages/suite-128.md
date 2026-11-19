@@ -908,7 +908,7 @@ OC_READ_SHARE = OC[(OC.locate == "scan") & (OC.what != "snapshot write")].share
 
 Without the oracle the offset is gone. Since 2026-11-17 a run measures with no check of its rows in
 its reads, which only count them, and a verification run (`--verify`) checks every row apart
-(README, Correctness). Measured so, the same two configurations' full scans run
+(docs/HARNESS.md, Correctness). Measured so, the same two configurations' full scans run
 {eval}`f1(OCK.without["keys", "full scan"])` G instructions under `keys` and
 {eval}`f1(OCK.without["scan", "full scan"])` G under `scan` over the 20 writes. Every record of each
 measured run equals the diagnostic's run ({eval}`OC_DIFF["keys", "oracle"]` and

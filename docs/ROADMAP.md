@@ -119,7 +119,7 @@ reads.
 - [x] **What readers and writers hold** (`Held`, built 2026-10-29): the most each phase held at
   once, in rows kept to sort or merge and in encoded bytes (column chunks in flight, writers'
   buffers, encoded data waiting for its request, deletes loaded), counted where the code holds
-  them, so they repeat from run to run as requests and bytes do (README, What is held). The JVM's
+  them, so they repeat from run to run as requests and bytes do (docs/HARNESS.md, What is held). The JVM's
   heap was rejected as the measure (the user's question): it holds the benchmark's own state and
   moves with the collector, and allocation counters (`ThreadMXBean`, async-profiler) count churn,
   not what is held. `--log-held` writes every change, for memory against the stages of a phase.
@@ -206,7 +206,7 @@ reads.
   RMoW-C batch, 59 ms on a 13.7 s batch on Azure); no number on any page moved.
 - [ ] **Iceberg's own writes above 256 MiB on Azure** (now live: MoR (compacted)'s compactions at
   128 MiB write files up to 512 MiB, priced as one PUT on workloads-128.md's Azure Blob): an output stream is one Put Blob up to
-  256 MiB (README, The Azure store). A larger one is presumably several requests, the SDK's
+  256 MiB (docs/STORES.md, The Azure store). A larger one is presumably several requests, the SDK's
   chunked upload, not yet counted; the model counts one PUT. **Counted on the Azure base point**
   (2026-11-01): RMoR-C's write files (418 MiB on average) went up as 85 Put Blocks a write on
   average, 4 MiB each, and 0.6 Put Block Lists; the write's time was priced right (0.98), but a
@@ -231,7 +231,7 @@ reads.
   contract passed there; rmow-bench's `S3ExpressTest` failed on two faults of its own, since fixed
   (an append at 0, which the fork takes for an unknown length, and a client its throwaway
   S3FileIOs closed when finalized).
-- [x] **A fuzzer** (built 2026-11-08, before the cloud run of the tuner's picks; README,
+- [x] **A fuzzer** (built 2026-11-08, before the cloud run of the tuner's picks; docs/HARNESS.md,
   Fuzzing). `bin/fuzz.sh` draws a whole configuration from a seed (the workload, every layout
   knob, a subset of the 18 arms, readers of random flags, the store) and runs it through the
   runner, whose every read is checked against the reference model, payloads included. It checks
@@ -375,7 +375,7 @@ reads.
 
 Until 2026-10-27, all runs used recency keys with a mean of 2 batches, or uniform keys, and each
 update and delete touched one row. The generator now has regions, a skew over them and an update
-share (README, The workload). Logs without them are unchanged: `OpLogGeneratorTest` pins the
+share (docs/CONFIG.md, The workload). Logs without them are unchanged: `OpLogGeneratorTest` pins the
 hashes of the calibration's log and of the 1M-row recency and uniform logs.
 - [x] **Regions** (`workload.regionRows`, built 2026-10-27): consecutive ids, default 100,000,
   about the rows of a 4 MiB row group (98,000; a 1 MiB one holds 10,521). Rows are the steadier
@@ -728,7 +728,7 @@ lower.
     runs check no rows, and the benchmark checks correctness apart, in verification runs
     (`--verify`) that `steps_diff` ties to the measured ones; measurement in a run is off the
     critical path or negligible, particularly for the cloud runs. Built on branch `oracle-out`
-    (README, Correctness); measured 2026-11-17 (campaign `oracle-out`): 0.6% to 2.9% of a read's
+    (docs/HARNESS.md, Correctness); measured 2026-11-17 (campaign `oracle-out`): 0.6% to 2.9% of a read's
     instructions as usually compiled, 7.7% of MoR's full scans in its `w128-keys` run; writes none.
     Done 2026-11-18: the five 128 MiB update runs ran again without it (campaign `w128-keys-2`,
     which the results page times the updates from), with a verification run of each on havoc

@@ -841,7 +841,7 @@ BP_WHATS = ["a write", "a full read", "a full read, skipping dead row groups"]  
 # what a phase's own thread did, from phase_breakdown: decoding and encoding Parquet, the store
 # (its client's CPU and waiting on it), and the rest (footers, deletes, other CPU and waiting)
 BP_PARTS = ["decoding", "encoding", "other", "the store"]
-# a write's steps, nested in its batch phase (README, Phases), and the rest of the batch
+# a write's steps, nested in its batch phase (docs/HARNESS.md, Phases), and the rest of the batch
 BP_STEPS = ["locate", "merge-read", "write", "delete-write", "rest"]
 _BP_PART = """CASE component WHEN 'decode CPU' THEN 'decoding' WHEN 'encode CPU' THEN 'encoding'
                              WHEN 'store client CPU' THEN 'the store'

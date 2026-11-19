@@ -17,8 +17,13 @@ records requests, bytes and CPU per arm, step and phase.
   why their runs no longer stand, the measurement method (work in instructions, latency priced by
   request size, the stores' surprises), and the results that carry over. Their pages and the full
   record are in git at bfbdf33.
-- **[README.md](README.md)** has build and run, the phases, the I/O parity rules, the arms and
-  every config knob (`layout.*`, `reads.*`).
+- **[README.md](README.md)** has the question, the five designs, the workloads and how to build
+  and run. The reference moved to docs/ on 2026-11-18: **[docs/HARNESS.md](docs/HARNESS.md)**
+  (flags and outputs, the fuzzer, the phases, correctness, what is held, the I/O parity rules, the
+  code's layout, compatibility), **[docs/CONFIG.md](docs/CONFIG.md)** (every arm and every knob,
+  `layout.*`, `reads.*`, `workload.*`) and **[docs/STORES.md](docs/STORES.md)** (the S3 and Azure
+  stores, appends through the fork). Older documents cite those sections as "README, <section>".
+  Keep the README focused on the five designs; detail goes to docs/.
 - **[docs/ROADMAP.md](docs/ROADMAP.md)** is the outstanding work and what was decided about it.
   Keep it current as items land.
 - **[docs/HYPOTHESES.md](docs/HYPOTHESES.md)** holds the question (the write and read trade-off),
@@ -33,18 +38,18 @@ records requests, bytes and CPU per arm, step and phase.
 ## Build, test, run
 
 Java 17 and Maven, and the atomicio fork's Iceberg 1.12.0 (`1.12.0-atomicio-SNAPSHOT`) in the
-local Maven repository: every store appends through its `SupportsAtomicOperations` (README,
+local Maven repository: every store appends through its `SupportsAtomicOperations` (docs/STORES.md,
 Appends). parquet-java 1.17.1 comes from Maven Central.
 
 ```bash
 mvn -q package -DskipTests                     # target/rmow-bench-*.jar + target/lib
 mvn test                                       # unit, compatibility and end-to-end smoke tests
 bin/run.sh configs/smoke.json                  # one configuration; prints the run directory
-bin/matrix.sh --build configs/local-compact-*.json   # several, from a build snapshot
+bin/matrix.sh --build configs/w128k-upd-*.json     # several, from a build snapshot
 ```
 
 - **Arrow needs `--add-opens=java.base/java.nio=ALL-UNNAMED`** on Java 17: every arm reads
-  Parquet through Iceberg's vectorized reader (README, What is measured). `bin/run.sh`,
+  Parquet through Iceberg's vectorized reader (docs/HARNESS.md, What is measured). `bin/run.sh`,
   `bin/matrix.sh`, `docker/campaign.py` and surefire pass it; a JVM started any other way needs it.
 - **`bin/matrix.sh`** snapshots the build into `results/builds/<UTC>-<sha>[-dirty]/` (jar,
   configs, and the diff if the tree is dirty), so you can keep editing and rebuilding while runs
@@ -52,8 +57,8 @@ bin/matrix.sh --build configs/local-compact-*.json   # several, from a build sna
 - **Flags:** `--dump-versions` keeps every version of the appendable objects for
   `analysis/interop_check.py`, `--keep-store` keeps the objects, `--log-requests` writes every
   request to `requests.jsonl` for the latency replay, and `--log-held` every change of what the
-  phases hold to `held.jsonl` (README, What is held). `store.latency` in a config injects a
-  simulated store's latency (README).
+  phases hold to `held.jsonl` (docs/HARNESS.md, What is held). `store.latency` in a config
+  injects a simulated store's latency (docs/CONFIG.md).
 - **Never edit `bin/matrix.sh` while it runs:** bash reads the script as it goes.
 - **Campaigns too large for the laptop** (the production-sized `scale`) run on havoc, in a
   container: `docker/run.sh build`, then `start <campaign>` ([docker/README.md](docker/README.md)).
@@ -66,13 +71,13 @@ bin/matrix.sh --build configs/local-compact-*.json   # several, from a build sna
   run of the same config, whose reads hash every row's (id, version) (and, with `verifyRows`, its
   payload) against the model; it issues the same requests and bytes, so `steps_diff` against it
   vouches for the measured run, and the lab excludes it. Never put a check of correctness, or any
-  other per-row work of the harness's, inside a measured phase (README, Correctness).
+  other per-row work of the harness's, inside a measured phase (docs/HARNESS.md, Correctness).
 - **Duration:** a `local-*` configuration has taken 8–34 minutes, longest with all 9 arms
-  (`elapsed_s` in each manifest). The README's S3 section says what
-  `S3StoreTest` needs (versitygw in Docker; skipped without it), and its Azure section what
-  `AzureStoreTest` needs (Azurite in Docker).
+  (`elapsed_s` in each manifest); a 128 MiB one 55–99 minutes on the laptop. docs/STORES.md says
+  what `S3StoreTest` needs (versitygw in Docker; skipped without it) and what `AzureStoreTest`
+  needs (Azurite in Docker).
 - **Fuzzing:** `bin/fuzz.sh` runs random small configurations of every arm and reader through
-  the runner, with checks beyond a run's own (README, Fuzzing); `bin/fuzz-mutants.py` checks it
+  the runner, with checks beyond a run's own (docs/HARNESS.md, Fuzzing); `bin/fuzz-mutants.py` checks it
   catches a set of planted bugs. Rerun both after changing an arm, a reader or the I/O layer, and
   keep the mutants' anchors current. On havoc: `docker/run.sh fuzz <name>`.
 - **Tests that pin results:** `RunnerSmokeTest` asserts H2 for both layouts.
@@ -133,7 +138,7 @@ bin/matrix.sh --build configs/local-compact-*.json   # several, from a build sna
   user-mode instructions; its time for simulated latency is that work at its arm's pace
   (`phase_work.work_ms`; docs/LESSONS.md, Measuring work). Without counters, thread CPU time
   under 10% decides nothing for one phase.
-- **The I/O parity rules in the README** guard against biases found in Iceberg's code. A change
+- **The I/O parity rules in docs/HARNESS.md** guard against biases found in Iceberg's code. A change
   to any arm's read or write path must keep them, and the tests that check them must pass.
 - **Hypotheses come before the runs that decide them.** Add each one to `docs/HYPOTHESES.md` in a
   new dated section, before running. Never edit an earlier one in place; record a revision as a
@@ -161,7 +166,7 @@ bin/matrix.sh --build configs/local-compact-*.json   # several, from a build sna
    Queries worth reusing go in `lab/views/`. Build with `lab build --strict` and look at the
    charts in `lab/_build/charts/`.
 6. Update `docs/EXPERIMENTS.md`. Its run table and findings are written by hand; check its run
-   counts against the campaigns table on the lab's front page. Update the README's Status too.
+   counts against the campaigns table on the lab's front page. Update the README's Status too, briefly.
 
 ## Working here
 

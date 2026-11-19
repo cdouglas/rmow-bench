@@ -48,7 +48,7 @@ beside runs after it:
   read's decode, was still the harness's work in a measured phase: how the JIT compiled it moved
   MoR's full scans by 6.4% of their instructions between two runs of the same reads (2026-11-17,
   campaign `diag-mor`). Since then measured runs check only row counts, and verification runs
-  (`--verify`) check every row apart (README, Correctness). Measured without it (campaign
+  (`--verify`) check every row apart (docs/HARNESS.md, Correctness). Measured without it (campaign
   `oracle-out`), the oracle had been 0.6% to 2.9% of a read's instructions, 7.7% of MoR's full scans
   in the run the JIT compiled it badly. Keep the harness's work per row group or per request,
   never per row, in a measured phase.
@@ -122,7 +122,7 @@ beside runs after it:
 - **An old footer's open-ended GET declares the rest of an appendable object** under the stock
   reader (379 MB on S3 Express, 191 MB on Azure, against 7 MB read). S3 Express aborts it at no
   visible cost; on Azure RMoW's time-travel reads took 3.7 s against at most 1.1 s. Bounded
-  readers avoid it (README, I/O parity).
+  readers avoid it (docs/HARNESS.md, I/O parity).
 - **Azure reads whole 4 MiB blocks** before the fork's range fix (reader-changes.md), more bytes
   than the model counts.
 - **Shared resources confound time:** nine S3 Express VMs on one bucket (AWS's 64-vCPU limit),
@@ -279,12 +279,12 @@ Each fixed, most with a test that pins it:
 - Time travel planned old RMoW versions without their split offsets, so stock-reader time travel
   took 62% fewer GETs (150cc93; `RunnerSmokeTest.timeTravelReadsLikeTheCurrentRead`).
 - RMoW's writer kept footers across writes, leaving out 3.5 of RMoW-C's 9.5 requests a write
-  (README, I/O parity rule 6); it flipped H5's verdict on requests.
+  (docs/HARNESS.md, I/O parity rule 6); it flipped H5's verdict on requests.
 - Compaction packed row groups to twice the writer's size, faking a read advantage; split files
   never reached the old per-file trigger, one object 63% dead (rework 0564114).
 - Split objects were planned as one task, then objects under 1 MiB fetched again for each split
   (`RequestLogTest`).
-- Puffin's `create()` HEAD went uncounted in early builds (README, I/O parity rule 2).
+- Puffin's `create()` HEAD went uncounted in early builds (docs/HARNESS.md, I/O parity rule 2).
 - `bin/matrix.sh --store-root` replaced Azure roots with local paths; `docker/campaign.py`
   matched labels by prefix and gave one job's load samples to another (a14e010).
 - The fuzzer (2026-11-08) found two RMoR-family bugs in settings no run used.

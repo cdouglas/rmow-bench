@@ -1,665 +1,129 @@
 # rmow-bench
 
-A proof of concept and benchmark of **region-merge-on-write (RMoW)** for Parquet, against Iceberg
-**merge-on-read (MoR)**.
+A benchmark of **region merges** for Parquet tables in Iceberg: writes that rewrite the row groups
+they change, against Iceberg's **merge-on-read (MoR)**, which leaves them and marks their old rows
+dead. The question is whether readers gain more than writers pay. Every design replays the same
+seeded operations, and the benchmark records the requests, bytes and CPU of each write and read;
+latency on S3 Express and Azure Blob is simulated from them, each request priced at its size.
 
-RMoW appends to an existing Parquet object instead of writing new files. Each batch appends a
-region (one or more row groups, with their page indexes) and then a new footer. That footer lists
-the old row groups that are still live, at their original offsets, and the new ones. A row group
-whose rows were merged into the new region is simply left out, and the row group that replaces it
-takes its place in the list: `<R1> … <RN> <F1>`, updated at `RK`, becomes `<R1> … <RN> <F1> <RK'>
-<F2>`, with F2 listing `R1 … RK' … RN`. Every version of the file is
-the object's prefix up to that version's footer, so old versions stay readable. Stock readers
-already read every version (see [Compatibility](#compatibility)): they find the footer from the
-length they are given, and every Parquet offset is absolute.
+## The designs
 
-RMoW is a partial merge-on-write, applied only to the regions a batch affects. The writer pays
-more. In return, a reader reads one version of each file, summarized in exactly one footer, and
-applies no deletes and merges nothing.
+A *row group* is the part of a Parquet file a reader reads or skips as a whole; the file's *footer*,
+at its end, lists its row groups. A *deletion vector* (DV) is Iceberg's list of a data file's dead
+rows, in a file of its own.
 
-MoR writes a new data file per batch for inserts and the new versions of updated rows. It marks
-the replaced and deleted rows with position-delete files (Iceberg v2) or deletion vectors in Puffin
-files (v3).
+| Design | What a write does with a row group whose rows it changes | What hides the old copy |
+|---|---|---|
+| **MoR** | Leaves it; the changed rows' new versions go to a new file, with the write's new rows | a DV over the old rows |
+| **MoR (compacted)** | As MoR; a compaction rewrites the small files and those with many dead rows, as Iceberg's bin-pack plans it after every write | the compaction's files replace them |
+| **RMoR** | Copies it, with the changes, into the write's new file, cut into row groups where the write changes it | a DV over the whole old row group |
+| **RMoW-external** | As RMoR | a new footer appended to the old file, which no longer lists it |
+| **RMoW-append** | Appends the rewritten row group to its own file | the new footer appended after it |
+| **RMoR-density** | As RMoR once its dead and changed rows reach a share θ of it (6%); until then as MoR, the new versions waiting in small *delta* row groups, one per base row group, for that copy | a DV |
 
-The question this benchmark answers is whether merging (and sorting) the trailing regions is
-cheaper than MoR. It looks at both sides: the cost of adding data, and the cost of reading it back
-as updates accumulate. Ingest in rough timestamp order, where updates mostly hit recent rows, is
-the case of most interest. The measurement is of I/O; this does not patch Iceberg to accept the
-layout.
+RMoR, RMoW-external, RMoW-append and RMoR-density are the *region designs*: a write's unit is the
+row group. In their names, R or W says when a row group's old and new rows are reconciled: on read
+(RMoR: readers apply the DV, which covers the old row group whole, so a reader skips it) or on write
+(RMoW: the old copy is gone from the footer readers use).
 
-Six documents go with this one:
-- [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md): a map of the runs that stand, what each experiment
-  varied and found, and where each hypothesis stands. Start here.
-- [docs/LESSONS.md](docs/LESSONS.md): what the retired experiments taught and decided, from the
-  measurement method to the results that carry over.
-- [docs/ROADMAP.md](docs/ROADMAP.md): the outstanding work, and what was decided about it.
-- [docs/PLAN.md](docs/PLAN.md): the original plan, with its milestones.
-- [docs/DESIGN.md](docs/DESIGN.md): the format-level findings and the writer's rules.
-- [docs/HYPOTHESES.md](docs/HYPOTHESES.md): the question, what is settled, and the hypotheses of
-  the runs to come, each fixed before them (the earlier ones: the file at commit 1145f89).
+The two RMoW designs append to an existing Parquet object instead of writing a new file: a region
+(one or more row groups) and then a new footer, which lists the old row groups still live, at their
+original offsets, and the new ones. Every version of the file is the object's prefix up to that
+version's footer, and stock readers read every version, since every Parquet offset is absolute
+([docs/HARNESS.md, Compatibility](docs/HARNESS.md#compatibility)). Appends need a store that takes
+them (S3 Express, Azure Append Blobs) and the atomicio fork of Iceberg
+([docs/STORES.md](docs/STORES.md)). RMoR and RMoR-density write Iceberg's format as it is.
+
+Each design is an arm of the harness with its settings ([docs/CONFIG.md, Arms](docs/CONFIG.md#arms)),
+which also lists the code's other arms.
+
+## The workloads
+
+Two workloads, run apart, on a table of 205,480,000 rows of 11 columns (about 6.2 GB) in Iceberg's
+default 128 MiB row groups and 512 MiB files, over 240 writes (RMoW-append, which copies whole row
+groups, 30):
+- **Updates only:** each write changes 150,000 rows (5/6 updates, 1/6 deletes), clustered: each
+  statement changes 3% of a region of 513,700 rows, and regions are picked by a heat that follows
+  Zipf's law. An update reads the rows it rewrites.
+- **Inserts only:** each write inserts 350,000 rows by event time, some late (median 0.05 writes,
+  p99 5). The region designs put each into the row group its event time falls in (the event-time
+  merge); RMoR, RMoW-external and RMoW-append would rewrite 2.3 GB a write there, so they are
+  projected, not run.
+
+After every write the table is read: the newest 1% and five 1% windows (by key on the updates, by
+event time on the inserts); every 10 writes also a full scan and a read sorted by event time.
+[docs/EXPERIMENTS.md](docs/EXPERIMENTS.md#the-two-workloads) has the details and the earlier,
+smaller workloads.
 
 ## Build and run
 
-Requires JDK 17 and Maven, and the atomicio fork of Iceberg 1.12.0 (`1.12.0-atomicio-SNAPSHOT`)
-in the local Maven repository: RMoW appends through its `SupportsAtomicOperations` on every store
-([Appends: the fork's atomic operations](#appends-the-forks-atomic-operations)). Build it from the
-fork's `atomicio` branch with `./gradlew publishToMavenLocal -x test -x integrationTest`;
-`-Diceberg.version` picks another of its builds. parquet-java (1.17.1) and everything else come
-from Maven Central.
+Java 17 and Maven, and the atomicio fork's Iceberg 1.12.0 (`1.12.0-atomicio-SNAPSHOT`) in the local
+Maven repository (built from the fork's `atomicio` branch with
+`./gradlew publishToMavenLocal -x test -x integrationTest`).
 
 ```bash
-mvn -q package -DskipTests        # the jar plus target/lib
-bin/run.sh configs/smoke.json     # prints the run directory
-.venv/bin/python analysis/summary.py results/<label>-<hash>/<start time>
-mvn test                          # unit tests, the S1 compatibility spike, end-to-end smoke tests
+mvn -q package -DskipTests                       # target/rmow-bench-*.jar + target/lib
+mvn test                                         # unit, compatibility and end-to-end smoke tests
+bin/run.sh configs/smoke.json                    # one configuration; prints the run directory
+bin/matrix.sh --build configs/w128k-upd-*.json   # several, from a snapshot of the build
+bin/run.sh configs/smoke.json --verify           # a verification run: checks every row
 ```
 
-For experiments, `bin/matrix.sh` runs configurations one after another from a snapshot of the
-build (`results/builds/`), so `mvn package` can run while they do:
+A run writes `results/<label>-<config hash>/<UTC start>/`: its manifest, the op log it replayed,
+and one record per arm, step and phase (`steps.jsonl`). The lab (`lab/`, labbook) reads them:
+`lab ingest`, then `lab sql` and the result pages (`lab build`). Campaigns too large for a laptop
+run in containers on havoc ([docker/README.md](docker/README.md)), and cloud runs on a VM beside
+the store ([deploy/](deploy/README.md)). [docs/HARNESS.md](docs/HARNESS.md) has every flag, the
+outputs and the fuzzer.
 
-```bash
-bin/matrix.sh --build configs/local-m1-*.json
-```
+## What a run measures
 
-The snapshot holds the jar, hard links to its released dependencies, the configurations, and for a
-dirty tree the diff and the untracked files; each run's manifest names it. The script refuses a
-jar older than `src/main` or `pom.xml` (`--build` rebuilds it first). Runs keep their objects under `store/` and
-delete them when they end (`--keep-store` keeps them). Both scripts give the JVM `-Xmx8g` unless
-`JAVA_OPTS` sets its options.
+- **Requests and bytes,** by kind, for every phase of every write and read. They depend only on
+  the op log, the configuration and the code, so two runs of a configuration must match exactly.
+- **Work,** as the user-mode instructions of each phase, where the kernel allows CPU counters; a
+  phase's time is that work at its arm's pace.
+- **What reads and writes hold** at once, the files and row groups a table holds, and its storage.
 
-Campaigns too large for a laptop run in a container on another machine, each configuration on
-whole idle cores of one NUMA node: `docker/run.sh build`, on the fork's artifacts carried as a tar
-(`docker/fork-m2.sh`), then `docker/run.sh start <campaign>` ([docker/README.md](docker/README.md)).
+Latency is simulated, never taken from a local run's wall clock. Measured runs check no rows: a
+**verification run** of the same configuration checks every row a read returns against a reference
+model, issues the same requests and bytes, and vouches for the measured run. The I/O parity rules
+keep the designs' reads and writes comparable to stock Iceberg's. All of it is in
+[docs/HARNESS.md](docs/HARNESS.md).
 
-Cloud runs go on a VM beside the store, deployed by [deploy/](deploy/README.md). Its `bench` step
-runs the configurations it is given at one commit; one with a local store runs on the cloud's
-store, its label suffixed `-s3x` or `-azure`, so it is the twin of a run made on the laptop or
-havoc.
+## Documentation
 
-`--log-requests` (on `bin/run.sh` and `bin/matrix.sh`) writes every request each phase issued to
-`<run>/requests.jsonl`, for the latency replay, and `--log-held` every change of what each phase's
-readers and writers hold to `<run>/held.jsonl` ([What is held](#what-is-held)).
-
-`--dump-versions` (on `bin/run.sh` or `bin/matrix.sh`) keeps every version of every appendable
-object in `<run>/versions/`, checked against the reference model at every step, for
-`analysis/interop_check.py <run>/versions` to read with pyarrow and DuckDB (see
-[Compatibility](#compatibility)).
-
-### Fuzzing
-
-`bin/fuzz.sh` runs random small configurations through the runner (`fuzz.Fuzz`). A seed draws the
-whole configuration: the workload's mix, key distribution, regions and lateness, every layout knob,
-a subset of the arms, and readers of random flags, on the in-memory or the local store. Every read
-of every arm under every reader is checked against the reference model, payloads included, as a
-run checks itself. Beyond that, each arm's objects and bytes on a local store must be what its
-`state` records say, and a share of seeds run twice, once on each store, and must match record for
-record in requests, bytes, rows, memory held (readers on one thread) and state. Another share dump
-every version of the appendable objects and check each against the model, and another log every
-request and every change of what the phases hold, as the cloud runs do.
-
-```bash
-bin/fuzz.sh --parallel 8 --out results/fuzz/<name> --minutes 60   # 8 workers, seeds 1, 2, ...
-bin/fuzz.sh --seed 1234                                            # one seed again
-bin/fuzz.sh --print 1234                                           # the configuration it draws
-bin/fuzz.sh --parallel 8 --out results/fuzz/<name> --profile heavy  # nearly dead row groups
-bin/fuzz-mutants.py --seeds 60 --workers 8                         # calibration: planted bugs
-bin/fuzz-mutants.py --seeds 60 --workers 8 --profile heavy         # and on the heavy draws
-bin/fuzz.sh --parallel 8 --out results/fuzz/<name> --profile event-time  # the event-time merge
-bin/fuzz-mutants.py --seeds 60 --workers 8 --profile event-time    # and its planted bugs
-docker/run.sh fuzz <name> --minutes 180                            # on havoc (docker/README.md)
-```
-
-The `heavy` profile makes every seed change rows in heavy statements (most of a region's rows),
-with regions of about a row group and a reader that skips dead row groups, so row groups go dead
-but for a few rows, where skipping them is easiest to get wrong; the default profile draws such
-seeds now and then. The `event-time` profile makes every seed insert only, onto an initial load in
-event-time order, with the region arms placing the inserts by the event-time merge
-(`layout.inserts`); the default profile draws it on about a third of its inserts-only seeds.
-
-A failing seed writes `fail-<seed>/`: its configuration (runnable with `bin/run.sh`), the error, and
-the run's records. `bin/fuzz-mutants.py` plants each of a set of known bugs in a copy of the
-source and fuzzes it with a fixed budget of seeds: each must be caught by the check it names, under
-the profiles that reach it, and the unmutated code must stay clean. The bugs too rare for that
-budget are measured, not required; the script's header says what budget catches them, and
-docs/ROADMAP.md (Harness, the fuzzer) what the rounds on havoc found. The fuzzer covers the arms
-and readers on the in-memory and local stores, not the cloud stores' clients.
-
-Python tools live in a project venv:
-
-```bash
-python3 -m venv .venv
-.venv/bin/pip install pyarrow duckdb pandas matplotlib
-```
-
-A run writes `results/<label>-<config hash>/<UTC start>/`:
-
-- `manifest.json`: the full configuration with defaults, the git commit, the Iceberg, Parquet and
-  JVM versions, the host, and the op log's SHA-256.
-- `oplog.bin`: the exact operations that were replayed.
-- `steps.jsonl`: one record per arm, step and phase.
-- `requests.jsonl` with `--log-requests`, `held.jsonl` with `--log-held`, and `versions/` with
-  `--dump-versions`.
-
-Runs that share a configuration share the `<label>-<hash>` directory. Requests and bytes are a
-function of the op log, the configuration and the code, so `analysis/compare_runs.py` checks that
-two runs match exactly. Every run names its files alike (`bench://run/…`, mapped to the run's own
-prefix in the store), since paths end up inside Puffin footers.
-
-## What is measured
-
-All arms replay the same seeded op log in lockstep, in an order shuffled at every step. They all
-start from the **same initial-load bytes**: a stock Parquet file is already the first version of an
-appendable one.
-
-**Parquet is read and written as Spark reads and writes an Iceberg table**, the same way in every
-arm. Every read (the reads, writers' scans to locate rows, merge reads) goes through Iceberg's
-vectorized reader (iceberg-arrow, `ParquetBatches`): batches of 5,000 rows of Arrow vectors, the
-file's position deletes applied per batch by position, and the residual compiled to comparisons
-on the batch's columns (`RowBatch`), with Arrow's per-value bounds and null checks off, as
-Iceberg's Spark reader sets them. Writes go through Iceberg's generic writer over parquet-java, as
-Spark's and Flink's do, with strings as UTF-8 bytes (Avro's `Utf8`), as Spark's rows hold them.
-Before 2026-10-31 every arm read through Iceberg's generic row reader, which builds a Java object
-per row: a profile put about 85% of a read's CPU in its per-value and per-row work, and a full read
-takes about a quarter of the instructions on the vectorized reader, with the same requests and
-bytes. Arrow needs `--add-opens=java.base/java.nio=ALL-UNNAMED` on Java 17, which `bin/run.sh`,
-`bin/matrix.sh`, the container's runner and the tests pass.
-
-The phases recorded in `steps.jsonl` are:
-
-| Phase | What it covers |
+| Document | What it is for |
 |---|---|
-| `batch` | One whole batch. It contains `locate`, `update-read`, `merge-read`, `write`, `delete-write` and `clean`, so don't add them to it. |
-| `locate` | With the `locate` knob at `scan` or `keys`: finding the rows the batch changes, as a MERGE would. |
-| `update-read` | With `updateRead` at `row` (or `scan`, for the arms that rewrite regions): reading whole each row group that holds a row the batch updates and that it does not rewrite, since a new version is its old row with some columns set. |
-| `merge-read` | Reading back what the batch rewrites or merges: RMoW's touched row groups, CoW's touched files, TailCoW's and RMoR's tail files and regions. |
-| `write` | Writing data files, or appending regions and footers. |
-| `delete-write` | The MoR family's deletes: position-delete files (v2), or each file's DV merged with its previous one into the batch's Puffin file (MoR-v3, TailCoW, RMoR-C); for RMoR-C with footers, the footers appended to hide the old row groups. |
-| `compact` | A compaction, after the batch, every `compactEvery` batches; not part of `batch`. |
-| `read_full` | Reading the whole current table. |
-| `read_recent` | Reading rows in the newest 1% of event time. Files are pruned by column metrics, row groups by stats. |
-| `read_old` | Reading the table as it was `travelBack` batches ago. |
-| `read_window` | With `reads.windows`: reading the rows in one window of a column's span (`window_by`, `id` or `ts`, centred at `window_at` of it). Pruned as `read_recent` is. |
-| `read_sorted` | Reading the whole current table in event-time order, under a reader with `sortedRead` (since 2026-10-29): a merge of the table's row groups, each a sorted run, opened as the merge reaches its smallest `ts`. |
-| `state` | The footprint: objects, stored, live and reclaimable bytes, row groups, files, footer bytes, and RMoW's row groups listed out of id order. |
+| [docs/EXPERIMENTS.md](docs/EXPERIMENTS.md) | The map: the runs that stand, what each experiment varied and found, and the runs retired. Start here. |
+| [docs/HARNESS.md](docs/HARNESS.md) | Running, measuring, checking: flags and outputs, the fuzzer, the phases, correctness, what is held, the I/O parity rules, the code's layout, compatibility. |
+| [docs/CONFIG.md](docs/CONFIG.md) | Every arm and every knob of a configuration. |
+| [docs/STORES.md](docs/STORES.md) | The S3 and Azure stores, and appends through the atomicio fork. |
+| [docs/HYPOTHESES.md](docs/HYPOTHESES.md) | The question, and every hypothesis, registered before the runs that decide it. |
+| [docs/LESSONS.md](docs/LESSONS.md) | What the retired experiments taught: the measurement method, the stores, the designs dropped. |
+| [docs/ROADMAP.md](docs/ROADMAP.md) | The outstanding work, and the decisions that shaped it. |
+| [docs/DESIGN.md](docs/DESIGN.md) | Format-level findings: the writer's rules, footer order, split files, compaction. |
+| [docs/drafts/](docs/drafts/) | Plans in progress, among them the density plan. |
+| `lab/` | The results database and pages: `lab serve` shows them as a site. |
 
-Each phase records wall time, thread CPU time, and the requests a tracing FileIO saw: GETs (ranged
-or streamed), HEADs, PUTs, APPENDs, aborts, bytes read and bytes written. Requests are counted the
-way Iceberg's object-store streams issue them. An append counts as one APPEND and a new appendable
-file as one PUT on every store. Where a store caps an append (Azure's Append Block, 100 MiB), the
-fork splits a larger one into several, and `append_splits` counts the extra ones, for a store
-profile with a cap to price (since 2026-10-27; the lab takes older runs' splits from their request
-logs, appends only). Besides thread CPU time (`cpu_ns`), a phase records the thread's user-mode
-time (`user_ns`), the process's CPU time (`process_cpu_ns`), and, where the kernel allows the
-CPU's counters (`ThreadCounters`, through `perf_event_open`, with `kernel.perf_event_paranoid` at
-most 2), the thread's user-mode `instructions` and `cycles`. Thread CPU time moves with the clock
-speed and instructions do not, so instructions are a phase's work
-([docs/LESSONS.md](docs/LESSONS.md#measuring-work)).
-
-**Correctness is checked apart from what is measured** (since 2026-11-17). A run measures: its
-reads only count the rows they return, a batch at a time, and each count must equal the reference
-model's. A **verification run** (`--verify` on `bin/run.sh` and `bin/matrix.sh`, or a campaign's
-`flags`) checks every row instead: each read hashes the (id, version) of every row it returns
-(order-independent) and must equal the model's, and with `verifyRows` (the default) every decoded
-row's payload is checked as well. A mismatch stops the run. The checks read nothing, so a
-verification run issues the same requests and bytes as a measured run of its config, record for
-record (`MeasuredRunTest`), and vouches for it (`steps_diff`); it measures nothing itself, so the
-lab excludes it (manifest `verify`, lab/annotations.toml). The fuzzer verifies every run. Runs
-before 2026-11-17 measured with the (id, version) hash in their reads: 0.6% to 2.9% of a read's
-instructions as it usually compiled, and up to 7.7% of MoR's full scans as the JIT compiled it in
-one run, which moved them by 6.4% between two runs of the same reads (lab/pages/suite-128.md, the
-diagnostic under K1–K3; campaign `oracle-out`).
-
-**Where the time went** (`Spans`, since 2026-10-26). Each phase also splits its thread's time by
-kind of work, as wall and CPU time (`<kind>_ns`, `<kind>_cpu_ns`), each exclusive of the others:
-
-| Kind | What it covers |
-|---|---|
-| `io` | Every call into the store, through the tracing FileIO: the client's work (checksums, HTTP, TLS) and the wait. A PUT through an output stream is its close, which uploads: its writes copy into the client's buffer, as part of the encoding. |
-| `encode` | Parquet encoding of rows: data files and RMoW's regions. |
-| `decode` | Parquet decoding in a scan: footers, pages into column batches, the deletes and the residual applied to each batch, and the scan's consumer (a hash, or rows kept to merge). |
-| `footer` | RMoW's footers: Thrift decoding, encoding and merging. |
-| `deletes` | Delete files: DVs and position deletes built, encoded, loaded and decoded. |
-| `rows` | Rows the harness makes for a writer from their id, event time and version, a chunk at a time as the encoder takes them (since 2026-10-29; before, the same work ran ahead of the encoding, outside every span). The lab counts it in other CPU, as before. |
-
-The rest of the thread's CPU is planning and bookkeeping, and the rest of its wall time is off the
-CPU outside requests (garbage collection, the JIT, scheduling). A read pool's tasks record the same
-(`pool_<kind>_ns`, `pool_<kind>_cpu_ns`, with `pool_wall_ns`). The lab's `phase_breakdown` view
-turns them into components that add up to a phase's wall time, for stacked bars. The store
-client's threads of its own (Azure's event loop) are in `process_cpu_ns`, not in `io`. In the
-request log, each request has its start in its phase (`start_ns`), wall time (`dur_ns`) and thread
-CPU (`cpu_ns`). Each span reads the thread's CPU clock twice, about 2 µs here, and a batch or read
-opens tens to hundreds of them; on a 7-arm run they moved user-mode instructions by -0.5% to +2%.
-
-### What is held
-
-Each phase also records the most its readers and writers held at once (`Held`, since
-2026-10-29): `held_rows`, the rows kept to sort or merge, and `held_bytes`, the encoded bytes,
-with the peak of each kind of byte (`held_<kind>`):
-
-| Kind | What is held |
-|---|---|
-| `rows` | Rows a writer reads back to rewrite or merge, and a batch's rows to sort, until its files are written; rows a sorted read decodes to sort a file it fetched whole. In rows, since their size in memory is the engine's choice. |
-| `chunks` | The column chunks a reader fetched for the row group it is decoding: every data read its stream serves from storage, by row group (the file's split offsets), held until it fetches from the next. A file Iceberg fetches whole counts whole. |
-| `writer` | A Parquet writer's buffered row group, as large as the largest it wrote. |
-| `pending` | Encoded data waiting for its request: RMoW's regions until the file's append, a data file the store can extend until its create. |
-| `deletes` | DVs and position deletes loaded (a DV's blob, a delete file's length), by a read's delete cache until the read ends, or by a scan until it ends; and the DVs a batch builds. |
-
-The levels are counted where the code holds data, so two runs record the same peaks, as they do
-requests and bytes. They are not the JVM's heap, which holds the benchmark's own state too and
-moves with the collector. Every hold must be released by the end of the outermost phase that made
-it, or the run fails. Writers stream: RMoW reads, rewrites and encodes one row group at a time, as
-parts of `merge-read` and `write`, each recorded once. Every arm keeps each row it reads back as
-its id and version, and makes the rows again as the encoder takes them (`MadeRows`; RMoW since
-2026-10-31, when it moved from keeping the decoded rows; the MoR family always did). A
-read whose splits run on a pool holds as many row groups as its threads do at once, so its peaks
-depend on how they interleave.
-
-With `--log-held`, `held.jsonl` has every change, in order (`seq`), with the levels after it, the
-innermost phase it came in (`in`) and what it was (`what`: a row group fetched, a region encoded,
-an append sent), for drawing a phase's memory against the stages of its work rather than time.
-
-CPU and wall time must run on one clock for the breakdown to add up. On this laptop (WSL2 on
-Hyper-V) the thread CPU clock runs 11% fast against the wall clock, so a busy phase's `cpu_ns`
-exceeds its `wall_ns`. Each run spins for 200 ms before it starts and records the ratio in its
-manifest (`host.thread_cpu_per_wall`, 1 where the clocks agree), and `phase_breakdown` divides CPU
-times by it.
-
-### I/O parity rules
-
-Each rule guards against a bias found in Iceberg's code:
-
-1. **Every stream is `RangeReadable`.** Iceberg's Parquet reader uses vectored reads, which here
-   means one bounded ranged GET per run of adjacent column chunks, only through `RangeReadable`.
-   Without it, `S3InputStream` issues open-ended GETs and reads through gaps of up to 1 MiB. That
-   would charge only RMoW for its dead bytes. Iceberg's local FileIOs are not `RangeReadable`, so
-   `PreadFileIO` and `MemFileIO` stand in for them.
-2. **No arm pays a HEAD that stock Iceberg would not.** Delete files are opened with their length
-   (`LengthAwareDeleteFilter`). The stock filter does not pass the length, which would cost a HEAD
-   per delete file. Files are created as Iceberg's writer factories create them, without an
-   existence check (`overwrite`). One HEAD is stock Iceberg's and is counted: `PuffinWriter`
-   creates each DV file with `create()`, which on S3 and ADLS checks that it does not exist, so
-   every arm that writes DVs pays one HEAD per Puffin file.
-3. **Footers are read the same way in every arm.**
-4. **Local and in-memory runs report requests, bytes and CPU, not latency.** WSL2 and the page
-   cache make local wall times meaningless. Latency is simulated from requests, bytes and CPU
-   ([docs/LESSONS.md](docs/LESSONS.md#pricing-latency)).
-5. **Every file is planned as Iceberg plans it**: one split task per row group, on the split
-   offsets of the version read. A footer-cache reader reads a file of at most 1 MiB in one task,
-   since Iceberg fetches such a file whole and each split would fetch it again. A split file's
-   objects are planned the same way, each on its own footer's offsets.
-6. **Writers hold a footer for one transaction, in every arm.** A batch or a compaction is a
-   transaction, and an Iceberg writer starts each from storage: no footer carries over to the
-   next. Within one, a writer reads a file version's footer once, on its first use, and reuses it
-   (`writerFooters`), whether it is RMoW finding and rewriting row groups or a MoR-family arm
-   scanning and merging files. A file of at most 1 MiB is fetched whole on every open. Runs
-   before 2026-10-24 let RMoW's writer keep its footers across batches (`writerCachesFooters`),
-   which no MoR-family writer did; at 4 MiB that left out 3.5 of RMoW-C's 9.5 requests per batch.
-
-## The S3 store
-
-`store.type` `s3` runs every arm on Iceberg's `S3FileIO`, over one AWS SDK client that this
-project builds (`Store`), with credentials from the default chain, so none are in a configuration
-or its manifest. Only directory buckets (S3 Express One Zone, `<name>--<az id>--x-s3`) append, so
-the bucket decides:
-
-- **a directory bucket:** RMoW appends through the fork (`AtomicAppender`): one PutObject at the
-  object's length (`writeOffsetBytes`), conditioned on its ETag, with no HEAD;
-- **a standard bucket:** the runner refuses RMoW's appendable arms; split files run;
-- **an emulator** (`store.endpoint`): appends read the object and CAS it back longer, on an
-  unmeasured client (`EmulatorAppenders.rewriting`). Creates are the fork's.
-
-An interceptor on the client (`S3Recorder`) counts the requests the SDK sends. Each phase then
-records them beside the trace's model, as `sdk_*` fields: requests by operation, retries, and
-bytes. `S3StoreTest` runs every arm family against versitygw (in Docker; skipped without it), and
-checks that in every phase the SDK's GETs, PUTs, HEADs and DELETEs equal the model's, with no
-retries, and that the run deletes its objects. So local runs count the requests S3 receives.
-
-What the emulator cannot check is the S3 Express append (versitygw ignores `writeOffsetBytes`),
-S3 Express's session requests (`CreateSession`, counted as `sdk_sessions`: they count in cost,
-not in the model), and latency. Two things check them, given a directory bucket:
-
-- **`S3ExpressTest`** runs when `RMOW_S3X_ROOT` names a prefix in a directory bucket
-  (`s3://<bucket>--<az id>--x-s3/<prefix>`; region from `RMOW_S3X_REGION` or `AWS_REGION`). It
-  checks that:
-  - an append at the object's length lands;
-  - one anywhere else fails and changes nothing, and so does a create where an object is;
-  - the recorder sees a create as one PutObject and an append as one PutObject with a write
-    offset, neither with a HEAD;
-  - a run of every arm family matches the model, appends and bytes written included.
-- **`org.rmow.bench.micro.S3ExpressSpike <s3://bucket/prefix>`** measures latencies, interleaved:
-  the store's own appends (a write offset alone) against RMoW's (the fork's, conditioned on the
-  ETag too), PUTs against RMoW's creates (conditioned on absence), from 64 KiB to 128 MiB, a row
-  group at Iceberg's default; GETs by size, of the PUTs' objects whole and as ranges of a 128 MiB
-  one, for the read rate per MiB; and
-  GETs (whole, last 64 KiB, middle 64 KiB) of objects of 1 to 1000 appended parts. It writes
-  `results/spike/s3x-spike-<UTC>/spike.jsonl`.
-
-`configs/s3x-calibration.json` was the first cloud run (2026-10-28): a small workload and the five
-arms new campaigns run (MoR-v3, TailCoW-C, RMoR-C, RMoR-C with footers and RMoW-C), from an EC2
-instance in the bucket's zone. Its twin,
-`configs/s3x-calibration-local.json`, differs only in the store. Its requests and bytes are what
-the S3 Express run's model and SDK counts must match exactly, apart from `CreateSession`.
-
-## The Azure store
-
-`store.type` `azure` runs every arm on Iceberg's `ADLSFileIO`, on a hierarchical-namespace account
-(`store.root` `abfss://<container>@<account>.dfs.core.windows.net/<prefix>`). Credentials come from
-the default chain (a VM's managed identity, the environment, the Azure CLI), so none are in a
-configuration or its manifest. For an emulator, `store.endpoint` names it, and the account key is
-in `AZURE_STORAGE_KEY`.
-
-The fork's ADLS FileIO sends what the model counts. An output stream is one Put Blob up to
-256 MiB, and `create()` adds its existence check, a HEAD. A stream opens nothing until it reads,
-and a ranged read is one GET of exactly its range. Iceberg 1.12.0 as shipped reads more: every
-stream opens with a GET of the file's first 4 MiB, and a ranged read at an offset fetches up to a
-4 MiB chunk, since it asks for `position + length` bytes ([docs/AZURE_RUNBOOK.md](docs/AZURE_RUNBOOK.md)).
-The fork's sequential reads still download the SDK's 4 MiB blocks whole, so they read more bytes
-than the model counts, but no more requests.
-
-`AppendBlock` extends only an Append Blob, and Iceberg writes block blobs. So RMoW's files are
-Append Blobs, created through the fork (`AtomicAppender`) as a temporary Append Blob, one Append
-Block and a rename with `If-None-Match: *`: three requests, where the model counts one PUT. Each
-append is one `AppendBlock`, conditioned on the blob's length and ETag. An Append Block takes at
-most 100 MiB, so a larger append or create takes one per 100 MiB (`append_splits` counts the
-extra ones).
-
-The recorder (`AzureRecorder`) counts what the SDK sends through every client in the process,
-Iceberg's included: azure-core adds its policies to every storage pipeline
-(`META-INF/services`). Phases record the counts as `sdk_*` fields, and `sdk_latency` in the lab
-prices them.
-
-`AzureStoreTest` runs the store's contract (`AzureStoreContract`) against Azurite, in Docker
-(skipped without it). Azurite has no Data Lake endpoint, so the store deletes an emulator's runs
-blob by blob, and it cannot rename, so RMoW creates its files there through a stand-in
-(`EmulatorAppenders.appendBlobs`): an empty Append Blob made in place, a HEAD, and an Append
-Block. The contract checks that:
-- Iceberg's write is a HEAD and one Put Blob;
-- its reads open nothing and ask for exactly their range;
-- Append Blobs append at their length only, a create fails where a blob is, and a file Iceberg
-  wrote cannot be appended to (`InvalidBlobType`);
-- every phase of every arm family sends what the model counts, request for request (a create as
-  above), with nothing else and no retries.
-
-`AzureTest` runs the same contract against Azure when `RMOW_AZURE_ROOT` names a prefix in a
-container. `org.rmow.bench.micro.AzureSpike <abfss://...>` measures latencies, interleaved: Put
-Blobs, the store's own Append Blocks (conditioned on the length alone) and RMoW's (on the ETag
-too), from 64 KiB to 128 MiB, a row group at Iceberg's default (a 128 MiB append is two Append
-Blocks); GETs by size, of the Put Blobs' blobs whole and as ranges of a 128 MiB one; creates (an
-empty Append Blob, the store's own appendable file, and RMoW's atomic one) and HEADs; GETs of
-Append Blobs of 1 to 1000 blocks; and Iceberg's ranged read of a 32 MiB file against the SDK's.
-`configs/azure-calibration.json` is the calibration run (2026-10-28). Its
-Azurite twin (`-azurite.json`) gives the requests it must send, but for its creates: each costs a
-HEAD there where Azure's costs a rename.
-
-## Appends: the fork's atomic operations
-
-The atomicio fork's `SupportsAtomicOperations` is the conditional write its catalog commits
-through, and APPEND is RMoW's primitive. Every store's appender is `AtomicAppender` over it:
-S3FileIO and ADLSFileIO implement it on the fork, and the local stores (`MemFileIO`,
-`PreadFileIO`) here, so local runs take the same path. Each write returns the next snapshot,
-holding a length and an ETag, and the appender keeps it, so appends chain:
-- **An append** is one request, at the snapshot's length and conditioned on its ETag: a PutObject
-  on S3 Express, an Append Block on ADLS. Of several writers appending to one version, exactly one
-  lands. Where the store caps an append (Azure's Append Block, 100 MiB), it is several, in order,
-  each conditioned on the snapshot the last returned, so the footer lands last. Such an append is
-  not all or nothing: a writer that stops between parts leaves bytes past the length a commit
-  records, which no reader opens. S3 Express takes 5 GB per append.
-- **A new appendable file** is a CAS from a snapshot that has seen nothing, which assumes the
-  object is absent and sends no lookup (every RMoW file has a name of its own):
-  - on S3, one PutObject with `If-None-Match: *`;
-  - on ADLS, a temporary Append Blob (created, then one Append Block, or one per 100 MiB) renamed
-    onto the file with `If-None-Match: *`. An Append Blob is created empty, so only the rename
-    makes the create all or nothing, at any size: one request more than the store's own way, an
-    empty Append Blob and its blocks.
-  - on the local filesystem, a temporary file renamed onto the file.
-
-  The model counts it as one PUT.
-
-`prepare()` reads the content once for its checksum (CRC32C on S3 and locally, MD5 on ADLS), so a
-write's CPU includes it on every store. Emulators lack part of the API, and run RMoW's appendable
-arms on stand-ins (`EmulatorAppenders`, above); a store on a cloud endpoint never uses them.
-
-The fork's own contract (`SupportsAtomicOperationsContractTest`, from its test jar) runs against
-both local stores (`LocalAtomicContractTest`): creates, replaces and appends pinned to the
-version a snapshot saw, serial and concurrent races with one winner, and, since the fork's reads of
-one version (7b948d51ce), reads of the version a file saw. A file that looked an object up reads
-that version or fails with `StaleReadException`: after an append, the local stores keep the older
-bytes as a prefix and read them; after a replace (a CAS, or a rename onto a local file), they fail,
-as S3 and ADLS answer a read conditioned on a version that is gone (2026-11-12; no run reads
-through a file after a replace). `AtomicAppenderTest`
-checks the appender, and that it sends no lookup. Against the services, `S3ExpressTest` and
-`AzureTest` check it; the spikes time it against the stores' own requests.
-
-`atomicio` has the fixes RMoW needs, beyond the API:
-- ADLS reads open nothing until they read, and ask for exactly their range;
-- S3 and ADLS appends to a snapshot send no lookup, and a create from a snapshot that has seen
-  nothing sends none either;
-- S3's `prepare()` no longer needs commons-io, which Iceberg does not ship.
-
-The two read fixes are upstream performance bugs: the reads fetch more than they need, but return
-the right bytes. So they are on `atomicio`, not `core-fixes`, which holds correctness fixes.
-
-Against the release, a run on the fork differs in one byte count: Puffin files name the build
-that wrote them (`created-by`), and `1.12.0-atomicio-SNAPSHOT` is 18 bytes longer than `1.12.0`.
-So MoR-v3's and TailCoW-C's DV files are 18 bytes larger than in runs before 2026-10-26; every
-request, and every other byte, is the same (checked on 7 arms, 2026-10-26).
-
-For latency, a configuration can set more things, and a run can log its requests:
-- **`warmup`** runs a small op log on the in-memory store before the measured run, so the JIT has
-  compiled the paths first. It changes no request or byte (`RunnerSmokeTest`).
-- **`reads.readers`** can list a reader model with `parallelism` above 1, to read on several
-  threads as an engine does. With `deleteCache` (the `cached` model), it loads each data file's
-  deletes once per read rather than once per split, as an engine with a delete cache would. With
-  `skipDeadRowGroups` (the `cached-skip` model; it needs `footerCache`), it plans no split for a
-  row group the file's deletes cover whole, nor any for a file whose DV covers every row, checking
-  the deletes, loaded once, against the footer it reads. Iceberg's reader fetches such row groups
-  and drops their rows one by one, so RMoR-C's reads are reported under both. A file of at most
-  1 MiB, fetched whole, is skipped only whole.
-- **`store.latency`** injects a simulated store's latency into every measured request: median
-  latencies by kind (GET and HEAD, PUT and DELETE, append) with their lognormal sigmas, an extra
-  GET latency per appended part, transfer times per MiB, and `maxAppendMib`, the store's cap on an
-  append (100 for Azure; 0, the default, for none), past which each part costs an append. Each
-  request sleeps its expected latency, so a phase's wall time is what it would take on that store
-  (`StoreLatency`).
-- **`--log-requests`** (on `bin/run.sh` and `bin/matrix.sh`) writes `requests.jsonl`: every
-  request each phase issued, with its split task and each task's CPU. The lab's
-  `figures.replay` times a logged run on any store, with parallel reads' critical paths
-  (docs/LESSONS.md, Pricing latency); `RequestLogTest` checks the log and the injection.
-
-## Arms
-
-| Arm | Inserts | Updates and deletes |
-|---|---|---|
-| `mor-v2-file` | a new data file per batch | Parquet position-delete files, one per touched data file per batch, never merged |
-| `mor-v2-partition` | the same | one position-delete file per batch, matched to every older data file by sequence number (as Iceberg 1.12 plans them) |
-| `mor-v3` | the same | deletion vectors in a Puffin file per batch; a data file's DV is replaced, merged with its predecessor |
-| `cow` | a new data file per batch | every touched data file is rewritten whole |
-| `tailcow-b`, `tailcow-c` | merged into open tail *data files* by policy B or C | DVs, except in tail files being merged |
-| `rmor-c` | as `tailcow-c` | regional merge-on-read: a batch rewrites each region it changes when it changes at least θ (`rmorRewriteShare`) of the region's live rows. A sealed file's row group goes, with the batch's changes, into the batch's new data file, and a DV covers the old row group; an open tail file is rewritten whole and takes its place in the tail. Below θ, DVs. A file with no live row left leaves the table. θ = 0 rewrites every region a batch changes; above 1 it is `tailcow-c`. The format is Iceberg's, and no store needs to append |
-| `rmor-c-footer` | as `rmor-c`, its data files created as objects the store can extend | `rmor-c`'s rewrites at θ = 0, each old row group hidden by a footer appended to its file, listing the file's other row groups, instead of a DV. Each append is a new version of the data file (length, split offsets, metrics), as RMoW's are. No delete files; the rows after an elided row group move up in their file, which is why θ must be 0 |
-| `rmor-c-kept`, `rmor-c-footer-kept` | as `rmor-c` and `rmor-c-footer`, but a row group of their own | as `rmor-c` and `rmor-c-footer` at θ = 0, with the batch's new data file laid out as RMoW's regions: each rewritten row group is one row group of the same rows (with the batch's changes, sorted by `ts` within itself), and the inserts follow as a row group of their own. The two others sort all the file's rows together by `ts` and cut new row groups, so late inserts land among old regions' rows. Written a row group at a time: each is read, rewritten, encoded and dropped before the next is read; `rmor-c-kept`'s file streams to the store, `rmor-c-footer-kept`'s is held for its single create (docs/HYPOTHESES.md, 2026-11-04) |
-| `rmor-c-clean` | as `rmor-c-kept` | `rmor-c-kept` with a rewrite threshold and a cleaner (`layout.clean`): a batch rewrites a row group only when it changes at least `clean.rewriteShare` of its live rows, and otherwise puts DVs on the rows it changes, their new versions joining the inserts. Then a cleaner (phase `clean`) carries forward the live rows of row groups under `clean.low` of their rows live and unchanged for `clean.age` batches, ranked by (1 − u) · age / (1 + u), within `clean.budget` of the batch's own rows, packed into row groups of the writer's size in the batch's file; a cold file under `clean.drain` live has all its rows carried and leaves the table. DVs cover the carried row groups whole (an unregistered draft: docs/drafts/strides-and-cleaner-2026-11-04.md) |
-| `rmor-density` | as `rmor-c-kept` | deferred merges (`layout.defer`): a batch merges a region's row group it changes once the row group's dead rows and the batch's changes to it reach θ (`defer.share`) of its rows, folding in the rows of the region that wait in delta row groups (found by id range; each delta row group read whole once a batch, DVs hiding the rows taken). Below θ, DVs, and the new versions wait in delta row groups of the batch's file: one per region, the base row group they left as it is merged and replaced (`defer.deltas` `region`), or one per batch (`write`). A delta row group never merges on its own. No cleaner (docs/HYPOTHESES.md, 2026-11-06) |
-| `rmow-a`, `rmow-b`, `rmow-c` | appended to the tail object as a row group, merged with open tail *row groups* by policy A, B or C | every touched row group is rewritten as a region of its own object (row-group copy-on-write) |
-| `rmow-a-split`, `rmow-b-split`, `rmow-c-split` | as `rmow-*`, but each version's regions go to a new object, and its footer to a footer-only object naming the objects its row groups live in (`file_path`) | the same row-group copy-on-write; no append, so standard S3 and GCS can run them, and whole objects become deletable as versions expire ([docs/DESIGN.md](docs/DESIGN.md#regions-in-separate-objects-split-files)) |
-
-The tail policies (`TailPolicy`) are:
-- **A:** never merge.
-- **B:** re-merge the one open tail until it reaches `tailSealBytes`.
-- **C:** tiered: `tierFanout` open units of one level merge into one unit a level up.
-
-RMoW against TailCoW therefore isolates the layout, a single appendable object against separate
-data files. TailCoW against MoR-v3 isolates the tail-merge policy. RMoR-C against TailCoW-C
-isolates update handling (regions rewritten against DVs on rows). RMoR-C with footers isolates the
-two parts of RMoR-C against RMoW-C: against RMoR-C, what hides the old row group (a new footer
-against a DV); against RMoW-C, where the rewritten region goes (a new data file against appended to
-its object). RMoW against RMoW-split
-isolates append: the same policy, footer and reads, with history kept inside one object or spread
-over objects that can be deleted.
-
-Hybrid `-dv` arms (RMoW's layout with DVs on sealed row groups) ran in one ablation and were
-removed; [docs/DESIGN.md](docs/DESIGN.md#deletion-vectors-on-an-appendable-file-an-ablation-removed)
-has what they showed.
-
-### Knobs (`layout` in the config)
-
-| Knob | Meaning |
-|---|---|
-| `codec` | The Parquet codec. The default is zstd. |
-| `rowGroupBytes` | The row-group target of data files and the initial load, as Parquet counts it (buffered bytes), so row groups are smaller on disk: about a third of a 1 MiB target for this schema, three quarters of a 4 MiB one, and 15.2 MiB of a 16 MiB one (the default). RMoW compaction packs row groups up to the size the writer's come out at on disk. |
-| `targetFileBytes` | The size at which data files, and an appendable file's live bytes, roll over. |
-| `sortWrites` | Sort every write by `ts` (on by default). |
-| `tailSealBytes` | The compressed size at which an open tail unit is sealed (policies B and C). An RMoW unit is a row group of inserts; a TailCoW unit is a batch's data file, updated versions included. |
-| `tierFanout` | How many units of one level merge into one (policy C). |
-| `maxRowGroupsPerFile` | The RMoW tail rolls over at this many row groups. Footers cost about 1.2 KB and 30 µs per row group. |
-| `footerOrder` | Where RMoW lists a row group that replaces another. `logical` (the default) puts it in the replaced one's place, so footer order, which is row order, stays id order and a sorted file stays sorted. `offset` lists it last, keeping the footer in file-offset order. The Parquet spec requires neither, and the I/O is the same ([docs/DESIGN.md](docs/DESIGN.md#footer-order)). |
-| `writerFooters` | What every arm's writer holds of the footers it reads (I/O parity rule 6). `transaction` (the default): a file version's footer is read once per batch or compaction and reused within it. `open`: every open reads it again, as parquet-java does. Nothing carries over from one transaction to the next. It replaces `writerCachesFooters`, under which RMoW's writer kept its footers across batches. |
-| `footerPrefetchBytes` | Writers (locate scans, merge reads, compaction) prefetch this tail on a file's first footer probe, so a footer costs 1 request instead of 2. 0 (the default) means stock parquet-java. Each reader model sets its own (`reads.readers`). |
-| `locate` | `oracle` (the default) takes row positions from an in-memory index, at no cost. `scan` finds them the way a MERGE would, in a timed `locate` phase checked against the index. MoR scans `id` and `_pos` of every file whose `id` bounds may hold a target, with row groups pruned to the targets' one `id` range; RMoW looks the ids up in its footers' row-group statistics. `keys` (since 2026-11-10) is `scan` with the MoR family's row groups pruned by each target, as files are: a writer reads only the row groups whose `id` statistics, in the footer it holds under `writerFooters` `transaction`, may hold one. Iceberg's filters stop pruning by a list of values past 200 of them (`IN_PREDICATE_LIMIT`), so a MERGE of thousands of changes prunes at best to their range; `keys` is an enhancement an engine could make (lab page reader-changes, Writers). Files of at most 1 MiB, fetched whole, are pruned as under `scan`. |
-| `reads.windows` | Windows read at each probe under every reader (`read_window`; docs/HYPOTHESES.md, 2026-11-07): for each column in `by` (`id`, `ts`), `count` windows (default 5) of `fraction` (default 0.01) of the column's span at the probe, centred at (i + 1/2) / `count` of it, each a read of its own, checked against the oracle. The newest-rows read covers the end of the event time, these the rest. Off when absent, and then left out of the configuration's hash. |
-| `reads.readers` | The reader models every probe runs under, on the same table state. The first is primary; the default is `one-footer`, then `stock`. `one-footer` opens each file at one version and reads that version's one footer once, in one request (a 64 KiB prefetch), then only the row groups it needs. `stock` is stock Iceberg today: one split per row group (`FileScanTask.split`), each split re-reading the footer with two requests. Each model also sets `splitTargetBytes` and `parallelism`, the threads a read's split tasks run on. With `sortedRead`, the model also reads the table in event-time order at each probe (`read_sorted`), on one thread: a merge of the table's row groups, each a sorted run, opened when the merge reaches its smallest `ts`, so it holds every row group whose event times overlap. A file of at most 1 MiB, which Iceberg fetches whole, is decoded and sorted in memory. It needs `footerCache`, and every run sorted: sorted writes and an initial load in event-time order (`initialJitterRows` 0); a row out of order stops the run. Under `skipDeadRowGroups` (since 2026-11-10) it leaves out each row group the file's deletes cover whole, as the full read does; before, it skipped only whole files. Left out of the configuration's hash when off. |
-| `reads.rangeEvery` | Also read the newest 1% (`read_recent`) and the windows (`read_window`) after every this many batches, between the probes, which add the full, time-travel and sorted reads (since 2026-11-12; absent: only at the probes, and then left out of the configuration's hash). The range reads are cheap, so a run can take them at every snapshot; they change no write's request or byte (`SuiteKnobsTest`). |
-| `compactEvery` | Check the compaction triggers every this many batches (0 means never). MoR-family arms bin-pack files smaller than `compactSmallFileFraction` of the target and files whose delete ratio is at least `compactDeleteRatio`, as Iceberg's `RewriteDataFiles` does. RMoW triggers on space and on reads separately: it rewrites an appendable file, or moves the live row groups out of a split file's objects, whose dead bytes are at least `compactGarbageRatio` of their length; and it packs small sealed row groups once a file holds `compactSmallRowGroups` of them ([docs/DESIGN.md](docs/DESIGN.md#compaction)). When to compact is an outcome: see `analysis/compaction.py`. |
-| `compactMinInputFiles` | The MoR family's compaction as Iceberg's `RewriteDataFiles` plans a bin-pack, for a schedule that checks it after every write (`compactEvery` 1; since 2026-11-12). The files the two rules above pick form one group (Iceberg's reach 100 GB), rewritten into files of up to the target size only when it holds at least this many files (Iceberg's `min-input-files`, default 5) and more than one, or more than one and over the target size, or a file with `compactDeleteRatio` of its rows deleted; otherwise nothing is rewritten. Absent: groups of up to the target size, each rewritten unless it is one file with few deletes, as before (and left out of the configuration's hash). |
-| `inserts` | Where the region designs put inserts (since 2026-11-12). Absent (or `tail`): into the tail, as the tail policy merges it, as before (and left out of the configuration's hash). `event-time`: each into the live row group whose event-time range holds it (in a gap, the one before; before the first, the first), which the batch rewrites as it rewrites one an update changes, so no two row groups overlap in event time (`EventTimeRegions`; docs/HYPOTHESES.md, 2026-11-12). A row group grown past the rows of the initial load's largest is cut, never between two rows of one event time: the newest, which rows on time join, into full row groups and the rest; an older one once it holds two full ones' rows, into equal parts. RMoW keeps a cut row group's pieces in its place, and puts the newest piece in the tail file. `rmor-density` merges a row group once the rows that join it, those waiting included, reach θ of its rows, and until then they wait in delta row groups. The writer finds the row groups from its index of them and reads the footers of the files whose event-time bounds overlap them (`locate`, under `scan` or `keys`). Read by `rmow-*` (not split), `rmor-c-kept`, `rmor-c-footer-kept` and `rmor-density`; refused by the other region arms; ignored by the MoR family and `cow`. Moot without inserts; refused with a workload that also updates or deletes, and with compaction. Needs an initial load in event-time order (`initialJitterRows` 0). |
-| `rmorRewriteShare` | `rmor-c`'s θ: a batch rewrites a region it changes (a sealed file's row group, or an open tail file) when it updates or deletes at least this share of the region's live rows, counted per batch, and otherwise puts DVs on the rows. 0 (the default) rewrites every region a batch changes; above 1 none, which is `tailcow-c`. |
-| `writerSkipsDeadRowGroups` | The MoR family's writers (their scans to locate rows, merge reads and compaction) read no row group the file's deletes cover whole, nor any file whose DV covers every row, as the `skipDeadRowGroups` reader does. Off (the default) is Iceberg's MERGE scan, which fetches such row groups and drops their rows. In practice only RMoR-C has them: on two configurations, it changed no other arm's request or byte. Configurations that report RMoR set it, with the `cached-skip` reader beside a stock one. |
-| `updateRead` | What a write reads of the rows it updates; a new version is its old row with some columns set. Absent (or `id`): nothing beyond the locate's `id` and `_pos`, so the MoR family's new versions are made blind, as before 2026-11-05. `row`: every column of each row group holding a row the batch updates, deletes applied, once: the row groups and files a write rewrites are read whole anyway (`merge-read`), the others in phase `update-read`, after the locate, as Spark plans a copy-on-write MERGE (find the rows by key, then read). `scan`: MoR (v2, v3) reads every column in its locate scan, one pass, as Spark plans a MERGE on a merge-on-read table; the arms that rewrite regions plan as under `row`. RMoW and CoW read the row groups or files they change whole under any setting. Left out of the configuration's hash when absent. |
-| `defer` | `rmor-density`'s settings, an object (absent: the defaults; left out of the configuration's hash when absent): `share` (θ, 0.06) and `deltas` (`region` or `write`). |
-| `cut` | The arms that keep row groups whole (`rmor-c-kept`, `rmor-c-footer-kept`, `rmor-c-clean`, `rmor-density`): a row group a batch rewrites is written as several row groups, cut where the batch changes it, an object (absent: one row group, as before; left out of the configuration's hash when absent). Its rows are counted in strides of `strideRows` (20,000, Iceberg's page row limit, where every column of these rows starts a page) from its first row; a stride is flagged when the batch changes a row in it or the file's DV holds a dead row there (`at` `changed`, the only kind). Each run of flagged strides is a row group, and so is each run between them; an unflagged run shorter than `minStrides` (4) joins the flagged run beside it. Rows folded in from delta row groups go to the piece whose rows' ids span them, or the nearest. The old row group is dead whole, so the skipping reader and writers skip it (docs/HYPOTHESES.md, 2026-11-09, D3-D4; docs/drafts/region-cut-2026-11-09.md). |
-| `clean` | `rmor-c-clean`'s settings, an object (absent: the defaults; left out of the configuration's hash when absent): `rewriteShare` (0.25), `low` (0.5), `age` (2 batches), `budget` (0.5), `drain` (0.5), and `examine` (0.1: files with at least this share of their rows dead have their footers read to judge their row groups). |
-
-### The workload (`workload` in the config)
-
-Every arm replays one seeded op log (`OpLogGenerator`): an initial load, then batches of inserts,
-updates and deletes on disjoint rows. Ids grow with insertion, and writes keep rows in roughly id
-order, so a range of ids stands for a region of the table. The manifest records the log's SHA-256.
-
-| Knob | Meaning |
-|---|---|
-| `seed`, `initialRows`, `batches`, `opsPerBatch` | The log's seed and size. |
-| `insertFrac`, `updateFrac`, `deleteFrac` | Each batch's operations, by share. The rows updated and deleted per batch are fixed. |
-| `keyDist` | How updates and deletes pick rows. `RECENCY_EXP` (the ingest window): a row's age in rows, newest first, is exponential with mean `recencyMeanBatches` batches of inserts. `UNIFORM`: every live row alike. `REGIONS`: by region, each with a heat drawn once from the seed, `U^-regionSkew` for a uniform U, so regions ranked by heat follow Zipf's law with exponent `regionSkew`. A region is picked with weight heat times live rows (as of the batch's start), then a row in it. Hot regions can be anywhere and stay hot; a skew of 0 is uniform over live rows. |
-| `regionRows` | Consecutive ids per region (default 100,000). A region stands for a row group: a 16 MiB one holds 513,700 rows of this schema (the sweeps' regions), a 4 MiB one about 98,000, a 1 MiB one 10,521, and the initial load's row groups vary by a few percent, so a region need not line up with one. |
-| `regionSkew` | `REGIONS`' Zipf exponent (default 1). On 1M rows and 60 batches of 10,000 operations in regions of 10,521 rows (135 by the end), the hottest tenth of the regions took 12% of the updates at 0, 54% at 1 and 89% at 2. |
-| `updateShare` | The share p of a region's live rows one statement changes. 0 (the default) makes each update and delete a row of its own. Above 0, a statement takes the region of a row the key distribution picks, under any `keyDist`, and changes p of its live rows (at least one), picked uniformly among those the batch has not touched. The batch's deletes are drawn uniformly from the rows its statements changed, and the rest are updated, as a MERGE updates some of the rows it matches and deletes others, so a batch's deletes fall in the regions its updates do. The batch's last statement takes what is left of its updates and deletes, so p counts only up to those per batch over `regionRows`. |
-| `tsStepMicros` | Event time (`ts`) between consecutive inserts, in microseconds (default 1,000). |
-| `lateMedianBatches`, `lateP99Batches` | Insert lateness in event time (`ts`), lognormal, in batches. |
-| `initialJitterRows` | How far, in rows of event time, an initial-load row's `ts` may run ahead of its id's (default 100). At 0 the initial load is in event-time order, which a sorted read needs. The rows that change are the same at any value. |
-
-Logs without regions, the ingest window or uniform keys at an update share of 0, are what they
-were before regions existed (`OpLogGeneratorTest` pins three runs' hashes).
-
-## Layout of the code
-
-| Package | Contents |
-|---|---|
-| `rmow` | The append layer: `OffsetOutputFile` (the stock writer, with positions starting at the object's length), `RegionWriter`, `FooterCodec` (merging Thrift footers), `VersionedInputFile` (one version's view, with the optional footer prefetch), `LogicalFile` with its two layouts `RmowFile` (appendable) and `SplitFile` (an object per version), and `ParquetBatches` (the one read path every arm uses: Iceberg's vectorized reader). |
-| `arms` | `MorArm` (with the subclasses `MorV2Arm`, `MorV3Arm`, `CowArm` and `TailCowArm`), `RmowArm`, `TailPolicy`, `DataFileWriter`, `MadeRows` (a writer's rows, made as the encoder takes them) and `InitialLoad`; `Reader` (the reader models), `Scans` (the one file-scan path every arm uses, and the sorted read), `DeletedRanges` (whether a file's deletes cover a row group whole, a range check on the deletion vector's bitmap), `RowBatch` (a batch's live rows: its deletes and compiled residual applied), `LengthAwareDeleteFilter`, `DeleteCache`, `ChunksHeld` (a scan's column chunks, by row group) and `WriterFooters`. |
-| `workload`, `oracle` | The seeded op log and the reference model. |
-| `io` | `MemFileIO` and `PreadFileIO` (with the fork's atomic operations, `LocalCas`), `TracingFileIO`, `IoTrace`, `RelocatedFileIO` (a run's logical paths on its own prefix), `Spans` (where the time went), `Held` (what is held), `StoreLatency` (injected latency), the SDK recorders (`SdkRecorder`: `S3Recorder`, `AzureRecorder`), and for Azure `AdlsClients`. |
-| `append` | `RegionAppender`, `AtomicAppender` (every store's, through the fork's `SupportsAtomicOperations`) and `EmulatorAppenders` (the emulators' stand-ins). |
-| `bench` | `Runner`, `Phases`, `BenchConfig`, `ThreadCounters` (instructions and cycles), `Store` (mem, local, S3 or Azure) and `Main`; `arms.VersionDump` and `rmow.VersionDigest` dump every version for the interop check. |
-| `fuzz` | `Fuzz`: random configurations through the runner, with the checks beyond a run's own (`bin/fuzz.sh`, [Fuzzing](#fuzzing)). |
-| `micro` | JMH micro-benchmarks (`FooterBench`), and the cloud spikes (`S3ExpressSpike`, `AzureSpike`). |
-| `analysis/` | `interop_check.py` (pyarrow and DuckDB), `summary.py`, `consolidate.py` (every finished run's records in one Parquet file), `plots.py` (figures and a table twin of each), `sweep.py` (runs that differ in row-group size), `layouts.py` (appendable against split files), `compaction.py` (runs that differ in compaction policy: each arm's cheapest policy per read rate and price model), and `compare_runs.py` (exact repeatability). |
-
-## Compatibility
-
-`AppendableParquetTest` builds a file with three versions:
-1. a first row group;
-2. an appended region;
-3. a merged region that replaces the first row group, listed last (offset order) or in its place
-   (logical order, out of offset order).
-
-It then reads each version at its own length. Every check passes with stock Iceberg 1.12.0 and
-parquet-java 1.17.1:
-- all three versions return exactly the rows written;
-- `_pos` follows footer order;
-- a split selects exactly one region, and planned splits read every row once in either order;
-- row-group statistics skip the other regions.
-
-`VersionDumpTest` runs the RMoW arms (the split arms included) with compaction, under
-both footer orders, and dumps every version they write. `analysis/interop_check.py` then reads every version with
-pyarrow 26.0.0 and DuckDB 1.5.6. For each, both readers must list the same row groups, decode the
-same rows (with every payload column checked), number them as Iceberg's `_pos` does, and filter
-by id range without losing rows. A split file's footer-only versions must be reassembled by
-pyarrow's dataset API and refused by its plain reader and by DuckDB, which read no references.
-`SplitFileTest` checks that stock Iceberg refuses them too.
+Until 2026-11-18 this file held the reference sections, and earlier documents cite them as
+"README, <section>". They moved, under the same names: Build and run, Fuzzing, What is measured
+(with Correctness, Where the time went, What is held), I/O parity rules, Layout of the code and
+Compatibility to [docs/HARNESS.md](docs/HARNESS.md); Arms, Knobs and The workload to
+[docs/CONFIG.md](docs/CONFIG.md); The S3 store, The Azure store and Appends to
+[docs/STORES.md](docs/STORES.md). The findings its Status section listed are in
+docs/EXPERIMENTS.md.
 
 ## Status
 
-- **The harness is done** (M0, M1): every arm passes the oracle on the in-memory and local
-  stores (full reads, recent-window reads, and time travel across compactions), and `bin/fuzz.sh`
-  checks random small configurations of every arm and reader (Fuzzing).
-- **The two workloads at 16 MiB row groups** (updates only, inserts only), simulated and their
-  main points measured on S3 Express and Azure Blob on 2026-11-11 (L1–L4 held), were retired on
-  2026-11-16 for the 128 MiB results; what they taught is in [docs/LESSONS.md](docs/LESSONS.md).
-  The cloud check of the simulation stands
-  ([lab/pages/simulation-cloud.md](lab/pages/simulation-cloud.md)): priced from each VM's own
-  twin and latency test, within 4.0% of measured on S3 Express and 12.3% on Azure Blob.
-- **At Iceberg's 128 MiB row groups** (D1–D4, on havoc;
-  [lab/pages/region-cut.md](lab/pages/region-cut.md)), RMoR with copies cut where a write changes
-  reads 0.12 of what RMoR-density reads a write, with windows at 1.16 times their live bytes,
-  and writes 3.04 times their bytes.
-- **Earlier experiments** (the mixed workload, Iceberg's defaults, the calibrations, the base point
-  and its sweeps in the cloud, RMoR's rerun, the tuner) were retired on 2026-11-12 with their runs
-  and pages. What they taught, from the measurement method to the results that carry over, is
-  [docs/LESSONS.md](docs/LESSONS.md).
-- **Every design on both workloads at Iceberg's sizes** (W1–W5 in
-  [docs/HYPOTHESES.md](docs/HYPOTHESES.md); campaign `w128` on havoc, 2026-11-13/14;
-  [lab/pages/suite-128.md](lab/pages/suite-128.md)): one definition of each design, the inserts
-  placed by the event-time merge (`layout.inserts`), MoR compacted as Iceberg plans its bin-pack,
-  and range reads after every write. W1 (as far as it ran) to W5 held at the last write, as
-  registered (earlier, RMoR-density's window often read past W2's bound). On the updates RMoR's and
-  RMoW-external's windows read 1.16 and 1.06 times their live bytes, RMoR-density's 1.60 and MoR's
-  14.4. On the inserts RMoR-density writes 1.17 times MoR (compacted)'s bytes, and its windows
-  read 0.15 of theirs at the last write (0.22 to 0.58 before it). It pays in requests, for its
-  delta row groups. The designs that merge every
-  late row at once are projected on the inserts, not run
-  ([lab/pages/inserts-128.md](lab/pages/inserts-128.md)).
-  The model behind that projection missed RMoR-density's writes by 26%
-  ([lab/pages/model-128.md](lab/pages/model-128.md)), so the projection awaits a revision.
-- **The 128 MiB suite in simulated time** ([lab/pages/workloads-128.md](lab/pages/workloads-128.md);
-  each phase's work from laptop twins of the nine runs, campaign `w128-twins`, which equal havoc's
-  in every record). On S3 Express, with writers that prune only to a write's range of keys
-  (`locate` `scan`), on the updates RMoR writes in 18.9 s on average against MoR's
-  25.8 and reads a 1% range in 1.7 s against 6.5; RMoW-external is the fastest at both, 16.1 s and
-  1.0 s, as its appended footers narrow its files' statistics and it reads no deletion vectors.
-  MoR's writes and range reads slow as snapshots are added (its writes from 8.6 s over the first 10
-  to 33.3 s over the last 10), RMoR's and RMoW-external's hold steady, and RMoR-density's writes
-  slow from 8.0 s to 21.7 s, mostly in the scan that finds a write's rows (2.2 to 13.3 s a write):
-  it reads the key column of every row group in the write's range of keys, and RMoR-density's cut
-  copies multiply its row groups (58 to 2,480). On the inserts RMoR-density reads a range in 3.2 s
-  against MoR's 10.1, for writes of 4.7 s against 0.45 (from twins since rerun without the check,
-  below). Iceberg's compaction halves MoR's range read after 240 writes, for slower writes.
-- **Writers that prune row groups by each changed key at 128 MiB** (K1–K3 of 2026-11-16, campaign
-  `w128-keys` on the laptop, 2026-11-17; [lab/pages/suite-128.md](lab/pages/suite-128.md)): K2 held; K3 held for the region
-  designs but not for MoR, whose write gained 12% (its bound was 5%): `keys` halves the bytes
-  its locate reads, and its work follows them. K1's control held in requests and bytes; MoR's full
-  scans ran 6.4% more instructions than in its twin (a JIT compile of the benchmark's own check of
-  each row, found by a diagnostic rerun), which at each run's own pace is
-  5.1% more time, within the spread of the other designs' reads between the two runs (5.3% less to
-  4.4% more). The check has since left measured runs (README, Correctness).
-- **The 128 MiB updates measured without the check** (campaign `w128-keys-2` on the laptop,
-  2026-11-18, each run equal in every record to its `w128-keys` run and to its verification run
-  on havoc, which checked every row;
-  [lab/pages/workloads-128.md](lab/pages/workloads-128.md)): the results page times the updates
-  from these runs, writes, reads and compactions alike. On S3 Express RMoR writes in 11.8 s on
-  average (18.9 with writers that prune only to a write's range of keys), RMoW-external in 11.2
-  (16.1), RMoR-density in 13.7 (20.3) and MoR in 22.6 (25.8). RMoR-density's writes slow from
-  6.9 s over the first 10 to 10.9 over the last 10, in the footers and deletion vectors of the
-  files a write may change. Without the check the reads ran up to 7.9% fewer instructions (MoR's
-  full scans); the writes ran the same instructions to within 2.2%, at a pace that moved from 7%
-  faster to 9% slower between the two runs.
-- **RMoW-append's and the inserts' twins measured without the check** (campaign `w128-twins-2` on
-  the laptop, 2026-11-18, each equal in every record to havoc's run and to the twin it replaced,
-  since deleted; [lab/pages/workloads-128.md](lab/pages/workloads-128.md)): on S3 Express
-  RMoR-density reads a range on the inserts in 3.3 s against MoR's 10.1, for writes of 5.1 s
-  against 0.46. Without the check their reads ran 0.2% to 6.2% fewer instructions; RMoR-density's
-  and RMoW-append's reruns ran at a slower pace, so their writes took 18% and 12% more time for the
-  same instructions.
-- **Next:** the density hypothesis where density can choose
-  ([docs/drafts/density-plan-2026-11-16.md](docs/drafts/density-plan-2026-11-16.md): a sparse
-  workload next), and a cloud run at 128 MiB after it ([docs/ROADMAP.md](docs/ROADMAP.md)). GCS needs APPEND in the
-  fork first; split files can also run on standard S3.
+- **Results at 128 MiB** ([lab/pages/workloads-128.md](lab/pages/workloads-128.md)): every design
+  on both workloads, simulated on S3 Express and Azure Blob from local runs. On the updates RMoR,
+  RMoW-external and RMoR-density write in about half MoR's time and read a 1% range 3 to 6 times as
+  fast; RMoW-append, copying whole row groups, writes the slowest. docs/EXPERIMENTS.md has the
+  numbers.
+- **The simulation checked in the cloud** at 16 MiB row groups (2026-11-11): priced from each VM's
+  own latency test, within 4.0% of measured on S3 Express and 12.3% on Azure Blob
+  ([lab/pages/simulation-cloud.md](lab/pages/simulation-cloud.md)).
+- **Next:** the density plan
+  ([docs/drafts/density-plan-2026-11-16.md](docs/drafts/density-plan-2026-11-16.md)): a compaction
+  that merges RMoR-density's pieces back (step 3), the sparse workload where θ chooses which row
+  groups to copy (step 2), then the cloud run at 128 MiB ([docs/ROADMAP.md](docs/ROADMAP.md)).

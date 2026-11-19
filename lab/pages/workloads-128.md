@@ -375,7 +375,7 @@ FILES = {n: [gb(ST[ST.label == l], n, step, col="data_files") for step in (0, 24
          for l, n in [("w128-upd-density", "RMoR-density"), ("w128-upd-mor", "MoR")]}
 # Each w128-keys-2 run against its configuration's w128-keys run (suite-128.md, K1-K3): the same
 # writers and the same code but for the check of each row a read returns, which only the earlier
-# run's reads made (README, Correctness). Every record's requests and bytes the same (steps_diff;
+# run's reads made (docs/HARNESS.md, Correctness). Every record's requests and bytes the same (steps_diff;
 # the build stops otherwise). Over the run's writes (batch), compactions and reads (cached-skip),
 # less one: work (phase_work, at each run's own pace), user-mode instructions, and work an
 # instruction (the pace)
@@ -408,7 +408,7 @@ SAME_TWIN = sum(q(f"""SELECT count(*) AS n FROM steps_diff('{t.havoc}', '{t.twin
 assert len(TWINS) == len(ING) + 1 and SAME_TWIN == 0, (len(TWINS), SAME_TWIN)
 DEN_RISE = mean_over(SNU, "RMoR-density", WRITE, 231, 240) - mean_over(SNU, "RMoR-density", WRITE, 1, 10)
 
-# What reads and writes hold (README, What is held): the most a phase held at once, its encoded
+# What reads and writes hold (docs/HARNESS.md, What is held): the most a phase held at once, its encoded
 # bytes (the same in every run of a configuration; havoc's runs), a read's under cached-skip, a
 # probe's five windows the most of them
 HELD_OPS = {"batch": "snapshot write", "compact": "compaction", "read_window": "1% range read",
@@ -560,7 +560,7 @@ laptop, which counts requests, bytes and instructions, with writers that find th
 above. RMoW-append, which finds its rows from its footers alone, and the inserts are timed from
 runs on havoc, which counted requests and bytes, and their twins on the laptop, which replay the
 same op log and count instructions. Every read timed here only counts the rows it returns, leaving
-the check of each row to separate runs (README, Correctness). A phase's time is its CPU at the laptop's speed, plus its
+the check of each row to separate runs (docs/HARNESS.md, Correctness). A phase's time is its CPU at the laptop's speed, plus its
 requests priced by size from a latency test of the store (S3 Express on a `c7a.4xlarge` in
 usw2-az3, Azure Blob on a `D8as_v6` in westus). What each design writes, stores and holds is
 counted from havoc's runs, which the laptop's runs of the updates match byte for byte ([the
@@ -1211,7 +1211,7 @@ WRITE_REST = HELD[(HELD.what == "snapshot write") & ~HELD.name.isin(["RMoW-appen
 
 What each design's reads and writes held at most at once, in GB of encoded data: the column
 chunks fetched for the row groups being decoded, a writer's buffered row group, data waiting for
-its request, and the deletion vectors loaded (the repository's README, What is held). It is counted where the code holds data, so every run of a configuration holds the
+its request, and the deletion vectors loaded (the repository's docs/HARNESS.md, What is held). It is counted where the code holds data, so every run of a configuration holds the
 same; it is not the JVM's heap. Reads run one at a time, on one thread.
 
 Reads that take a row group at a time hold about one row group in every design: at their most over

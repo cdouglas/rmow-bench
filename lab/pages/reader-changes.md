@@ -60,7 +60,7 @@ def less(n, store="S3 Express"):
 
 Every design is an Iceberg table, and stock Iceberg 1.12 reads each one correctly: an appending
 design's file is a Parquet file whose newest footer, at the length the table records, lists its
-live row groups (README, Compatibility). But stock Iceberg does work some layouts multiply, so
+live row groups (docs/HARNESS.md, Compatibility). But stock Iceberg does work some layouts multiply, so
 every design is read through Iceberg's vectorized reader with the changes below, which an engine
 makes or could make. Each changes what a read fetches, never which rows it returns, and each
 applies to every design that has what it changes.

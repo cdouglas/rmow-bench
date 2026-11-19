@@ -35,7 +35,7 @@ title = "Campaign w128's nine configurations again on the laptop, for their work
 select = ["where:label LIKE 'w128-%' AND host <> 'havoc' AND json_extract(manifest, '$.verify') IS NULL"]
 
 [campaigns.w128-twins-2]
-title = "Four of campaign w128-twins' configurations again on the laptop, measured without the oracle in the reads (docs/HYPOTHESES.md, 2026-11-18; README Correctness: they only count their rows): w128-upd-append and the three inserts, one at a time with a 12g heap and no request log, from build snapshot 20261117T225741Z-6daa88784286 (main 6daa887, the fork at a32bc97, the w128-keys-2 runs' jar and libraries). Havoc's w128 run of each, which checked every row, vouches for it (steps_diff)"
+title = "Four of campaign w128-twins' configurations again on the laptop, measured without the oracle in the reads (docs/HYPOTHESES.md, 2026-11-18; docs/HARNESS.md, Correctness: they only count their rows): w128-upd-append and the three inserts, one at a time with a 12g heap and no request log, from build snapshot 20261117T225741Z-6daa88784286 (main 6daa887, the fork at a32bc97, the w128-keys-2 runs' jar and libraries). Havoc's w128 run of each, which checked every row, vouches for it (steps_diff)"
 select = ["where:label LIKE 'w128-%' AND host <> 'havoc' AND json_extract(manifest, '$.verify') IS NOT NULL"]
 
 [campaigns.w128-keys]
@@ -43,7 +43,7 @@ title = "Campaign w128's five update configurations with writers that prune row 
 select = ["where:label LIKE 'w128k-%' AND json_extract(manifest, '$.verify') IS NULL"]
 
 [campaigns.w128-keys-2]
-title = "Campaign w128-keys again, measured without the oracle in the reads (2026-11-17, README Correctness: they only count their rows), on the laptop alone, one at a time with requests logged, from a build snapshot of main; and a verification run of each (--verify, on havoc, excluded), which steps_diff ties to it. The results pages time the updates from these runs; suite-128.md judged K1-K3 on w128-keys"
+title = "Campaign w128-keys again, measured without the oracle in the reads (2026-11-17, docs/HARNESS.md, Correctness: they only count their rows), on the laptop alone, one at a time with requests logged, from a build snapshot of main; and a verification run of each (--verify, on havoc, excluded), which steps_diff ties to it. The results pages time the updates from these runs; suite-128.md judged K1-K3 on w128-keys"
 select = ["where:label LIKE 'w128k-%' AND json_extract(manifest, '$.verify') IS NOT NULL"]
 
 [campaigns.diag-mor]

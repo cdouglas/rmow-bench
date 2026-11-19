@@ -15,7 +15,7 @@
 #   --log-held       log every change in what the phases hold in memory (held.jsonl)
 #   --verify         verification runs: every read checked row by row against the reference
 #                    model (the oracle), unmeasured; without it the runs measure, and their reads
-#                    only count rows (README, Correctness)
+#                    only count rows (docs/HARNESS.md, Correctness)
 #
 # The snapshot, results/builds/<UTC>-<git sha>[-dirty]/, holds a copy of the project jar, hard
 # links to its released dependencies (a released jar's name changes with its version, so a link

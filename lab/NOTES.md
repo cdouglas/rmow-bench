@@ -23,12 +23,12 @@ What anyone (or Claude) reading these results must know. Keep it short and curre
   (manifest `host.thread_cpu_per_wall`), and `phase_breakdown` and `phase_work` correct for it
   (`run_clock`; since 2026-10-27, which cut every laptop run's `work_ms` by 10.0%).
 - Held: runs from 2026-10-29 carry each phase's peak of what its readers and writers hold
-  (`held_rows`, `held_bytes`, `held_<kind>`; README, What is held), as exact as requests and
+  (`held_rows`, `held_bytes`, `held_<kind>`; docs/HARNESS.md, What is held), as exact as requests and
   bytes on one thread. A parallel reader's peak (`cached-p8`) depends on how its tasks
   interleave: two laptop runs of one configuration differed in 3 to 9 of 19 of its probes (the
   retired `rmor-*` runs), and nowhere else. With `--log-held` a run also writes every change to `held.jsonl`, which is not yet a lab
   source.
-- Builds: runs from 2026-10-26 are on the atomicio fork (README, Appends). They send the same
+- Builds: runs from 2026-10-26 are on the atomicio fork (docs/STORES.md, Appends). They send the same
   requests and bytes as the release build, but MoR-v3's and TailCoW-C's DV files are 18 bytes
   larger (Puffin's `created-by`). The configuration lost `store.append` and `store.adlsReads`, so a
   rerun has a new `config_hash` under the same label.
