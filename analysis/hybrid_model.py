@@ -44,6 +44,23 @@ Update policies (`--policy`):
                           whole (a reader that skips dead row groups skips it).
                    shrink RMoR's, a row group copied whole (GRAIN rg), cut into row groups of
                           at most M MiB (default 16) whatever the write changes; M is that size.
+  POLICY+merge:F:S:C:D[:M][:cap=K][:budget=B]
+                 the merge compaction (density plan step 3), after every write: a compaction
+                 planned from the table's own signal, apart from the write. It drains objects
+                 under D of their rows live whose live pieces no write changed for C writes;
+                 merges runs of adjacent base pieces (by id), none changed for C writes, into row
+                 groups of up to M of RG rows (default 1), where a run holds a piece under S of
+                 that, one under
+                 half live, or one of a drained object, folding in the rows waiting for them in
+                 delta row groups; and
+                 merges a region's delta row groups tiered, F of one level into one a level up
+                 (a write's are level 0). Its pieces go to an object of its own (or several of
+                 TARGET rows); DVs cover the old pieces whole. With cap=K (after bLSM), a region's
+                 delta row groups are leveled instead: one a level 1..K, a write's merged into
+                 level 1, a merge past u * T^level (u a write's rows, T the top level's size over
+                 u to the power 1/K, at least 2) going on up. With budget=B, at most B MB a write
+                 (one action at least): the merges back, then the regions with the most delta
+                 row groups first; the rest wait.
 
 Ingest policies:
   tail           inserts appended as row groups sorted by event time, to a tail object until it
@@ -89,6 +106,7 @@ WINDOW_AT = (0.1, 0.3, 0.5, 0.7, 0.9)  # the runs' read_window: reads.windows, 5
 # B a 160 MiB seal let four 4-write units merge, which the runs' 189 MB did not (2026-11-07).
 INSERT_B = B
 SCALED = False  # --rg-mib given: row groups and files sized from it and --target-mib
+DELTA_FILES = False  # --delta-files: a write's and a compaction's delta row groups in files apart
 
 
 EMPTY = np.array([], np.int64)
@@ -102,6 +120,8 @@ class Table:
         self.rows, self.dead, self.ndead, self.obj = [], [], [], []
         self.lo, self.hi, self.tlo, self.thi = [], [], [], []
         self.scattered, self.delta = [], []
+        self.changed, self.level = [], []  # the write that made or last changed it; delta level
+        self.now = -1  # the write being applied
         self.objects = {}  # object -> its pieces in footer order
         self.next_obj = 0
 
@@ -109,6 +129,7 @@ class Table:
         p = len(self.rows)
         self.rows.append(ids); self.dead.append(None); self.ndead.append(0); self.obj.append(-1)
         self.scattered.append(False); self.delta.append(delta)
+        self.changed.append(self.now); self.level.append(0)
         self.lo.append(0); self.hi.append(0); self.tlo.append(0); self.thi.append(0)
         self.set_rows(p, ids, dead)
         return p
@@ -225,13 +246,14 @@ def fill_gaps(flags, m):
 # ---------------------------------------------------------------------------------------------
 # (1) updates
 
-def run_updates(data, policy, arg, by_region=False):
+def run_updates(data, policy, arg, by_region=False, merge=None):
     n0, n, ts, writes = data
     t = Table(n, ts)
     initial(t, n0)
     out = []
     for w, (ins, upd, dele) in enumerate(writes):
         assert len(ins) == 0, "the update workload has no inserts"
+        t.now = w
         changed = np.concatenate([upd, dele])
         is_upd = np.zeros(len(changed), bool); is_upd[:len(upd)] = True
         cp, cpos = t.piece_of[changed], t.pos_of[changed]
@@ -274,8 +296,13 @@ def run_updates(data, policy, arg, by_region=False):
         cp, cpos, is_upd, changed = cp[o_], cpos[o_], is_upd[o_], changed[o_]
         touched, start = np.unique(cp, return_index=True)
         end = np.append(start[1:], len(cp))
+        for p in touched.tolist():
+            t.changed[p] = w
         t.piece_of[dele] = -1
         fresh = []  # new versions of rows a DV hides, as (row group they left, ids)
+        # rows a copy folded in from delta row groups this write; a row the write also changes
+        # holds its new version in the copy (as the arm's fold does), or none if it deletes it
+        folded_now = []
         copies = []  # (source piece, [("new", ids) | ("kept", first row, end row)], in place?)
         read_units = 0  # rows of the units copied (a write reads a unit it copies whole)
         upd_strides = 0  # rows of strides holding an updated row, in units not copied
@@ -283,7 +310,10 @@ def run_updates(data, policy, arg, by_region=False):
         # what the write reads beyond the locate (updateRead row), by reader: every row group it
         # copies from or holds a row it updates, whole; or only those strides (and deltas folded)
         wread_rg = wread_pg = 0
-        for p, a, b in zip(touched.tolist(), start, end):
+        # base row groups before delta row groups, so a copy folds in a waiting row the write
+        # changes and its new version goes there, as the arm's fold does
+        order = sorted(zip(touched.tolist(), start, end), key=lambda x: t.delta[x[0]])
+        for p, a, b in order:
             rows, nr = t.rows[p], len(t.rows[p])
             pos, uh = cpos[a:b], is_upd[a:b]
             name = policy
@@ -370,6 +400,8 @@ def run_updates(data, policy, arg, by_region=False):
                             ids = rows[r0:r1][keep[r0:r1]]
                             if theta > 0:
                                 folded, rd = fold(t, int(rows[r0]), int(rows[r1 - 1]), rsz)
+                                folded = folded[~np.isin(folded, dele)]
+                                folded_now.append(folded)
                                 if len(folded):
                                     ids = np.sort(np.concatenate([ids, folded]))
                                 read_units += rd; wread_rg += rd; wread_pg += rd
@@ -384,6 +416,8 @@ def run_updates(data, policy, arg, by_region=False):
                 if name == "defer":
                     # a deferred merge folds in the region's new versions from earlier deltas
                     folded, rd = fold(t, t.lo[p], t.hi[p])
+                    folded = folded[~np.isin(folded, dele)]
+                    folded_now.append(folded)
                     ids = np.sort(np.concatenate([ids, folded]))
                     read_units += rd; wread_rg += rd; wread_pg += rd
                 if copy.all() and name == "rmow":
@@ -414,6 +448,8 @@ def run_updates(data, policy, arg, by_region=False):
             else:
                 new_file.extend(qs)
         fr = np.sort(np.concatenate([ids for _, ids in fresh])) if fresh else np.array([], np.int64)
+        if folded_now and len(fr):  # their new versions are in the copies that folded them
+            fr = fr[~np.isin(fr, np.concatenate(folded_now))]
         if by_region and len(fr):  # a delta row group per region: the base row group whose id
             # range holds the row (ranges are disjoint: no inserts), merged this write or not
             bases = [q for q in t.pieces() if not t.delta[q] and t.live(q) > 0]
@@ -424,7 +460,12 @@ def run_updates(data, policy, arg, by_region=False):
                 new_file.extend(t.new(c, delta=True) for c in chunks(fr[region == g]))
         else:
             new_file.extend(t.new(c, delta=True) for c in chunks(fr))
-        if new_file:
+        if new_file and DELTA_FILES:
+            # its delta row groups in a file apart, so the copies' file keeps narrow id bounds
+            for part in ([q for q in new_file if not t.delta[q]], [q for q in new_file if t.delta[q]]):
+                if part:
+                    t.new_object(part)
+        elif new_file:
             t.new_object(new_file)
             nf = sum(len(t.rows[q]) for q in new_file) * B / 1e6
             wsz += [nf / -(-nf // (TARGET * B / 1e6))] * int(-(-nf // (TARGET * B / 1e6)))
@@ -432,11 +473,16 @@ def run_updates(data, policy, arg, by_region=False):
             wsz.append(0.0)  # the write's deletion vectors
         written = sum(len(x[1]) for _, parts, _ in copies for x in parts if x[0] == "new") + len(fr)
         compacted = 0
+        mg = dict(merged_rows=0, merge_read=0.0, merge_requests=0, merge_bases=0, merge_deltas=0,
+                  merge_drained=0, merge_folded=0, merge_deferred=0)
         if policy == "morc" and (w + 1) % arg == 0:
             compacted = compact(t)
+        if merge:
+            mg = merge_back(t, w, *merge[:5], **merge[5])
+            compacted = mg["merged_rows"]
         t.drop_empty_objects()
         t.free_unlisted()
-        wr = dict(written=written * B / 1e6, compacted=compacted * B / 1e6,
+        wr = dict(written=written * B / 1e6, compacted=compacted * B / 1e6, **mg,
                   wread_rg=(ID_SHARE * cand_rows + wread_rg) * B / 1e6,
                   wread_pg=(ID_SHARE * cand_page_rows + wread_pg) * B / 1e6,
                   wread_rg_sizes=rsz["rg"], wread_pg_sizes=rsz["pg"], wput_sizes=wsz,
@@ -510,6 +556,166 @@ def compact(t):
     for a in range(0, len(ids), int(TARGET)):
         t.new_object([t.new(c) for c in chunks(ids[a:a + int(TARGET)])])
     return len(ids)
+
+
+def merge_back(t, w, fan, small, cold, drain, size=1.0, cap=0, budget=0.0):
+    """The merge compaction (POLICY+merge:F:S:C:D[:M][:cap=K][:budget=B]), after write w: drains,
+    merges back adjacent cold pieces, and merges each region's delta row groups, tiered or, with
+    a cap K, leveled (see the module's docstring), in that order, as the arm does; with a budget of
+    B MB a write, until it is spent (one action at least), the regions with the most delta row
+    groups first among theirs.
+    Returns what it did: rows written, MB read, requests (each piece read, a footer of two GETs
+    and a DV an object read from, each object written, and its DVs), and counts."""
+    quiet = lambda p: t.changed[p] <= w - cold
+    sizes = {"rg": []}
+    src = set()  # objects read from
+    made = []  # its new pieces
+    read = 0
+    drained = set()
+    for o, lst in t.objects.items():
+        lv = [p for p in lst if t.live(p) > 0]
+        tot = sum(len(t.rows[p]) for p in lst)
+        if lv and sum(t.live(p) for p in lv) < drain * tot and all(quiet(p) for p in lv):
+            drained.add(o)
+    # base pieces, in id order: runs of quiet ones packed into groups of up to M of RG live rows;
+    # a group is merged if it holds two pieces and a small one, a sparse piece (under half its rows
+    # live, the cleaner's `low`), or a piece of a drained object
+    bases = sorted((p for p in t.pieces() if not t.delta[p] and t.live(p) > 0),
+                   key=lambda p: t.lo[p])
+    groups, cur, cur_rows = [], [], 0
+    rg_cap = int(size * RG)
+    for p in bases + [None]:
+        if p is None or not quiet(p) or (cur and cur_rows + t.live(p) > rg_cap):
+            if cur and ((len(cur) > 1 and any(t.live(q) < small * rg_cap for q in cur))
+                        or any(t.obj[q] in drained or 2 * t.live(q) < len(t.rows[q])
+                               for q in cur)):
+                groups.append(cur)
+            cur, cur_rows = [], 0
+            if p is None or not quiet(p):
+                continue
+        cur.append(p); cur_rows += t.live(p)
+    # delta row groups, by the region (base piece) their first id falls in
+    blo = np.sort(np.array([t.lo[p] for p in bases]))
+    pile = {}
+    for p in t.pieces():
+        if t.delta[p] and t.live(p) > 0:
+            r = int(np.searchsorted(blo, t.lo[p], side="right")) - 1
+            pile.setdefault(r, []).append(p)
+    actions = []  # (priority, rows written, kind, plan)
+    for r, ps in pile.items():
+        carried = [p for p in ps if t.obj[p] in drained]
+        rest = sorted(p for p in ps if t.obj[p] not in drained)
+        merges = [([p], t.level[p]) for p in carried]  # a drained object's deltas move as they are
+        if cap:
+            # leveled: at most one delta row group a level 1..cap; this write's (level 0) merge
+            # into level 1, and a merge past its level's capacity, u * T^level, goes on up (one
+            # merge, written once), the top level unbounded; T from bLSM's rule, the top level's
+            # size over a write's, to the power 1/cap
+            levels = {}
+            for p in rest:
+                levels.setdefault(min(t.level[p], cap), []).append(p)
+            u = sum(t.live(p) for p in levels.get(0, []))
+            if u:
+                top = sum(t.live(p) for p in levels.get(max(levels), []))
+                ratio = max(2.0, (max(top, u) / u) ** (1.0 / cap))
+                inputs, lvl = list(levels[0]), 1
+                while True:
+                    group = inputs + levels.get(lvl, [])
+                    if lvl < cap and sum(t.live(p) for p in group) > u * ratio ** lvl:
+                        inputs, lvl = group, lvl + 1
+                        continue
+                    if len(group) > 1:
+                        merges.append((group, lvl))
+                    else:
+                        t.level[group[0]] = lvl  # alone: it takes the level as it is
+                    break
+        else:
+            by_level = {}
+            for p in rest:
+                by_level.setdefault(t.level[p], []).append(p)
+            lvl = 0
+            while by_level:
+                if lvl not in by_level:
+                    if lvl > max(by_level):
+                        break
+                    lvl += 1
+                    continue
+                q = by_level[lvl]
+                while len(q) >= fan:
+                    merges.append((q[:fan], lvl + 1))
+                    q = q[fan:]
+                    # the merged one waits at the next level, and may merge there in turn
+                    by_level.setdefault(lvl + 1, []).append(-len(merges))
+                by_level[lvl] = q
+                lvl += 1
+        if merges:
+            rows = sum(t.live(p) for ps_, _ in merges for p in ps_ if p >= 0)
+            actions.append(((1, -len(ps)), rows, "deltas", merges))
+    for i, g in enumerate(groups):
+        actions.append(((0, i), sum(t.live(p) for p in g), "bases", g))
+    actions.sort(key=lambda a: a[0])
+    limit = budget * 1e6 / B if budget else float("inf")
+    used = 0
+    nbases = nfold = ndeltas = deferred = 0
+    for _, rows, kind, plan in actions:
+        if used and used + rows > limit:
+            deferred += 1
+            continue
+        used += rows
+        if kind == "bases":
+            g = plan
+            ids = np.concatenate([t.live_rows(p) for p in g])
+            for p in g:
+                read += len(t.rows[p]); sizes["rg"].append(len(t.rows[p]) * B / 1e6)
+                src.add(t.obj[p])
+                t.kill(p, np.arange(len(t.rows[p])))
+            folded, rd = fold(t, t.lo[g[0]], t.hi[g[-1]], sizes)
+            read += rd; nfold += len(folded)
+            ids = np.sort(np.concatenate([ids, folded]))
+            made += [(c, False, 0) for c in chunks(ids, rg_cap)]
+            nbases += len(g)
+            continue
+        # resolve: a merge of a merge reads its inputs' rows once, as one merge would
+        done = []
+        for ps_, lv in plan:
+            rows_ = []
+            for p in ps_:
+                if p < 0:
+                    rows_.append(done[-p - 1][0])
+                    done[-p - 1] = None
+                    continue
+                if t.live(p) == 0:
+                    continue  # a merge back's fold took them
+                rows_.append(t.live_rows(p))
+                read += len(t.rows[p]); sizes["rg"].append(len(t.rows[p]) * B / 1e6)
+                src.add(t.obj[p])
+                t.kill(p, np.arange(len(t.rows[p])))
+                ndeltas += 1
+            done.append((np.sort(np.concatenate(rows_)) if rows_ else EMPTY, lv))
+        made += [(c, True, lv) for x in done if x is not None and len(x[0]) for c in chunks(x[0])]
+    written = sum(len(ids) for ids, _, _ in made)
+    if made:
+        # in id order; with --delta-files, its delta row groups after its others, in files apart
+        made.sort(key=lambda x: (DELTA_FILES and x[1], int(x[0].min())))
+        objs = 0
+        cur, n = [], 0
+        for ids, d, lv in made + [(None, None, None)]:
+            if ids is None or (cur and (n + len(ids) > TARGET
+                                        or (DELTA_FILES and d != t.delta[cur[-1]]))):
+                if cur:
+                    t.new_object(cur); objs += 1
+                cur, n = [], 0
+                if ids is None:
+                    break
+            q = t.new(ids, delta=d)
+            t.level[q] = lv
+            cur.append(q); n += len(ids)
+    else:
+        objs = 0
+    requests = len(sizes["rg"]) + 3 * len(src) + objs + (1 if src else 0)
+    return dict(merged_rows=written, merge_read=read * B / 1e6, merge_requests=requests,
+                merge_bases=nbases, merge_deltas=ndeltas, merge_drained=len(drained),
+                merge_folded=nfold, merge_deferred=deferred)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -745,6 +951,21 @@ def sorted_open(t):
     return best_n, best_rows
 
 
+def file_bounds(t, by):
+    """Each object with a live row's bounds in the manifest, over every piece it lists, the dead
+    ones too (a DV leaves a file's metrics as written), and whether it has dead rows: a read opens
+    every object whose bounds overlap its range, reading its footer and its DV, even where its
+    footer's statistics then rule out every row group."""
+    lo, hi, dv = [], [], []
+    for lst in t.objects.values():
+        if not any(t.live(p) > 0 for p in lst):
+            continue
+        lo.append(min(t.lo[p] if by == "id" else t.tlo[p] for p in lst))
+        hi.append(max(t.hi[p] if by == "id" else t.thi[p] for p in lst))
+        dv.append(any(t.ndead[p] or t.live(p) == 0 for p in lst))
+    return np.array(lo), np.array(hi), np.array(dv)
+
+
 def window_reads(t, by):
     """Reads of 1% of the live rows by `by` (id or ts), pruned by row-group statistics: requests
     (objects, row-group ranges, DVs) and bytes against the window's live bytes, as means over
@@ -759,10 +980,12 @@ def window_reads(t, by):
     rng = np.array([ranges(t, p) for p in ps])
     obj = np.array([t.obj[p] for p in ps]); dv = np.array([t.ndead[p] > 0 for p in ps])
     per = len(lv) / WINDOWS
+    flo, fhi, fdv = file_bounds(t, by)
     reqs, amps = [], []
     for a, b in zip(edges[:-1], edges[1:]):
         hit = (lo <= b) & (hi >= a)
-        reqs.append(rng[hit].sum() + len(np.unique(obj[hit])) + len(np.unique(obj[hit & dv])))
+        opened = (flo <= b) & (fhi >= a)
+        reqs.append(rng[hit].sum() + opened.sum() + (opened & fdv).sum())
         amps.append(phys[hit].sum() / per)
     return dict(win_requests=float(np.mean(reqs)), win_read_live=float(np.mean(amps)),
                 newest_requests=float(reqs[-1]), newest_read_live=float(amps[-1]))
@@ -782,12 +1005,14 @@ def span_windows(t, by, lo_key, hi_key, frac=0.01):
     rng = np.array([ranges(t, p) for p in ps])
     obj = np.array([t.obj[p] for p in ps]); dv = np.array([t.ndead[p] > 0 for p in ps])
     span = hi_key - lo_key
+    flo, fhi, fdv = file_bounds(t, by)
     out, reqs, amps = {}, [], []
     for at in WINDOW_AT:
         a, b = lo_key + int((at - frac / 2) * span), lo_key + int((at + frac / 2) * span)
         hit = (lo < b) & (hi >= a)
+        opened = (flo < b) & (fhi >= a)
         rows = max(int(((key >= a) & (key < b)).sum()), 1)
-        req = float(rng[hit].sum() + len(np.unique(obj[hit])) + len(np.unique(obj[hit & dv])))
+        req = float(rng[hit].sum() + opened.sum() + (opened & fdv).sum())
         amp = float(phys[hit].sum() / rows)
         out[f"w{at}_requests"], out[f"w{at}_read_live"] = req, amp
         reqs.append(req); amps.append(amp)
@@ -899,7 +1124,7 @@ def summarize(name, out, keys):
     print("  ".join(parts), flush=True)
 
 
-UPDATE_KEYS = ["written", "max:written", "compacted", "read_blind", "read_rows", "read_iceberg",
+UPDATE_KEYS = ["written", "max:written", "compacted", "max:compacted", "merge_read", "merge_requests", "read_blind", "read_rows", "read_iceberg",
                "read_pages", "wread_rg", "loc_requests", "end:loc_requests", "wread_requests",
                "requests", "end:requests", "end:objects", "end:pieces", "read_live",
                "page_read_live", "win_requests", "win_read_live", "newest_requests",
@@ -924,13 +1149,16 @@ def main():
                    help="row groups of this many MiB (532,000 rows a 16 MiB one), and files of "
                         "--target-mib's worth of them")
     p.add_argument("--target-mib", type=float, help="the target file size (default 128)")
+    p.add_argument("--delta-files", action="store_true",
+                   help="updates: delta row groups in files of their own, apart from copies")
     p.add_argument("--read-every", type=int, default=1,
                    help="reads after every this many writes, and after the last")
     p.add_argument("--keys", default="", help="updates: report these keys (comma-separated)")
     p.add_argument("--json", help="updates: write each policy's per-write records here")
     a = p.parse_args()
-    global INSERT_B, RG, TARGET, SCALED, READ_EVERY
+    global INSERT_B, RG, TARGET, SCALED, READ_EVERY, DELTA_FILES
     INSERT_B = a.insert_row_bytes
+    DELTA_FILES = a.delta_files
     READ_EVERY = a.read_every
     if a.target_mib:
         TARGET = a.target_mib * 2**20 / B
@@ -941,7 +1169,25 @@ def main():
         records = {}
         for pol in (a.policy or "mor,morc:10,rmor,rmor-stride,rmow,defer:0.25,defer-stride:0.5"
                     ).split(","):
-            name, *args = pol.split(":")
+            base, *extra = pol.split("+")
+            merge = None
+            for e in extra:
+                ename, *eargs = e.split(":")
+                if ename != "merge":
+                    p.error(f"{pol}: unknown {e}")
+                d = [4, 0.5, 5, 0.5, 1.0]
+                kw = {}
+                pos = [v for v in eargs if "=" not in v]
+                for v in eargs:
+                    if "=" in v:
+                        k_, v_ = v.split("=")
+                        if k_ not in ("cap", "budget"):
+                            p.error(f"{pol}: unknown {k_}")
+                        kw[k_] = int(v_) if k_ == "cap" else float(v_)
+                for i, v in enumerate(pos):
+                    d[i] = type(d[i])(v) if i != 2 else int(v)
+                merge = (int(d[0]), float(d[1]), int(d[2]), float(d[3]), float(d[4]), kw)
+            name, *args = base.split(":")
             if name == "copy":  # copy:FORM:GRAIN[:THETA[:M]]
                 arg = (args[0], args[1], float(args[2]) if len(args) > 2 else 0.0,
                        int(args[3]) if len(args) > 3 else 4)
@@ -952,7 +1198,8 @@ def main():
             else:
                 arg = float(args[0]) if args else 0
                 arg = int(arg) if name == "morc" else arg
-            out = run_updates(data, name, arg, by_region="region" in args or name == "copy")
+            out = run_updates(data, name, arg, by_region="region" in args or name == "copy",
+                              merge=merge)
             records[pol] = out
             summarize(pol, out, a.keys.split(",") if a.keys else UPDATE_KEYS + SPAN_KEYS)
         if a.json:

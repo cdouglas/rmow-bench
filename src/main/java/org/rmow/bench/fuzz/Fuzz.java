@@ -289,6 +289,30 @@ public final class Fuzz {
       l.compactMinInputFiles = rs.nextInt(2, 8);
     }
     Integer rangeEvery = chance(rs, 0.3) ? Integer.valueOf(rs.nextInt(1, 3)) : null;
+    // the merge compaction (2026-11-18), from a stream of its own: read by rmor-density alone, as
+    // its compaction, so a seed that draws it compacts after every batch or every few (the other
+    // arms then compact too, as they would at that compactEvery); not with the event-time merge,
+    // which refuses compaction
+    SplittableRandom rm = new SplittableRandom(seed ^ 0xE7037ED1A0B428DBL);
+    if (!eventTime && chance(rm, 0.5)) {
+      LayoutSpec.Merge m = new LayoutSpec.Merge();
+      m.fanout = rm.nextInt(2, 7);
+      m.cold = rm.nextInt(0, 5);
+      m.drain = rm.nextDouble();
+      m.small = rm.nextDouble();
+      m.rowGroupBytes = Math.max(4 << 10, (long) (l.rowGroupBytes * logUniform(rm, 0.1, 1.5)));
+      l.merge = m;
+      if (l.compactEvery == 0) {
+        l.compactEvery = rm.nextInt(1, 4);
+      }
+      m.cap = rm.nextInt(0, 4); // 0: tiers (2026-11-19, drawn last so the draws above stay)
+    }
+    // delta row groups in files of their own (2026-11-20), from a stream of its own: half the
+    // seeds that defer merges, with the merge compaction or without
+    SplittableRandom rd = new SplittableRandom(seed ^ 0x6A09E667F3BCC909L);
+    if (l.defer != null && chance(rd, 0.5)) {
+      l.defer.deltaFiles = true;
+    }
     // A heavy statement empties most of a region only if the batch changes that many rows, and
     // leaves a row group dead but for a few rows only if its region spans the row group: regions
     // of about a row group or a few, and batches that change at least a region's rows.
@@ -814,6 +838,8 @@ public final class Fuzz {
     m.put("insert_frac", c.workload.insertFrac);
     m.put("rg_bytes", c.layout.rowGroupBytes);
     m.put("compact_every", c.layout.compactEvery);
+    m.put("merge", c.layout.merge != null);
+    m.put("delta_files", c.layout.defer != null && c.layout.defer.deltaFilesOrDefault());
     m.put("cut_stride_rows", c.layout.cut == null ? 0 : c.layout.cut.strideRows);
     return JSON.writeValueAsString(m);
   }

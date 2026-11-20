@@ -197,11 +197,58 @@ public final class LayoutSpec {
      * merges); {@code write}, one row group of the write's.
      */
     public String deltas = "region";
+    /**
+     * Whether delta row groups go to files of their own: a write's apart from the row groups it
+     * copies and its inserts, and the merge compaction's apart from the row groups it merges back
+     * (density plan, step 3, 2026-11-20). Each file's id bounds in the manifest then cover its own
+     * rows, so a read by id skips the files of copies outside its range. Null or false: in the
+     * same file. Left out of the configuration's hash when null.
+     */
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public Boolean deltaFiles = null;
+
+    /** {@link #deltaFiles}, with null as false. */
+    public boolean deltaFilesOrDefault() {
+      return Boolean.TRUE.equals(deltaFiles);
+    }
   }
 
   /** The deferred merges' settings in effect. */
   public Defer deferOrDefault() {
     return defer != null ? defer : new Defer();
+  }
+
+  /**
+   * The merge compaction ({@code rmor-density}; docs/drafts/density-plan-2026-11-16.md, step 3):
+   * its settings, or null for none, when RMoR-density compacts as the MoR family does. It runs as
+   * the arm's compaction ({@code compactEvery}, phase {@code compact}): it merges each region's
+   * delta row groups, leveled under a cap or in tiers, merges back runs of adjacent cold row
+   * groups, and drains files mostly dead. Ignored by the other arms. Left out of the configuration's hash when null.
+   */
+  @JsonInclude(JsonInclude.Include.NON_NULL)
+  public Merge merge = null;
+
+  /** The merge compaction's settings. */
+  public static final class Merge {
+    /**
+     * A region keeps at most this many delta row groups, leveled (after bLSM): one a level, a
+     * batch's merged into the first, a merge past its level's size going on up (density plan,
+     * step 3, 2026-11-19). 0: tiers of {@code fanout} instead.
+     */
+    public int cap = 3;
+    /** With no cap, a region's delta row groups merge this many of one tier into one a tier up. */
+    public int fanout = 4;
+    /** A row group is cold once no write has changed it for this many writes. */
+    public int cold = 20;
+    /** A file with fewer live rows than this share of its rows, all cold, is drained. */
+    public double drain = 0.5;
+    /**
+     * Row groups merged back hold about this many bytes on disk (rows at the live files' bytes a
+     * row); a row group moved as it is keeps its size.
+     */
+    public long rowGroupBytes = 32L << 20;
+    /** A row group with fewer live rows than this share of a merged one's is small. */
+    public double small = 0.5;
   }
 
   /**

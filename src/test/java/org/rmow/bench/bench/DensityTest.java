@@ -216,6 +216,147 @@ class DensityTest {
     run(cfg, dir);
   }
 
+  /** The arm's last state record's {@code field}. */
+  private static long last(List<JsonNode> steps, String arm, String field) {
+    long v = -1;
+    for (JsonNode r : steps) {
+      if (r.get("arm").asText().equals(arm) && r.get("phase").asText().equals("state")) {
+        v = r.get(field).asLong();
+      }
+    }
+    return v;
+  }
+
+  /**
+   * RMoR-density with the cut, and the merge compaction after every batch: tiers of 2, cold after
+   * 2 batches, merged row groups of 64 KiB (a quarter of the writer's), on more batches.
+   */
+  private static BenchConfig merged() {
+    BenchConfig cfg = updates();
+    cfg.workload.batches = 16;
+    cfg.layout.updateRead = "row";
+    cfg.layout.locate = "keys";
+    cfg.layout.defer = new LayoutSpec.Defer();
+    cfg.layout.defer.share = 0.1;
+    cfg.layout.cut = new LayoutSpec.CutSpec();
+    cfg.layout.cut.strideRows = 200;
+    cfg.layout.compactEvery = 1;
+    cfg.layout.merge = new LayoutSpec.Merge();
+    cfg.layout.merge.fanout = 2;
+    cfg.layout.merge.cold = 2;
+    cfg.layout.merge.rowGroupBytes = 64 << 10;
+    cfg.arms = List.of("rmor-density");
+    return cfg;
+  }
+
+  /**
+   * The merge compaction keeps fewer row groups than RMoR-density without it, in a phase of its
+   * own, and every read is right (the runner checks each one).
+   */
+  @Test
+  void theMergeCompactionKeepsFewerRowGroups(@TempDir Path without, @TempDir Path with)
+      throws IOException {
+    BenchConfig cfg = merged();
+    cfg.layout.merge = null;
+    cfg.layout.compactEvery = 0;
+    List<JsonNode> alone = run(cfg, without);
+    List<JsonNode> steps = run(merged(), with);
+    assertThat(last(steps, "rmor-density", "row_groups"))
+        .isLessThan(last(alone, "rmor-density", "row_groups"));
+    assertThat(sum(steps, "rmor-density", "compact", "bytes_written")).isPositive();
+    assertThat(sum(steps, "rmor-density", "compact", "bytes_read")).isPositive();
+    assertThat(count(alone, "rmor-density", "compact")).isZero();
+  }
+
+  /**
+   * Draining and merging back with no batch-age wait (cold 0), and the delta row groups of one
+   * list a batch ({@code deltas} {@code write}), whose rows wait for several regions: what a fold
+   * takes from one is not moved again.
+   */
+  @Test
+  void theMergeCompactionAtItsMostEager(@TempDir Path region, @TempDir Path write)
+      throws IOException {
+    BenchConfig cfg = merged();
+    cfg.layout.merge.cold = 0;
+    cfg.layout.merge.drain = 0.9;
+    cfg.layout.merge.small = 1;
+    List<JsonNode> steps = run(cfg, region);
+    assertThat(sum(steps, "rmor-density", "compact", "bytes_written")).isPositive();
+    cfg.layout.defer.deltas = "write";
+    steps = run(cfg, write);
+    assertThat(sum(steps, "rmor-density", "compact", "bytes_written")).isPositive();
+  }
+
+  /**
+   * RMoR-density that never copies (θ above 1) is MoR with its new versions in a delta row group
+   * per region; with the merge compaction, those merge in tiers, and fewer row groups stay.
+   */
+  @Test
+  void neverCopyingWithTheMergeCompaction(@TempDir Path without, @TempDir Path with)
+      throws IOException {
+    BenchConfig cfg = merged();
+    cfg.layout.defer.share = 9;
+    cfg.layout.merge = null;
+    cfg.layout.compactEvery = 0;
+    List<JsonNode> alone = run(cfg, without);
+    cfg = merged();
+    cfg.layout.defer.share = 9;
+    List<JsonNode> steps = run(cfg, with);
+    assertThat(sum(steps, "rmor-density", "compact", "bytes_written")).isPositive();
+    assertThat(last(steps, "rmor-density", "row_groups"))
+        .isLessThan(last(alone, "rmor-density", "row_groups"));
+  }
+
+  /**
+   * Leveled under a cap of 1 or 2 (every batch's delta row groups merge into a region's one or two),
+   * every read is right, and no more row groups stay than with tiers.
+   */
+  @Test
+  void theMergeCompactionLeveled(@TempDir Path tiers, @TempDir Path one, @TempDir Path two)
+      throws IOException {
+    BenchConfig cfg = merged();
+    cfg.layout.merge.cap = 0;
+    List<JsonNode> tiered = run(cfg, tiers);
+    cfg.layout.merge.cap = 1;
+    List<JsonNode> steps = run(cfg, one);
+    assertThat(sum(steps, "rmor-density", "compact", "bytes_written")).isPositive();
+    assertThat(last(steps, "rmor-density", "row_groups"))
+        .isLessThanOrEqualTo(last(tiered, "rmor-density", "row_groups"));
+    cfg.layout.merge.cap = 2;
+    cfg.layout.defer.deltas = "write";
+    run(cfg, two);
+  }
+
+  /**
+   * With delta files ({@code defer.deltaFiles}), a write's and the merge compaction's delta row
+   * groups go to files of their own (the arm refuses a file that mixes them), every read is right,
+   * and windows by id send fewer requests: the copies' files keep narrow id bounds. Also when the
+   * arm never copies.
+   */
+  @Test
+  void deltaFilesKeepCopiesApart(@TempDir Path mixed, @TempDir Path apart, @TempDir Path never)
+      throws IOException {
+    BenchConfig cfg = merged();
+    cfg.reads.windows = new BenchConfig.WindowSpec();
+    List<JsonNode> together = run(cfg, mixed);
+    cfg.layout.defer.deltaFiles = true;
+    List<JsonNode> steps = run(cfg, apart);
+    assertThat(sum(steps, "rmor-density", "compact", "bytes_written")).isPositive();
+    assertThat(sum(steps, "rmor-density", "read_window", "requests"))
+        .isLessThan(sum(together, "rmor-density", "read_window", "requests"));
+    cfg.layout.defer.share = 9;
+    run(cfg, never);
+  }
+
+  @Test
+  void anUnknownMergeIsRefused(@TempDir Path dir) {
+    BenchConfig cfg = merged();
+    cfg.layout.merge.fanout = 1;
+    assertThatThrownBy(() -> new Runner(cfg, dir, "t").run())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("merge");
+  }
+
   @Test
   void anUnknownDeltaPlacementIsRefused(@TempDir Path dir) {
     BenchConfig cfg = updates();

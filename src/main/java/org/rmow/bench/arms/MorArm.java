@@ -550,7 +550,16 @@ public abstract class MorArm implements Arm {
    */
   protected void writeDVs(int batch, long seq, Map<Integer, List<Integer>> deleted)
       throws IOException {
-    String location = String.format("%s/deletes/dv-%05d.puffin", ctx.root(), batch);
+    writeDVs(String.format("dv-%05d", batch), "DVs of batch " + batch, seq, deleted);
+  }
+
+  /**
+   * {@link #writeDVs(int, long, Map)} at {@code deletes/<name>.puffin}; {@code what} labels what
+   * it holds.
+   */
+  protected void writeDVs(String name, String what, long seq, Map<Integer, List<Integer>> deleted)
+      throws IOException {
+    String location = String.format("%s/deletes/%s.puffin", ctx.root(), name);
     Map<String, List<Long>> positions = new HashMap<>();
     for (Map.Entry<Integer, List<Integer>> e : deleted.entrySet()) {
       List<Long> ps = new ArrayList<>(e.getValue().size());
@@ -570,7 +579,7 @@ public abstract class MorArm implements Arm {
     for (DeleteFile dv : result.deleteFiles()) {
       built += dv.contentSizeInBytes();
     }
-    Held.pulse(Held.Kind.DELETES, built, "DVs of batch " + batch);
+    Held.pulse(Held.Kind.DELETES, built, what);
     for (DeleteFile dv : result.deleteFiles()) {
       Delete previous = dvOf(dv.referencedDataFile());
       if (previous != null) {
@@ -621,6 +630,16 @@ public abstract class MorArm implements Arm {
    */
   protected List<long[]> readLive(int k, InputFile held, byte[] tail, long start, long length)
       throws IOException {
+    return readLive(k, held, tail, start, length, null);
+  }
+
+  /**
+   * {@link #readLive(int, InputFile, byte[], long, long)}, with the file's deletes loaded once in
+   * {@code cache} (null: loaded for this split alone).
+   */
+  protected List<long[]> readLive(
+      int k, InputFile held, byte[] tail, long start, long length, DeleteCache cache)
+      throws IOException {
     List<long[]> out = new ArrayList<>();
     DataFile df = files.get(k);
     Scans.scan(
@@ -634,7 +653,7 @@ public abstract class MorArm implements Arm {
         tail,
         start,
         length,
-        null,
+        cache,
         b -> b.idVersions(out));
     holdRead(out, df);
     return out;

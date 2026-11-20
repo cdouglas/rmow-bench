@@ -750,6 +750,47 @@ lower.
   - [ ] (planned: density plan, steps 2–5) **Cold pieces merged back,** a **sparse workload** (where density can choose differently
     from "copy what changed"), **cuts of a fixed size** (`copy:shrink:rg`, which first needs the
     model to free killed copies' rows), and the **page-skipping reader** (step 0 done).
+  - [ ] **Later: scheduling the merge compaction, after bLSM** (Sears and Ramakrishnan, SIGMOD
+    2012; the user asked 2026-11-18). Density plan step 3's merge compaction, as modelled
+    ([Step 3: the model](drafts/density-plan-2026-11-16.md#step-3-the-model-2026-11-18)), is a
+    partitioned LSM tree: a region is a partition, its base row group the largest component, its
+    delta row groups the smaller ones, and a copy at θ the merge into the largest. bLSM argues for
+    partitions where writes are skewed (its §2.3.2), as here. What it adds, none of it modelled
+    yet:
+    - **Merges in step, and their spikes.** Partitions alone evolve together when writes spread
+      evenly (§3.2). In the sparse workload every region gets a delta row group every write, so
+      every region's tier merge falls on the same writes: in the first 16 writes the compaction
+      merges only on every fourth, and its largest come at multiples of 16 (120 MB at write 64,
+      448 delta row groups at once, against a mean of 6.3 MB; never copying, 151 to 211 MB at
+      writes 64, 128 and 192, against 7.5). bLSM schedules merges by level as well as by
+      partition: its gear keeps each level's merge in step with what flows into it, and its spring
+      lets the smallest level float between a low and a high water mark, slowing writes only near
+      the high one (§4.1, §4.3). Our row groups merge whole, so the analogue is a byte budget a
+      write given to the regions furthest behind, each region's delta row groups allowed to float
+      between a low and a high count, and the regions' merges offset from each other.
+    - **A bound on what a scan reads.** A scan reads every component (Bloom filters do not help
+      it), and bLSM keeps three for that reason, since updates written as deltas multiply them
+      (§3.3). With the merge, every design still sends 4 to 9 times MoR compacted's requests: a
+      region holds up to F - 1 delta row groups a tier. Full leveling is costly here. bLSM's
+      smallest level is memory; ours is one write's deltas of a region, about 2,200 rows in the
+      sparse workload. Its size ratio, the square root of the data over the smallest level
+      (§2.3.1), is then about 44, and one delta row group a region rewritten every write would
+      merge about 70 MB a write (rough arithmetic) against tiers' 6.3. The middle is tiers at the
+      small end under a cap of 2 or 3 delta row groups a region (Dostoevsky's lazy leveling,
+      SIGMOD 2018). Tiers of 2 instead of 4 already take the locate from 503 requests a write to
+      413, for 9.8 MB merged instead of 6.3.
+    - **θ from the reads as well as the density.** bLSM finds a scan about three times a point
+      lookup's cost, as it reads every component, and data that gathers fewer than two deltas a
+      read better updated in place (§5.6). θ could count how often a region is read, copying it
+      sooner where windows over it are frequent.
+    - **Not for these workloads:** Bloom filters (§3.1) would spare the locate about a fifth of its
+      reads of delta row groups in the sparse workload (a write's 3,000-odd targets in a region of
+      4.26 million rows put about 1.5 in a delta row group of 2,200), and only if held beside the
+      table; snowshoveling (§4.2) needs writes buffered in memory, and ours each commit.
+
+    To try in the model first (`analysis/hybrid_model.py`): the cap, the budget with offset
+    regions, and θ with reads, each judged by requests, the mean and largest compaction, and the
+    windows' bytes, on both workloads.
 - [x] **Hot-region isolation** (folded 2026-11-16 into the density plan: the cut isolates changed
   runs already, and step 3, merging cold pieces back, decides whether hot ones stay apart). Can RMoW
   isolate frequently updated regions as row groups of their own, and so cut its amplification?

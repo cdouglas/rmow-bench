@@ -38,6 +38,11 @@ nondeterministic 6 and 14 of 240, the reader's off-by-one 2 and 4, ends-only 5 a
 two 8 and 22, 2 and 5, the sorted read's skip 1 and 5, the locate by key 1 and none, MoR's stats
 missing deletes 41 and 54. RMoW packing open row groups and the second-row skip: none, as before.
 
+The merge compaction's four (2026-11-18, in worktree merge-compaction, on the laptop: 60 seeds, 3
+workers): a merged-back row group's last row left live 2 of 60, the split dropping a row 5, a tier
+merge losing a row group 4; a moved delta row group taking again what a fold took none (measured;
+DensityTest.theMergeCompactionAtItsMostEager catches it). `none` clean.
+
 Each mutant is an exact-text replacement anchored in the code as this file's last commit left it;
 a replacement that no longer matches is reported, not skipped. Results: DIR/<mutant>/summary-*.jsonl
 and DIR/calibration.txt.
@@ -192,6 +197,57 @@ MUTANTS = {
         "      if (joined.contains(id)) {\n        rows.add(new long[] {id, 0});",
         {"event-time": "run", "mixed": "?run", "heavy": "?run"},
         "the batch's file takes the inserts its row groups took, not those none did",
+    ),
+    # the merge compaction (2026-11-18): rmor-density with layout.merge, which half the seeds draw
+    "merge-back-misses-last-row": (
+        ARMS + "TailCowArm.java",
+        "        moved.add(new Rewrite(u.k(), false, u.first(), u.rows(), 0, -1, -1, live.size(), null));\n"
+        "        Integer region = regionAt.get(u.key());",
+        "        moved.add(new Rewrite(u.k(), false, u.first(), u.rows() - 1, 0, -1, -1, live.size(), null));\n"
+        "        Integer region = regionAt.get(u.key());",
+        "run",
+        "a row group merged back keeps its last row live under the DV that covers it",
+    ),
+    "merge-moves-folded-rows": (
+        ARMS + "TailCowArm.java",
+        "    live.removeIf(r -> folded.contains(r[0]));\n    return live;",
+        "    return live;",
+        "?run",
+        "a delta row group the compaction moves takes again the rows a fold of it took (measured,"
+        " not required: it needs a fold and a move of one delta row group in one compaction, none"
+        " of 60 seeds; DensityTest.theMergeCompactionAtItsMostEager catches it)",
+    ),
+    "merge-split-drops-a-row": (
+        ARMS + "TailCowArm.java",
+        "          (int) ((long) rows.size() * i / n), (int) ((long) rows.size() * (i + 1) / n))));",
+        "          (int) ((long) rows.size() * i / n),\n"
+        "          (int) Math.max((long) rows.size() * i / n, (long) rows.size() * (i + 1) / n - 1))));",
+        "run",
+        "the compaction's split into row groups drops the last row of each",
+    ),
+    "merge-tier-loses-a-row-group": (
+        ARMS + "TailCowArm.java",
+        "      read += u.live();\n      rows.addAll(live);\n      moved.add(",
+        "      read += u.live();\n      if (u != m.units.get(m.units.size() - 1)) {\n"
+        "        rows.addAll(live);\n      }\n      moved.add(",
+        "run",
+        "a merge of delta row groups loses the rows of its last, which its DV still hides",
+    ),
+    "delta-file-never-written": (
+        ARMS + "TailCowArm.java",
+        "              int k = out.finish(seq);\n              if (deltaOut != out) {\n"
+        "                deltaOut.finish(seq);",
+        "              int k = out.finish(seq);\n              if (deltaOut == null) {\n"
+        "                deltaOut.finish(seq);",
+        "run",
+        "with delta files, a write's file of delta row groups is never written: its rows are lost",
+    ),
+    "merge-delta-file-never-written": (
+        ARMS + "TailCowArm.java",
+        "      for (int i = 0; i < open.length; i++) {",
+        "      for (int i = 0; i < 1; i++) {",
+        "run",
+        "with delta files, the merge compaction's last file of delta row groups is never written",
     ),
     "mor-stats-miss-deletes": (
         ARMS + "MorArm.java",
