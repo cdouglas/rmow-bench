@@ -1877,3 +1877,90 @@ run of each configuration checked every row it read, and `steps_diff` ties each 
   `w128` run of the configuration and its earlier twin (`steps_diff`).
 - **What the oracle cost these reads:** each read's user-mode instructions against the earlier
   twin's, and the writes' and compactions', which never ran it.
+
+## The merge compaction and delta files at 128 MiB (registered 2026-11-20)
+
+**What it decides:** whether RMoR-density keeps the reads its copies buy once a compaction planned
+from its density signal merges what its writes leave behind, and what those copies buy over MoR
+whose new versions are kept by key range and merged the same way. RMoR-density's write copies a row
+group once its dead rows and the write's changes reach θ of it, and leaves the other new versions
+in a delta row group per region. Under sparse changes those pile up: the model's sparse workload
+ends with 2,777 row groups and a write's locate sends 3,508 requests, against MoR's 289 and 1,025
+(docs/drafts/density-plan-2026-11-16.md, step 2). The merge compaction (step 3; `layout.merge`,
+built 2026-11-18, capped 2026-11-19) runs after every write as a transaction of its own: it merges
+each region's delta row groups, at most 3 a region, leveled; merges runs of adjacent row groups no
+write changed for 20 writes back into row groups of 32 MiB; and drains files under half live. With
+delta files (`layout.defer.deltaFiles`, 2026-11-20) the delta row groups of a write and of a
+compaction go to files of their own, so the copies' files keep narrow id bounds in the manifest,
+and a window skips them.
+
+**The forecast** (the model, `analysis/hybrid_model.py`, on each workload's op log; the step's
+"model revised" tables):
+
+| | write MB | merge MB | locate requests, last 10 writes | full scan requests | 1% window requests | window bytes / live |
+|---|---|---|---|---|---|---|
+| **Clustered** (`w128k-upd-*`) | | | | | | |
+| MoR | 3.6 | | 967 | 791 | 647 | 16.7 |
+| MoR compacted | 3.6 | 40.5 | 54 | 82 | 9 | 7.0 |
+| RMoR-density θ 0.06 | 52 | | 534 | 1,114 | 323 | 1.69 |
+| + merge, delta files | 50 | 18.9 | 314 | 680 | 144 | 1.74 |
+| θ 0.15 + merge, delta files | 13.4 | 13.9 | 216 | 366 | 90 | 3.04 |
+| MoR (deltas by key range) | 3.6 | 15.1 | 195 | 276 | 91 | 3.78 |
+| **Sparse** (`w128s-upd-*`) | | | | | | |
+| MoR | 3.6 | | 1,025 | 794 | 723 | 18.3 |
+| MoR compacted | 3.6 | 39.5 | 104 | 82 | 9 | 6.9 |
+| RMoR-density θ 0.06 | 54 | | 3,508 | 3,258 | 551 | 3.37 |
+| + merge, delta files | 54 | 16.2 | 334 | 274 | 51 | 3.37 |
+| θ 0.15 + merge, delta files | 11.8 | 22.5 | 314 | 270 | 57 | 3.61 |
+| MoR (deltas by key range) | 3.6 | 24.6 | 293 | 256 | 63 | 3.78 |
+
+Write and merge MB are means a write over the 240; the reads are those after the last write. On
+the clustered runs that stand (w128-keys-2), the model came within 8% of the measured full scans'
+and windows' requests and the locate's, except MoR compacted's full scan (82 against 101).
+
+**Setup:**
+- **Configurations:** `configs/w128k-upd-{density-merge,density15-merge,keyrange}.json` (clustered:
+  the `w128k-upd-density` configuration with the merge and delta files, at θ 0.06, 0.15 and 9) and
+  `configs/w128s-upd-{mor,compact,density,density-merge,density15-merge,keyrange}.json` (sparse:
+  the same with `updateShare` 0: each change a statement of its own, one row of a region picked by
+  its heat, where the clustered workload's statements each change 3% of a region's rows). The clustered MoR, MoR compacted and RMoR-density runs stand from w128-keys-2;
+  the build they ran on matches this one record for record where the new settings are absent (the
+  parity check, two configurations, all arms).
+- **Where:** the laptop (the user, 2026-11-20), one run at a time under the laptop lock, with 12g
+  heaps and requests logged (about 18 to 23 hours), clustered runs first, from one build snapshot
+  of the worktree `merge-compaction` before it is committed: the snapshot keeps its diff, this
+  section included. Its fork is atomicio 62cdc89288 on core-perf cd7428b324; the parity check runs
+  on the snapshot before the first run. Verification twins (`--verify`) follow, where the user
+  decides, and vouch for each run (`steps_diff`) before the write-up.
+
+**How it is judged:** by the runs' requests and bytes (deterministic): the locate's over the last 10
+writes, a full scan's and the 1% windows' after the last write, bytes written by the writes and by
+the compaction. Latency simulated on S3 Express and Azure Blob is reported, not judged: the model
+does not price it.
+
+**Predicted:**
+- **P1: the merge stops the pile-up.** In the sparse workload, RMoR-density with the merge (θ 0.06)
+  sends at most 0.2 of RMoR-density's locate requests a write over the last 10 writes, and at most
+  0.2 of its full scan's requests (forecast 0.10 and 0.08). In the clustered workload, at most 0.8
+  of each (forecast 0.59 and 0.61, against the w128-keys-2 run).
+- **P2: with delta files, the merge keeps the copies' windows.** In the clustered workload, a 1%
+  window of RMoR-density with the merge (θ 0.06) reads at most 1.15 times RMoR-density's bytes
+  against live, and sends at most 0.6 of its requests (forecast 1.03 and 0.45).
+- **P3: where copies pay.** Against MoR (deltas by key range), RMoR-density with the merge at θ 0.06
+  reads at most 0.6 of its window bytes in the clustered workload (forecast 0.46), and at least 0.8
+  in the sparse (forecast 0.89): copies buy most where changes cluster.
+- **P4: the writes.** Each merge run's compaction writes at most 30 MB a write on average (forecast
+  14 to 25), against MoR compacted's 40; MoR (deltas by key range) writes, with its merges, at most
+  half of what RMoR-density with the merge at θ 0.06 writes (forecast 0.27 clustered, 0.40 sparse).
+
+**Measured, not judged:** θ 0.15 against θ 0.06 and the control; the requests every merge design
+sends against MoR compacted's (the model: 3 to 8 times its full scan's, 6 to 16 times its windows');
+the largest compaction; files and row groups; the work of the compaction phase; simulated latency.
+
+**Limits:**
+- **One seed a workload,** and the merge's settings fixed (cap 3, cold after 20 writes, 32 MiB,
+  drain under half live), not swept.
+- **The windows' forecast** rests on a fix to the model (a window opens every file whose id bounds
+  overlap it) checked against one run (323 requests against 299).
+- **The catalog's side is not measured:** a write with delta files commits two data files, and a
+  compaction its own transaction; neither commit is priced here.
