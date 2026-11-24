@@ -1,0 +1,16 @@
+{
+  "description": "Verification runs (--verify; docs/HARNESS.md, Correctness) of campaign w128-merge's nine configurations (the merge compaction and delta files at 128 MiB, docs/HYPOTHESES.md, registered 2026-11-20): every read checks each row it returns against the reference model. Nothing is measured: the laptop's runs measure, and these vouch for them request for request and byte for byte (steps_diff). Built from this commit, on the fork the laptop's runs used (atomicio 62cdc89288, core-perf cd7428b324). Longest jobs first; store_gib is each run's peak stored bytes with a margin.",
+  "flags": ["--verify"],
+  "cores_per_job": 2,
+  "jobs": [
+    {"config": "configs/w128s-upd-density.json", "heap": "32g", "store_gib": 28},
+    {"config": "configs/w128s-upd-mor.json", "heap": "32g", "store_gib": 15},
+    {"config": "configs/w128s-upd-compact.json", "heap": "32g", "store_gib": 30},
+    {"config": "configs/w128s-upd-keyrange.json", "heap": "32g", "store_gib": 22},
+    {"config": "configs/w128s-upd-density15-merge.json", "heap": "32g", "store_gib": 23},
+    {"config": "configs/w128s-upd-density-merge.json", "heap": "32g", "store_gib": 32},
+    {"config": "configs/w128k-upd-keyrange.json", "heap": "32g", "store_gib": 17},
+    {"config": "configs/w128k-upd-density15-merge.json", "heap": "32g", "store_gib": 19},
+    {"config": "configs/w128k-upd-density-merge.json", "heap": "32g", "store_gib": 30}
+  ]
+}
