@@ -115,7 +115,11 @@ keep the designs' reads and writes comparable to stock Iceberg's. All of it is i
 - **The simulation checked in the cloud** at 16 MiB row groups (2026-11-11): priced from each VM's
   own latency test, within 4.0% of measured on S3 Express and 12.3% on Azure Blob
   ([lab/pages/simulation-cloud.md](lab/pages/simulation-cloud.md)).
+- **The merge compaction at 128 MiB** ([lab/pages/merge-128.md](lab/pages/merge-128.md), density
+  plan steps 2 and 3, 2026-11-21): under changes spread one row at a time, RMoR-density's delta row
+  groups pile up (a write's search for its rows climbs to 4,666 requests); a compaction that merges
+  them back holds it at 387, and the copies still read a 1% range in 0.43 of the bytes of MoR
+  whose new versions are kept by key range where changes cluster, 0.92 where they are spread.
 - **Next:** the density plan
-  ([docs/drafts/density-plan-2026-11-16.md](docs/drafts/density-plan-2026-11-16.md)): a compaction
-  that merges RMoR-density's pieces back (step 3), the sparse workload where θ chooses which row
-  groups to copy (step 2), then the cloud run at 128 MiB ([docs/ROADMAP.md](docs/ROADMAP.md)).
+  ([docs/drafts/density-plan-2026-11-16.md](docs/drafts/density-plan-2026-11-16.md)): a reader that
+  skips pages and part copies, then the cloud run at 128 MiB ([docs/ROADMAP.md](docs/ROADMAP.md)).

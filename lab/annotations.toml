@@ -44,7 +44,7 @@ select = ["where:label LIKE 'w128k-%' AND json_extract(manifest, '$.verify') IS 
 
 [campaigns.w128-keys-2]
 title = "Campaign w128-keys again, measured without the oracle in the reads (2026-11-17, docs/HARNESS.md, Correctness: they only count their rows), on the laptop alone, one at a time with requests logged, from a build snapshot of main; and a verification run of each (--verify, on havoc, excluded), which steps_diff ties to it. The results pages time the updates from these runs; suite-128.md judged K1-K3 on w128-keys"
-select = ["where:label LIKE 'w128k-%' AND json_extract(manifest, '$.verify') IS NOT NULL"]
+select = ["where:label LIKE 'w128k-%' AND json_extract(manifest, '$.verify') IS NOT NULL AND started_at < TIMESTAMP '2026-11-19'"]
 
 [campaigns.diag-mor]
 title = "A diagnostic of MoR's full scans under locate keys (docs/HYPOTHESES.md, 2026-11-17): w128k-upd-mor and w128-upd-mor for 20 writes each, on the laptop one at a time from build snapshot 20261117T005411Z-202bc66bc369, with the JIT's compilation log and the GC log (in the snapshot's logs/diag); every record equals the first 20 writes of its 240-write run (steps_diff)"
@@ -57,6 +57,14 @@ select = ["where:label LIKE 'diag-mor-%' AND json_extract(manifest, '$.verify') 
 [campaigns.prices]
 title = "The two latency tests (spikes) the simulated pages price requests with (analysis/tune.py SPIKES; region-cut): S3 Express from the base point's c7a.4xlarge in usw2-az3, and Azure Blob from a D8as_v6 in westus, both 2026-10-31 at 6f24575"
 select = ["spike/s3x-spike-20261031T163533Z", "spike/azure-spike-20261031T234510Z"]
+
+[campaigns.w128-merge]
+title = "The merge compaction at 128 MiB (docs/HYPOTHESES.md P1-P4, 2026-11-20; density plan steps 2 and 3): RMoR-density with the merge and delta files at theta 0.06 and 0.15, and the control that never copies (theta 9, MoR (deltas by key range)), on the clustered workload; those and MoR, MoR (compacted) and RMoR-density on the sparse workload (updateShare 0). On the laptop, one at a time with a 12g heap and requests logged, from build snapshot 20261120T075226Z-725a8cf399f4-dirty (branch merge-compaction's 43f3123 and 508a718, the fork at 62cdc89288). The clustered baselines are w128-keys-2's. Write-up: pages/merge-128.md"
+select = ["where:label LIKE 'w128%-upd-%' AND started_at >= TIMESTAMP '2026-11-20 07:00:00' AND started_at < TIMESTAMP '2026-11-21 05:00:00'"]
+
+[campaigns.w128-merge-verify]
+title = "A verification run (--verify, every row checked, excluded) of each of campaign w128-merge's nine runs, on the laptop from the same build snapshot, 2026-11-24/25 (havoc's first attempt died when its disk filled). Each run's records equal its measured run's (steps_diff)"
+select = ["where:label LIKE 'w128%-upd-%' AND started_at >= TIMESTAMP '2026-11-24 17:00:00' AND started_at < TIMESTAMP '2026-11-25 18:00:00'"]
 [[annotate]]
 select = "where:coalesce(try_cast(json_extract(manifest, '$.verify') AS BOOLEAN), false)"
 mark = "excluded"
